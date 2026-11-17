@@ -332,6 +332,7 @@ window.WORLD_ENGINE_UI = (function() {
             <span class="we-header-dot"></span>
             <span class="we-header-mood-text"></span>
           </div>
+          <div class="we-face-switcher" id="we-face-switcher" role="tablist" aria-label="引擎模块切换"></div>
         </div>
         <div class="we-panel-corner-actions">
           <button class="we-panel-close">✕</button>
@@ -359,6 +360,15 @@ window.WORLD_ENGINE_UI = (function() {
       event.stopPropagation();
       advanceEngineFace();
     };
+    const switcher = panel.querySelector('#we-face-switcher');
+    if (switcher) {
+      switcher.onclick = (event) => {
+        const btn = event.target?.closest?.('[data-switch-face]');
+        if (!btn) return;
+        event.stopPropagation();
+        switchEngineFace(btn.dataset.switchFace);
+      };
+    }
     initDrag(panel, panel.querySelector('.we-panel-header'));
 
     document.addEventListener('keydown', function(e) {
@@ -1512,6 +1522,36 @@ window.WORLD_ENGINE_UI = (function() {
       + '</div>';
   }
 
+  function syncFaceSwitcherState() {
+    if (!panelElement) return;
+    const switcher = panelElement.querySelector('#we-face-switcher');
+    if (!switcher) return;
+    ensureBuiltinEngineFaces();
+    if (_engineFaceOrder.length <= 1) {
+      switcher.innerHTML = '';
+      switcher.style.display = 'none';
+      return;
+    }
+    switcher.style.display = '';
+    const currentOrder = _engineFaceOrder.join(',');
+    if (switcher.dataset.faceOrder !== currentOrder) {
+      switcher.dataset.faceOrder = currentOrder;
+      switcher.innerHTML = _engineFaceOrder.map(id => {
+        const reg = getEngineFace(id);
+        return `<button type="button" class="we-face-pill" data-switch-face="${h(id)}" role="tab"><span class="we-face-pill-dot" aria-hidden="true"></span><span>${h(reg?.label || id)}</span></button>`;
+      }).join('');
+    }
+    switcher.querySelectorAll('.we-face-pill').forEach(btn => {
+      const id = btn.dataset.switchFace;
+      const reg = getEngineFace(id);
+      const active = id === _engineFace;
+      const running = Boolean(callEngineFace(reg, 'isRunning', false));
+      btn.classList.toggle('is-active', active);
+      btn.classList.toggle('is-running', running);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+
   function updateEngineFaceChrome() {
     if (!panelElement) return;
     const face = getEngineFace();
@@ -1537,6 +1577,7 @@ window.WORLD_ENGINE_UI = (function() {
       version.textContent = value ? 'v' + value : '';
       version.style.display = value ? '' : 'none';
     }
+    syncFaceSwitcherState();
     syncBallFace();
   }
 
@@ -1659,7 +1700,17 @@ window.WORLD_ENGINE_UI = (function() {
         const header = document.getElementById('we-header-round');
         const mood = document.getElementById('we-header-mood');
         if (header) header.textContent = String(callEngineFace(currentFace, 'getHeaderText', '') || '');
-        if (mood) mood.style.display = 'none';
+        const customMood = typeof currentFace.getHeaderMood === 'function' ? callEngineFace(currentFace, 'getHeaderMood', null) : null;
+        if (mood && customMood && customMood.text) {
+          mood.style.display = '';
+          const dot = mood.querySelector('.we-header-dot');
+          const txt = mood.querySelector('.we-header-mood-text');
+          const color = customMood.color || 'var(--we-accent)';
+          if (dot) { dot.style.background = color; dot.style.boxShadow = '0 0 6px ' + color; }
+          if (txt) { txt.textContent = String(customMood.text); txt.style.color = color; }
+        } else if (mood) {
+          mood.style.display = 'none';
+        }
       }
       bindEvents(null);
       callEngineFace(currentFace, 'bind', undefined, panelBodyElement);
@@ -1857,6 +1908,55 @@ window.WORLD_ENGINE_UI = (function() {
       + '</div></div>';
   }
 
+  function getOutlineEntrySummary() {
+    if (!_engineFaceRegistry.has('outline')) return null;
+    try {
+      const outlineState = window.OUTLINE_ENGINE_DATA?.loadState?.() || {};
+      const outlineSettings = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true) || {};
+      const plan = outlineState.plan || {};
+      const chapters = Array.isArray(plan.chapters) ? plan.chapters : [];
+      const nodes = Array.isArray(plan.nodes) ? plan.nodes : chapters.flatMap(ch => ch.nodes || []);
+      const cur = chapters.find(ch => ch.id === outlineState.currentChapterId) || chapters[0] || null;
+      const enabled = outlineSettings.engineEnabled === true;
+      const chapterText = cur ? (cur.title || '未命名章节') : '尚未建纲';
+      const sub = chapters.length
+        ? `${chapterText} · ${chapters.length} 章 / ${nodes.length} 节点${enabled ? '' : '（未启用）'}`
+        : `章节进度 · 剧情线 · 线索调度${enabled ? '' : '（未启用）'}`;
+      return {
+        enabled,
+        title: plan.title || '尚未设置剧情大纲',
+        chapterText,
+        chaptersCount: chapters.length,
+        nodesCount: nodes.length,
+        sub
+      };
+    } catch (_) {
+      return {
+        enabled: false,
+        title: '剧情大纲',
+        chapterText: '',
+        chaptersCount: 0,
+        nodesCount: 0,
+        sub: '章节进度 · 跨章剧情线 · 线索调度'
+      };
+    }
+  }
+
+  function renderOutlineExpandedEntry() {
+    const info = getOutlineEntrySummary();
+    if (!info) return '';
+    const statusText = info.enabled ? '已启用' : '未启用';
+    return '<div class="we-section we-outline-entry-card" id="we-sec-outline-entry">'
+      + '<div class="we-section-title">剧情大纲<span class="we-section-motto">— 草蛇灰线，伏脉千里</span></div>'
+      + '<div class="we-outline-entry-body">'
+      + '<div class="we-outline-entry-meta">'
+      + '<div class="we-outline-entry-name">' + h(info.title) + '</div>'
+      + '<div class="we-outline-entry-sub">' + h(info.sub) + ' · ' + h(statusText) + '</div>'
+      + '</div>'
+      + '<button type="button" class="we-btn we-btn-primary" data-switch-face="outline">打开剧情大纲</button>'
+      + '</div></div>';
+  }
+
   function renderHomeView(s, layer, scope) {
     const stab = computeWorldStability(s);
     const tierColor = STABILITY_TIER_COLOR[stab.tier] || '#58b8a9';
@@ -1867,15 +1967,21 @@ window.WORLD_ENGINE_UI = (function() {
       { view: 'relations', label: '关系', sub: '声誉 · 势力 · 仇敌录',       poem: '同声相应，同气相求' },
       { view: 'resources', label: '资源', sub: '经济 · 秘密',               poem: '地藏无尽藏' },
     ];
+    const outlineInfo = getOutlineEntrySummary();
+    if (outlineInfo) {
+      rows.push({ face: 'outline', label: '大纲', sub: outlineInfo.sub, poem: '草蛇灰线，伏脉千里' });
+    }
 
     const navRows = rows.map((r, i) => {
       const topLine = i === 0 ? '<div class="we-nav-line we-nav-line-hidden"></div>' : '<div class="we-nav-line"></div>';
       const botLine = i === rows.length - 1 ? '<div class="we-nav-line we-nav-line-hidden"></div>' : '<div class="we-nav-line"></div>';
-      const sel = _selectedNavView === r.view ? ' we-nav-row--selected' : '';
-      return '<div class="we-nav-row' + sel + '" data-view="' + r.view + '">'
+      const navKey = r.face ? 'face:' + r.face : r.view;
+      const sel = _selectedNavView === navKey ? ' we-nav-row--selected' : '';
+      const attr = r.face ? 'data-face="' + h(r.face) + '"' : 'data-view="' + h(r.view) + '"';
+      return '<div class="we-nav-row' + sel + '" ' + attr + '>'
         + '<div class="we-nav-label">' + r.label + '</div>'
         + '<div class="we-nav-track">' + topLine + '<div class="we-nav-dot"></div>' + botLine + '</div>'
-        + '<div class="we-nav-content"><span class="we-nav-sub">' + r.sub + '</span><span class="we-nav-poem">' + r.poem + '</span></div>'
+        + '<div class="we-nav-content"><span class="we-nav-sub">' + h(r.sub) + '</span><span class="we-nav-poem">' + h(r.poem) + '</span></div>'
         + '<i class="fa-solid fa-chevron-right we-nav-arrow"></i>'
         + '</div>';
     }).join('');
@@ -1889,6 +1995,7 @@ window.WORLD_ENGINE_UI = (function() {
   function renderHomeViewExpanded(s, layer, scope) {
     return renderWorldCore(s)
       + renderWorldDigest(s, scope)
+      + renderOutlineExpandedEntry()
       + renderSection('天下大势', 'trends', renderWorldTrends(s.worldTrends, scope))
       + renderSection('区域事件', 'regional', renderRegionalIncident(s.regionalIncident, scope))
       + renderSection('事件链', 'events', renderEventList(s.events, scope))
@@ -4571,6 +4678,25 @@ window.WORLD_ENGINE_UI = (function() {
       };
     });
 
+    document.querySelectorAll('.we-nav-row[data-face]').forEach(row => {
+      row.onclick = () => {
+        const key = 'face:' + row.dataset.face;
+        if (_selectedNavView === key) {
+          _selectedNavView = null;
+          switchEngineFace(row.dataset.face);
+        } else {
+          _selectedNavView = key;
+          refresh();
+        }
+      };
+    });
+
+    if (panelBodyElement) {
+      panelBodyElement.querySelectorAll('[data-switch-face]').forEach(btn => {
+        btn.onclick = () => switchEngineFace(btn.dataset.switchFace);
+      });
+    }
+
     // 点击导航列表以外的地方取消选中
     const panelBody = panelBodyElement;
     if (panelBody) {
@@ -5905,7 +6031,7 @@ window.WORLD_ENGINE_UI = (function() {
     handle.style.cursor = 'grab';
 
     handle.addEventListener('mousedown', function(e) {
-      if (e.target.closest('.we-panel-close') || e.target.closest('.we-panel-corner-actions') || e.target.closest('.we-engine-face-toggle')) return;
+      if (e.target.closest('.we-panel-close') || e.target.closest('.we-panel-corner-actions') || e.target.closest('.we-engine-face-toggle') || e.target.closest('.we-face-switcher')) return;
       dragging = true;
       const rect = panel.getBoundingClientRect();
       startX = e.clientX; startY = e.clientY;
@@ -6313,6 +6439,7 @@ window.WORLD_ENGINE_UI = (function() {
       : `${face.label}：单击打开面板`;
     ball.setAttribute('aria-label', ball.title);
     if (active) ball.classList.remove('we-ball-success', 'we-ball-fail');
+    syncFaceSwitcherState();
   }
 
   function syncBallFace() {

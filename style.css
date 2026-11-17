@@ -611,14 +611,97 @@
 #we-panel.we-memory-face .we-header-round {
   visibility: hidden;
 }
-#we-panel.we-memory-face .we-header-mood {
+#we-panel.we-memory-face .we-header-mood,
+#we-panel.we-outline-face .we-header-mood {
   visibility: visible;
 }
-#we-panel.we-memory-face .we-header-mood-text {
+#we-panel.we-memory-face .we-header-mood-text,
+#we-panel.we-outline-face .we-header-mood-text {
   font-size: 11px;
   font-weight: 400;
   letter-spacing: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 顶部引擎模块切换条：并列展示已加载引擎，保持宋体金墨克制质感 */
+.we-face-switcher {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.we-face-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid var(--we-hairline);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--we-card) 80%, transparent);
+  color: var(--we-text3);
+  font-family: "SimSun", "宋体", "Songti SC", "STSong", serif;
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+.we-face-pill:hover {
+  color: var(--we-text);
+  border-color: var(--we-border);
+  background: var(--we-surface);
+}
+.we-face-pill.is-active {
+  color: var(--we-gold);
+  border-color: color-mix(in srgb, var(--we-gold) 58%, var(--we-border));
+  background: color-mix(in srgb, var(--we-gold) 12%, var(--we-surface));
+}
+.we-face-pill-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+.we-face-pill.is-active .we-face-pill-dot {
+  opacity: 1;
+}
+.we-face-pill.is-running .we-face-pill-dot {
+  background: var(--we-accent);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--we-accent);
+  animation: we-face-pill-pulse 1.4s ease-in-out infinite;
+}
+@keyframes we-face-pill-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* 展开模式下主界面的剧情大纲入口卡片 */
+.we-outline-entry-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.we-outline-entry-meta {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+.we-outline-entry-name {
+  font-family: "SimSun", "宋体", "Songti SC", "STSong", serif;
+  font-size: 14px;
+  color: var(--we-beige);
+}
+.we-outline-entry-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--we-text3);
 }
 
 .we-memory-settings-empty {
