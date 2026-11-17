@@ -22,9 +22,15 @@ window.OUTLINE_ENGINE = (function() {
   function chatId() { return clean(context()?.chatId || window.WORLD_ENGINE_CORE?.getChatId?.() || 'default'); }
   function chat() { return context()?.chat || []; }
   function currentLayer() { return Math.max(0, chat().length - 1); }
+  function setExternalStatus(text, isError) {
+    try {
+      if (typeof window.__WE_SetExternalStatus === 'function') window.__WE_SetExternalStatus(text, !!isError);
+    } catch (_) {}
+  }
   function refresh() {
     try { window.OUTLINE_ENGINE_UI?.refresh?.(); } catch (error) { console.warn('[剧情大纲] 刷新界面失败', error); }
     try { window.WORLD_ENGINE_UI?.refresh?.(true); } catch (_) { /* 界面故障不影响进度。 */ }
+    try { window.WORLD_ENGINE_UI?.updateBallControls?.(); } catch (_) {}
   }
   function hash(value) { return timeline().hashText(typeof value === 'string' ? value : JSON.stringify(value)); }
   function chapterOf(state) { return state.plan?.chapters?.find(item => item.id === state.currentChapterId) || null; }
@@ -239,7 +245,9 @@ window.OUTLINE_ENGINE = (function() {
     const task = { controller: new AbortController(), token: sessionToken, chatId: chatId(),
       revision: state.revision, basis: basisDigest(state), refs: clone(refs || []),
       sourceDigest: timeline().digestRefs(refs || []), historyHead: history()?.getStatus?.().currentCommitId || '', apiSource: settings().apiSource, options, label };
-    request = task; lastError = ''; refresh();
+    request = task; lastError = '';
+    setExternalStatus(`剧情大纲：正在${label || '处理'}…`);
+    refresh();
     return task;
   }
   function isCurrent(task, checkSources) {
@@ -276,8 +284,15 @@ window.OUTLINE_ENGINE = (function() {
     try {
       const raw = await invoke(task, prompts().buildOrganizePrompt(clean(text)));
       if (!isCurrent(task, false)) throw new Error('聊天或大纲已变化，整理结果已丢弃');
-      return prompts().parseOrganizeResponse(raw);
-    } catch (error) { lastError = clean(error.message || error); throw error; }
+      const parsed = prompts().parseOrganizeResponse(raw);
+      setExternalStatus('剧情大纲整理完成');
+      return parsed;
+    } catch (error) {
+      lastError = clean(error.message || error);
+      if (task?.controller.signal.aborted) setExternalStatus('剧情大纲整理已停止');
+      else setExternalStatus(`剧情整理失败：${lastError}`, true);
+      throw error;
+    }
     finally { finish(task); }
   }
 
@@ -504,10 +519,15 @@ window.OUTLINE_ENGINE = (function() {
       if (history()) history().recordOutlineCommit(beforeAutomatic, state, selection.refs); else data().saveState(state);
       await window.WORLD_ENGINE_STORE?.flush?.();
       applyInjection(); refresh();
+      setExternalStatus('剧情检查完成');
       return { ok: true, checked: true, completed, proposals };
     } catch (error) {
-      if (task?.controller.signal.aborted) return { ok: false, reason: 'aborted' };
+      if (task?.controller.signal.aborted) {
+        setExternalStatus('剧情检查已停止');
+        return { ok: false, reason: 'aborted' };
+      }
       lastError = clean(error.message || error); console.warn('[剧情大纲] 检查失败（已隔离）', error);
+      setExternalStatus(`剧情检查失败：${lastError}`, true);
       return { ok: false, reason: lastError };
     } finally { if (task) finish(task); }
   }

@@ -378,6 +378,7 @@
 #we-input-btn.we-ball > .we-sat-down  { bottom: -22px; left: 50%;  transform: translateX(-50%); }
 #we-input-btn.we-ball > .we-sat-right { right: -22px;  top: 50%;   transform: translateY(-50%); }
 #we-input-btn.we-ball > .we-sat-left  { left: -22px;   top: 50%;   transform: translateY(-50%); }
+#we-input-btn.we-ball > .we-sat-lower-left  { left: -12px;  bottom: -12px; }
 #we-input-btn.we-ball > .we-sat-lower-right { right: -12px; bottom: -12px; }
 
 /* 右下角第五颗卫星始终显示另一引擎：世界面为记忆指纹行星，记忆面为小地球。 */

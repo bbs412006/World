@@ -38,7 +38,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       view: 'home', selectedNavView: null, settingsOpen: false, settingsTab: 'common', settingsDraft: null, editorOpen: false,
       plan: null, expectedRevision: null, expectedPlanSnapshot: '', selectedChapterId: '', lastCurrentChapterId: '', sourceText: '',
       textOpen: false, preview: null, previewRevision: null, previewPlanSnapshot: '', pendingJson: null,
-      snapshotName: '', newFlagId: '', newFlagValue: true, message: '', error: false, busy: false
+      snapshotName: '', newFlagId: '', newFlagValue: true, fetchedModels: [], fetchingModels: false, message: '', error: false, busy: false
     });
     return drafts.get(id);
   }
@@ -540,11 +540,18 @@ window.OUTLINE_ENGINE_UI = (function() {
             <div class="we-outline-form-grid">
               ${field('API URL（含版本前缀）', 'apiUrl', value.apiUrl || '')}
               ${field('API Key', 'apiKey', value.apiKey || '', { type: 'password' })}
+            </div>
+            <div class="we-outline-model-row">
               ${field('模型', 'model', value.model || '')}
+              ${button('fetch-models', draft.fetchingModels ? '获取中…' : '获取列表', ` id="we-outline-fetch-models"${draft.fetchingModels ? ' disabled' : ''}`)}
+            </div>
+            ${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? `<label class="we-outline-field"><span>选择已拉取模型</span><select id="we-outline-model-list"><option value="">-- 选择模型（共 ${draft.fetchedModels.length} 个）--</option>${draft.fetchedModels.map(m => `<option value="${h(m)}"${String(value.model || '') === String(m) ? ' selected' : ''}>${h(m)}</option>`).join('')}</select></label>` : ''}
+            <div class="we-outline-form-grid">
               ${field('连接方式', 'connectionMode', value.connectionMode || 'direct', { choices: [['direct', '浏览器直连'], ['proxy', '经酒馆服务端代理']] })}
               ${field('温度', 'temperature', value.temperature ?? 0.2, { type: 'number', min: 0, step: 0.1 })}
               ${field('最大输出 tokens', 'maxTokens', value.maxTokens ?? 8192, { type: 'number', min: 1, step: 1 })}
               ${field('请求超时（秒，0 为不限）', 'apiTimeoutSeconds', (value.apiTimeoutMs ?? 120000) / 1000, { type: 'number', min: 0, step: 1 })}
+              ${field('API 异常自动重试次数', 'apiAutoRetries', value.apiAutoRetries ?? 0, { type: 'number', min: 0, step: 1 })}
             </div>
           </fieldset>
         </div>`,
@@ -779,6 +786,14 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (element.id === 'we-outline-snapshot-name') draft.snapshotName = element.value;
     else if (element.id === 'we-outline-flag-name') draft.newFlagId = element.value;
     else if (element.id === 'we-outline-flag-value') draft.newFlagValue = element.checked;
+    else if (element.id === 'we-outline-model-list') {
+      if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
+      if (element.value) {
+        draft.settingsDraft.model = element.value;
+        const modelInput = typeof document !== 'undefined' ? document.getElementById('we-outline-model') : null;
+        if (modelInput) modelInput.value = element.value;
+      }
+    }
     else if (element.id === 'we-outline-import-progress' && draft.pendingJson) draft.pendingJson.includeProgress = element.checked;
     else if (ds.outlineSetting) {
       if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
@@ -934,14 +949,32 @@ window.OUTLINE_ENGINE_UI = (function() {
       commitReviewedPlan(draft.plan, draft.expectedRevision, draft.expectedPlanSnapshot);
       draft.plan = null; draft.editorOpen = false; draft.message = '大纲已保存。'; draft.error = false;
       engine()?.applyInjection?.();
+    } else if (action === 'fetch-models') {
+      const api = window.WORLD_ENGINE_API;
+      if (!api?.fetchModelList) throw new Error('模型列表接口尚未就绪。');
+      const cfg = clone(draft.settingsDraft || settings());
+      if (cfg.apiSource !== 'custom') throw new Error('请先将 API 来源切换为“剧情模块独立 API”。');
+      draft.fetchingModels = true;
+      draft.message = '正在获取模型列表…';
+      draft.error = false;
+      refresh();
+      try {
+        const models = await api.fetchModelList(cfg);
+        draft.fetchedModels = Array.isArray(models) ? models : [];
+        draft.message = draft.fetchedModels.length ? `获取到 ${draft.fetchedModels.length} 个模型。` : '模型列表为空。';
+        draft.error = false;
+      } finally {
+        draft.fetchingModels = false;
+      }
     } else if (action === 'save-settings') {
       const next = clone(draft.settingsDraft || settings());
       next.checkEveryX = Math.max(1, Math.floor(Number(next.checkEveryX) || 3));
       next.injectMaxChars = Math.max(200, Math.floor(Number(next.injectMaxChars) || 2500));
       next.maxTokens = Math.max(1, Math.floor(Number(next.maxTokens) || 65000));
       next.apiTimeoutMs = Math.max(0, Number(next.apiTimeoutMs) || 0);
+      next.apiAutoRetries = Math.max(0, Math.min(10, Math.floor(Number(next.apiAutoRetries) || 0)));
       const previous = settings();
-      const requestKeys = ['engineEnabled', 'autoCheck', 'checkEveryX', 'allowProposals', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs'];
+      const requestKeys = ['engineEnabled', 'autoCheck', 'checkEveryX', 'allowProposals', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'apiAutoRetries'];
       if (requestKeys.some(key => previous[key] !== next[key])) engine()?.abort?.();
       window.OUTLINE_ENGINE_SETTINGS.patchSettings(next);
       draft.settingsDraft = clone(settings());
@@ -1140,6 +1173,10 @@ window.OUTLINE_ENGINE_UI = (function() {
       },
       isSettingsOpen: () => draftFor().settingsOpen,
       onSettingsTab: key => { draftFor().settingsTab = key; },
+      getScrollKey: () => {
+        const d = draftFor();
+        return d.settingsOpen ? 'settings' : d.editorOpen ? 'editor' : d.textOpen ? 'text' : `view:${d.view}`;
+      },
       isEditing: () => { const draft = draftFor(); return draft.editorOpen || draft.textOpen || Boolean(draft.pendingJson); },
       getHeaderText: () => {
         const current = state(), chapters = chaptersOf(current.plan);

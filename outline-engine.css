@@ -310,6 +310,9 @@
 .we-outline-custom-api { border: 1px solid var(--we-border); border-radius: 7px; padding: 10px; margin: 10px 0 0; }
 .we-outline-custom-api legend { color: var(--we-text3); font-size: 11px; padding: 0 6px; }
 .we-outline-custom-api:disabled { opacity: .55; }
+.we-outline-model-row { display: flex; align-items: flex-end; gap: 8px; }
+.we-outline-model-row .we-outline-field { flex: 1; margin-bottom: 8px; }
+.we-outline-model-row .we-btn { margin-bottom: 8px; white-space: nowrap; flex-shrink: 0; }
 
 /* 编辑器与分卡片 */
 .we-outline-proposal, .we-outline-preview, .we-outline-edit-chapter, .we-outline-edit-track, .we-outline-edit-node {

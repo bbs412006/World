@@ -1222,7 +1222,7 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="checkbox" id="we-memory-engine-enabled" ${settings.engineEnabled !== false ? 'checked' : ''}>
           启用记忆引擎
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">关闭后停止记忆提取与记忆注入，不影响世界引擎。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">关闭后停止记忆提取与记忆注入，不影响世界引擎与剧情大纲；若已使用其他记忆或总结插件，建议关闭本模块避免重复注入与隐藏楼层冲突。</div>
       </div>
       <div class="we-input-group">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -1674,6 +1674,8 @@ window.WORLD_ENGINE_UI = (function() {
     return !!(active && panelBodyElement && panelBodyElement.contains(active) && active.isContentEditable);
   }
 
+  let _lastScrollKey = '';
+
   function refresh(auto) {
     if (!panelElement || !panelVisible) return;
     updateEngineFaceChrome();
@@ -1685,6 +1687,13 @@ window.WORLD_ENGINE_UI = (function() {
       ? _currentView === 'settings'
       : Boolean(callEngineFace(currentFace, 'isSettingsOpen', false));
     if (auto && (settingsOpen || isEditingPanelContent() || callEngineFace(currentFace, 'isEditing', false))) return;
+    const scrollKey = currentFace.id === 'world'
+      ? `world:${_currentView}`
+      : currentFace.id === 'memory'
+        ? `memory:${_memoryView}:${_memorySettingsOpen}`
+        : `${currentFace.id}:${String(callEngineFace(currentFace, 'getScrollKey', '') || '')}`;
+    const prevScrollTop = (panelBodyElement && _lastScrollKey === scrollKey) ? (Number(panelBodyElement.scrollTop) || 0) : 0;
+    _lastScrollKey = scrollKey;
     if (currentFace.id !== 'world') {
       if (panelBodyElement) panelBodyElement.innerHTML = callEngineFace(
         currentFace,
@@ -1714,6 +1723,7 @@ window.WORLD_ENGINE_UI = (function() {
       }
       bindEvents(null);
       callEngineFace(currentFace, 'bind', undefined, panelBodyElement);
+      if (panelBodyElement) panelBodyElement.scrollTop = prevScrollTop;
       return;
     }
     const body = panelBodyElement;
@@ -1743,6 +1753,7 @@ window.WORLD_ENGINE_UI = (function() {
     const mood = document.getElementById('we-header-mood');
     if (mood) mood.style.display = '';
     bindEvents(state);
+    body.scrollTop = prevScrollTop;
   }
 
   /**
@@ -6399,6 +6410,23 @@ window.WORLD_ENGINE_UI = (function() {
     const abort = ball.querySelector('#we-sat-abort');
     const power = ball.querySelector('#we-sat-power');
     const engineSwitch = ball.querySelector('#we-sat-engine-switch');
+    const outlineSwitch = ball.querySelector('#we-sat-outline-switch');
+    const hasOutline = _engineFaceRegistry.has('outline');
+    const applySwitchSatellite = (el, target) => {
+      if (!el || !target) return;
+      const targetActive = Boolean(callEngineFace(target, 'isRunning', false));
+      const targetRunningLabel = String(callEngineFace(target, 'getRunningLabel', '') || '');
+      el.dataset.targetEngine = target.id;
+      el.dataset.engineRunning = targetActive ? 'true' : 'false';
+      el.classList.toggle('we-sat-target-world', target.id === 'world');
+      el.classList.toggle('we-sat-target-memory', target.id === 'memory');
+      el.classList.toggle('we-sat-target-outline', target.id === 'outline');
+      el.classList.toggle('we-sat-engine-running', targetActive);
+      el.title = targetActive
+        ? `${target.label}正在${targetRunningLabel || '推演'} · 点击切换查看`
+        : `切换到${target.label}`;
+      el.setAttribute('aria-label', el.title);
+    };
     if (fwd) {
       fwd.style.display = face.showForward === true ? '' : 'none';
       fwd.classList.toggle('we-sat-off', active);
@@ -6419,19 +6447,17 @@ window.WORLD_ENGINE_UI = (function() {
       power.title = `开关${face.label}推演与注入`;
     }
     if (engineSwitch) {
-      const target = getNextEngineFace();
-      const targetActive = Boolean(callEngineFace(target, 'isRunning', false));
-      const targetRunningLabel = String(callEngineFace(target, 'getRunningLabel', '') || '');
-      engineSwitch.dataset.targetEngine = target.id;
-      engineSwitch.dataset.engineRunning = targetActive ? 'true' : 'false';
-      engineSwitch.classList.toggle('we-sat-target-world', target.id === 'world');
-      engineSwitch.classList.toggle('we-sat-target-memory', target.id === 'memory');
-      engineSwitch.classList.toggle('we-sat-target-outline', target.id === 'outline');
-      engineSwitch.classList.toggle('we-sat-engine-running', targetActive);
-      engineSwitch.title = targetActive
-        ? `${target.label}正在${targetRunningLabel || '推演'} · 点击切换查看`
-        : `切换到${target.label}`;
-      engineSwitch.setAttribute('aria-label', engineSwitch.title);
+      const target = hasOutline
+        ? getEngineFace(face.id === 'world' || face.id === 'outline' ? 'memory' : 'world')
+        : getNextEngineFace();
+      applySwitchSatellite(engineSwitch, target);
+    }
+    if (outlineSwitch) {
+      outlineSwitch.style.display = hasOutline ? '' : 'none';
+      if (hasOutline) {
+        const target = getEngineFace(face.id === 'outline' ? 'world' : 'outline');
+        applySwitchSatellite(outlineSwitch, target);
+      }
     }
     ball.classList.toggle('we-ball-evolving', active);
     ball.title = active && runningLabel
@@ -6474,7 +6500,8 @@ window.WORLD_ENGINE_UI = (function() {
   // 侧边吸附参数
   const WE_TUCK_EDGE = 28;    // 距边缘多近算「吸附」
   const WE_TUCK_HANDLE = 15;  // 缩进后露出的小条宽度
-  const WE_TUCK_INSET = 8;    // 拉出后距边缘的留白
+  const WE_TUCK_INSET = 30;   // 拉出后距边缘的留白（为外圈卫星预留空间）
+  const WE_SAT_PAD = 26;      // 未缩进时上下/左右距视口最小留白（卫星偏移 22px）
 
   function applyBallTuck(ball, side) {
     const vw = window.innerWidth;
@@ -6485,13 +6512,18 @@ window.WORLD_ENGINE_UI = (function() {
     ball.style.left = (side === 'left' ? (WE_TUCK_HANDLE - size) : (vw - WE_TUCK_HANDLE)) + 'px';
   }
 
+  function clampBallAxis(val, max, pad) {
+    const lo = Math.min(pad, Math.max(4, Math.floor(max / 2)));
+    return Math.max(lo, Math.min(val, Math.max(lo, max - lo)));
+  }
+
   function untuckBall(ball) {
     const pos = loadBallPos() || {};
     const vw = window.innerWidth, vh = window.innerHeight, size = ball.offsetWidth || 52;
-    let left = typeof pos.left === 'number' ? pos.left : (vw - size - 18);
+    let left = typeof pos.left === 'number' ? pos.left : (vw - size - WE_TUCK_INSET);
     let top = typeof pos.top === 'number' ? pos.top : (vh - size - 90);
-    left = Math.max(4, Math.min(left, vw - size - 4));
-    top = Math.max(4, Math.min(top, vh - size - 4));
+    left = clampBallAxis(left, vw - size, WE_TUCK_INSET);
+    top = clampBallAxis(top, vh - size, WE_SAT_PAD);
     ball.classList.remove('we-ball-tucked', 'we-ball-tucked-left', 'we-ball-tucked-right');
     ball.style.left = left + 'px';
     ball.style.top = top + 'px';
@@ -6503,9 +6535,9 @@ window.WORLD_ENGINE_UI = (function() {
     const size = ball.offsetWidth || 52;
     let pos = loadBallPos();
     if (!pos) pos = { left: vw - size - 44, top: vh - size - 90 };
-    // 钳制进可视区域，避免拖出屏幕后找不到
-    pos.left = Math.max(4, Math.min(pos.left, vw - size - 4));
-    pos.top = Math.max(4, Math.min(pos.top, vh - size - 4));
+    // 钳制进可视区域（未缩进时同时为外圈卫星留白），避免拖出屏幕或卫星被裁切
+    pos.left = clampBallAxis(pos.left, vw - size, pos.tucked ? 4 : WE_SAT_PAD);
+    pos.top = clampBallAxis(pos.top, vh - size, WE_SAT_PAD);
     ball.style.top = pos.top + 'px';
     ball.style.right = 'auto';
     ball.style.bottom = 'auto';
@@ -6710,7 +6742,7 @@ window.WORLD_ENGINE_UI = (function() {
         if (result === ENGINE_ACTION_FAILED) return;
         updateBallControls();
         showToast(turnOff ? `已关闭${face.label}推演与注入` : `已开启${face.label}推演与注入`);
-        if (typeof _currentView !== 'undefined' && _currentView === 'settings') refresh();
+        if (panelVisible) refresh();
       };
       const result = callEngineFaceAction(face, 'setEnabled', !turnOff);
       if (result && typeof result.then === 'function') result.then(finish);
@@ -6719,6 +6751,10 @@ window.WORLD_ENGINE_UI = (function() {
     wire('we-sat-engine-switch', () => {
       const shortcut = ball.querySelector('#we-sat-engine-switch');
       switchEngineFace(shortcut?.dataset.targetEngine || getNextEngineFace().id);
+    });
+    wire('we-sat-outline-switch', () => {
+      const shortcut = ball.querySelector('#we-sat-outline-switch');
+      switchEngineFace(shortcut?.dataset.targetEngine || 'outline');
     });
   }
 
@@ -6744,6 +6780,7 @@ window.WORLD_ENGINE_UI = (function() {
         '<span class="we-sat we-sat-right we-sat-off" id="we-sat-abort" role="button" title="停止推演"><i class="fa-solid fa-stop"></i></span>' +
         '<span class="we-sat we-sat-down" id="we-sat-redo" role="button" title="重新推进"><i class="fa-solid fa-rotate-right"></i></span>' +
         '<span class="we-sat we-sat-left" id="we-sat-power" role="button" title="插上=关闭推演与注入 / 拔下=开启"><i class="fa-solid fa-power-off"></i></span>' +
+        '<span class="we-sat we-sat-lower-left we-sat-engine-switch" id="we-sat-outline-switch" role="button"></span>' +
         '<span class="we-sat we-sat-lower-right we-sat-engine-switch" id="we-sat-engine-switch" role="button"></span>';
       btn.onclick = () => togglePanel();
       document.body.appendChild(btn);
@@ -6783,7 +6820,7 @@ window.WORLD_ENGINE_UI = (function() {
 
   return {
     buildPanel, buildInputButton, showPanel, hidePanel, togglePanel, refresh, setStatus,
-    setEvolvingUI, setMemoryEvolvingUI, setInjectedScope,
+    setEvolvingUI, setMemoryEvolvingUI, setInjectedScope, updateBallControls,
     registerEngineFace,
     listEngineFaces: () => { ensureBuiltinEngineFaces(); return _engineFaceOrder.map(id => ({ ...getEngineFace(id) })); },
     advanceEngineFace
