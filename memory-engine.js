@@ -626,6 +626,7 @@ window.MEMORY_ENGINE = (function() {
       kind: task?.kind || 'memory',
       source: task?.kind === 'world_link' ? 'world_engine' : undefined,
       sourceKey: task?.kind === 'world_link' ? clean(task?.sourceKey) : undefined,
+      worldCommitId: task?.kind === 'world_link' ? clean(task?.worldCommitId) : undefined,
       originChatId: data()?.getChatId?.() || 'default',
       startLayer: bounds.startLayer,
       endLayer: bounds.endLayer,
@@ -705,6 +706,7 @@ window.MEMORY_ENGINE = (function() {
       round: Math.max(0, Number(root.round) || 0),
       chatLayer: root.chatLayer ?? null,
       event_memory: clone(state.event_memory || {}),
+      ...(state.world_commit_archive ? { world_commit_archive: clone(state.world_commit_archive) } : {}),
       timeline: clone(timeline)
     };
     ensureEntityState(derived);
@@ -835,8 +837,18 @@ window.MEMORY_ENGINE = (function() {
     // 顶部状态机会先清理悬浮球运行类，因此最后再按当前引擎面刷新动画状态。
     window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, runningLabel);
     try {
+      const requestChatId = data().getChatId();
       const before = options?.baseState ? clone(options.baseState) : data().loadState();
       const extracted = await requestTasks(tasks, { ...options, baseState: before });
+      if (requestChatId !== data().getChatId() || abortController?.signal?.aborted ||
+          (tasks.memory?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(tasks.memory.worldCommitId) === false)) {
+        const error = new Error('记忆来源或聊天已变化，旧结果已丢弃'); error.name = 'AbortError'; throw error;
+      }
+      for (const task of Object.values(tasks)) {
+        if (Array.isArray(task?.sourceRefs) && task.sourceRefs.length && timelineApi()?.auditRefs?.(task.sourceRefs)?.valid === false) {
+          const error = new Error('正文已变化，记忆结果未写入'); error.name = 'AbortError'; throw error;
+        }
+      }
       if (options?.saveCheckpoint !== false) data().saveCheckpoint(before);
       const next = clone(before);
       const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
@@ -883,6 +895,7 @@ window.MEMORY_ENGINE = (function() {
           content: Array.from(clean(linked.content)).slice(0, 200).join(''),
           source: 'world_engine',
           sourceKey: clean(linked.sourceKey),
+          ...(linked.worldCommitId ? { worldCommitId: clean(linked.worldCommitId) } : {}),
           status: 'valid',
           revision: 1
         });
@@ -1266,10 +1279,14 @@ window.MEMORY_ENGINE = (function() {
       const audit = api?.auditRefs?.(node.sourceRefs);
       collectHistoryAudit(report, audit);
       refreshValidRefs(node, audit);
-      const nextStatus = audit?.valid ? 'valid' : 'stale';
+      const nextStatus = audit?.valid && !(node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false) ? 'valid' : 'stale';
       if (node.status !== nextStatus) { node.status = nextStatus; changed = true; }
     }
     for (const summary of eventMemory.small_summaries) {
+      if (summary.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(summary.worldCommitId) === false) {
+        if (summary.status !== 'stale') { summary.status = 'stale'; changed = true; }
+        continue;
+      }
       if (!Array.isArray(summary.sourceRefs) || !summary.sourceRefs.length) continue; // 旧版手工/迁移纪要保持封存。
       const audit = api?.auditRefs?.(summary.sourceRefs);
       collectHistoryAudit(report, audit);
@@ -1294,6 +1311,7 @@ window.MEMORY_ENGINE = (function() {
     let state = data().loadState(), timeline = ensureTimelineState(state);
     let node = timeline.nodes.find(item => item.id === nodeId);
     if (!node || node.status !== 'stale') return false;
+    if (node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false) return false;
     const api = timelineApi(), audit = api?.auditRefs?.(node.sourceRefs);
     if (!audit?.refs?.length) {
       timeline.nodes = timeline.nodes.filter(item => item.id !== nodeId);
@@ -1593,6 +1611,7 @@ window.MEMORY_ENGINE = (function() {
 
   async function prepareHistoryForGeneration() {
     if (settings().engineEnabled === false) return { invalidated: false };
+    restoreActiveWorldContributions();
     const auditReport = newHistoryAuditReport();
     let state = data().loadState();
     const sourcesChanged = auditStoredSources(state, auditReport);
@@ -1642,12 +1661,15 @@ window.MEMORY_ENGINE = (function() {
 
   function applyInjection(options) {
     const st = settings();
-    if (st.engineEnabled === false || st.injectIntoPrompt === false) {
+    const unsafeStoryBase = window.STORY_ENGINE_PROJECTION?.active?.() === true && window.STORY_ENGINE_HISTORY?.getStatus?.().blocked === true;
+    if (st.engineEnabled === false || st.injectIntoPrompt === false || unsafeStoryBase) {
       clearInjection();
       syncHiddenMessages(new Set(), '恢复正文失败');
       return '';
     }
-    const state = (options?.isReroll && data().loadCheckpoint()) || data().loadState();
+    restoreActiveWorldContributions();
+    const legacyReroll = options?.isReroll && window.STORY_ENGINE_PROJECTION?.active?.() !== true;
+    const state = (legacyReroll && data().loadCheckpoint()) || data().loadState();
     ensureEntityState(state);
     const eventMemory = ensureEventState(state);
     const hasPeople = Boolean(state?.personal_memory?.length);
@@ -1779,6 +1801,7 @@ window.MEMORY_ENGINE = (function() {
   }
 
   async function ingestWorldEvolution(payload) {
+    const originChatId = data().getChatId();
     const worldSettings = window.WORLD_ENGINE_API?.getSettings?.(true) || {};
     if (worldSettings.memoryLinkEnabled !== true && payload?.force !== true) return { skipped: true, reason: 'disabled' };
     const st = settings();
@@ -1789,13 +1812,17 @@ window.MEMORY_ENGINE = (function() {
     const deadline = Date.now() + Math.max(10000, Number(st.apiTimeoutMs) || 120000);
     while (running && Date.now() < deadline) await delay(100);
     if (running) throw new Error('等待当前记忆任务结束超时');
+    if (originChatId !== data().getChatId()) throw new Error('聊天已经切换，世界记忆联动已取消');
+    if (payload?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(payload.worldCommitId) === false) return { skipped: true, reason: 'stale-world-commit' };
     if (payload?.replace === true) rollbackLinkedLayer(layer);
 
     const digest = clean(payload?.worldDigest);
     if (!digest) return { skipped: true, reason: 'empty_digest' };
     const sourceKey = `${data().getChatId()}:${layer}`;
-    const worldInfo = payload?.worldUpdate && typeof payload.worldUpdate === 'object'
-      ? JSON.stringify(payload.worldUpdate, null, 2)
+    const safeWorldUpdate = window.STORY_ENGINE_PROJECTION?.active?.()
+      ? window.STORY_ENGINE_PROJECTION.forMemory(payload?.worldUpdate || {}) : payload?.worldUpdate;
+    const worldInfo = safeWorldUpdate && typeof safeWorldUpdate === 'object'
+      ? JSON.stringify(safeWorldUpdate, null, 2)
       : digest;
     const attemptBase = data().loadState();
     try {
@@ -1803,6 +1830,7 @@ window.MEMORY_ENGINE = (function() {
         memory: {
           conversation: `【世界引擎本轮返回】\n${worldInfo}\n\n以上是客观世界信息。只更新其中明确支持的人物认知与世界实体，不得猜测任何人物知晓未公开信息。`,
           sourceKey,
+          worldCommitId: clean(payload?.worldCommitId),
           startLayer: layer,
           endLayer: layer,
           kind: 'world_link'
@@ -1811,13 +1839,190 @@ window.MEMORY_ENGINE = (function() {
         layer,
         baseState: attemptBase,
         saveCheckpoint: false,
-        worldDigestMinute: { layer, sourceKey, content: digest }
+        worldDigestMinute: { layer, sourceKey, content: digest, worldCommitId: clean(payload?.worldCommitId) }
       });
       return result;
     } catch (error) {
       // 联动失败只撤销本次联动尝试；同楼层已完成的普通记忆提取仍应保留。
-      data().saveState(attemptBase);
-      applyInjection();
+      if (originChatId === data().getChatId() && !(payload?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(payload.worldCommitId) === false)) {
+        data().saveState(attemptBase); applyInjection();
+      }
+      throw error;
+    }
+  }
+
+  function invalidateWorldCommits(ids) {
+    const removed = new Set(Array.isArray(ids) ? ids : []);
+    if (!removed.size) return { changed: false };
+    const state = data().loadState(), timeline = ensureTimelineState(state), events = ensureEventState(state);
+    const archive = state.world_commit_archive || { nodes: [], smallSummaries: [], bigSummaries: [] };
+    archive.nodes = Array.isArray(archive.nodes) ? archive.nodes : [];
+    archive.smallSummaries = Array.isArray(archive.smallSummaries) ? archive.smallSummaries : [];
+    archive.bigSummaries = Array.isArray(archive.bigSummaries) ? archive.bigSummaries : [];
+    const preserve = (items, value) => {
+      const index = items.findIndex(item => item.record?.id === value.record.id && item.record?.worldCommitId === value.record.worldCommitId);
+      if (index < 0) items.push(value); else items[index] = value;
+    };
+    timeline.nodes.forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.nodes, { record: clone(record), position }); });
+    events.small_summaries.forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.smallSummaries, { record: clone(record), position }); });
+    const removedMinuteIds = new Set(events.small_summaries.filter(item => removed.has(item.worldCommitId)).map(item => item.id));
+    events.big_summaries.forEach((record, position) => {
+      if (!(record.childIds || []).some(id => removedMinuteIds.has(id))) return;
+      preserve(archive.bigSummaries, { record: clone(record), position,
+        children: (record.childIds || []).map(id => {
+          const child = events.small_summaries.find(item => item.id === id);
+          return child ? { id, content: child.content, revision: child.revision, sourceDigest: child.sourceDigest || '', worldCommitId: child.worldCommitId || '' } : { id, missing: true };
+        }) });
+    });
+    state.world_commit_archive = archive;
+    const beforeNodes = timeline.nodes.length, beforeSmall = events.small_summaries.length;
+    timeline.nodes = timeline.nodes.filter(node => !removed.has(node.worldCommitId));
+    const removedMinutes = new Set(events.small_summaries.filter(item => removed.has(item.worldCommitId)).map(item => item.id));
+    const oldCursor = Math.max(0, Math.min(events.small_summaries.length, Number(events.big_summary_cursor) || 0));
+    const removedBeforeCursor = events.small_summaries.slice(0, oldCursor).filter(item => removedMinutes.has(item.id)).length;
+    events.small_summaries = events.small_summaries.filter(item => !removedMinutes.has(item.id));
+    for (const overview of events.big_summaries) if ((overview.childIds || []).some(id => removedMinutes.has(id))) overview.status = 'stale';
+    if (beforeNodes === timeline.nodes.length && beforeSmall === events.small_summaries.length) return { changed: false };
+    abortController?.abort();
+    events.big_summary_cursor = Math.min(oldCursor - removedBeforeCursor, events.small_summaries.length);
+    data().saveState(replayTimeline(state));
+    applyInjection();
+    return { changed: true, removedNodes: beforeNodes - timeline.nodes.length, removedMinutes: removedMinutes.size };
+  }
+
+  // preview 暂时撤下的世界贡献仍在同一聊天的完整存档中；只有原 commit 重新可信 active 才恢复。
+  function restoreActiveWorldContributions() {
+    const state = data().loadState(), archive = state.world_commit_archive;
+    if (!archive || !window.STORY_ENGINE_HISTORY?.isCommitActive || window.STORY_ENGINE_HISTORY.isApplying?.() === true) return false;
+    const active = record => record?.worldCommitId && window.STORY_ENGINE_HISTORY.isCommitActive(record.worldCommitId) === true;
+    const timeline = ensureTimelineState(state), events = ensureEventState(state), smallIdMap = new Map();
+    let changed = false;
+    const restoredSmall = new Set();
+    const insert = (items, record, position) => items.splice(Math.max(0, Math.min(items.length, Number(position) || 0)), 0, record);
+    archive.nodes = (archive.nodes || []).filter(entry => {
+      if (!active(entry.record)) return true;
+      const record = clone(entry.record);
+      if (!timeline.nodes.some(item => item.worldCommitId === record.worldCommitId && item.sourceDigest === record.sourceDigest)) {
+        if (timeline.nodes.some(item => item.id === record.id)) record.id = nextTimelineNodeId(timeline);
+        record.status = 'valid'; insert(timeline.nodes, record, entry.position);
+      }
+      changed = true; return false;
+    });
+    archive.smallSummaries = (archive.smallSummaries || []).filter(entry => {
+      if (!active(entry.record)) return true;
+      const record = clone(entry.record), originalId = record.id;
+      const same = events.small_summaries.find(item => item.worldCommitId === record.worldCommitId && item.content === record.content && item.sourceKey === record.sourceKey);
+      if (same) smallIdMap.set(originalId, same.id);
+      else {
+        if (events.small_summaries.some(item => item.id === record.id)) record.id = nextSmallSummaryId(events);
+        record.status = 'valid'; insert(events.small_summaries, record, entry.position); smallIdMap.set(originalId, record.id);
+      }
+      restoredSmall.add(originalId); changed = true; return false;
+    });
+    archive.bigSummaries = (archive.bigSummaries || []).filter(entry => {
+      const children = (entry.children || []).map(snapshot => ({ snapshot, child: events.small_summaries.find(item => item.id === (smallIdMap.get(snapshot.id) || snapshot.id)) }));
+      const ready = children.length && children.every(({ snapshot, child }) => !snapshot.missing && child?.status === 'valid' &&
+        child.content === snapshot.content && Number(child.revision || 1) === Number(snapshot.revision || 1) && (child.sourceDigest || '') === snapshot.sourceDigest &&
+        (!child.worldCommitId || window.STORY_ENGINE_HISTORY.isCommitActive(child.worldCommitId) === true));
+      if (!ready) {
+        // 子纪要已被编辑时，不能仅凭旧 childDigest 把原总述重新标为 valid。
+        if (children.some(({ snapshot }) => restoredSmall.has(snapshot.id))) {
+          events.big_summaries = events.big_summaries.filter(item => item.id !== entry.record.id || item.content !== entry.record.content);
+          changed = true;
+        }
+        return true;
+      }
+      const record = clone(entry.record), existingIndex = events.big_summaries.findIndex(item => item.id === record.id);
+      record.childIds = children.map(item => item.child.id);
+      record.childDigest = timelineApi()?.hashText?.(children.map(({ child }) => `${child.id}:${child.revision || 1}:${child.sourceDigest || ''}`).join('|')) || '';
+      record.status = 'valid';
+      if (existingIndex >= 0) {
+        const existing = events.big_summaries[existingIndex];
+        if (existing.status === 'stale' || existing.content === record.content) events.big_summaries[existingIndex] = record;
+      } else insert(events.big_summaries, record, entry.position);
+      changed = true; return false;
+    });
+    if (!changed) return false;
+    const covered = new Set(events.big_summaries.filter(item => item.status === 'valid').flatMap(item => item.childIds || []));
+    events.big_summary_cursor = 0;
+    while (events.big_summary_cursor < events.small_summaries.length && covered.has(events.small_summaries[events.big_summary_cursor].id)) events.big_summary_cursor++;
+    if (!archive.nodes.length && !archive.smallSummaries.length && !archive.bigSummaries.length) delete state.world_commit_archive;
+    data().saveState(replayTimeline(state));
+    return true;
+  }
+
+  function getQuarantineBackup(backupKey) {
+    const chatId = data()?.getChatId?.() || 'default';
+    const prefix = `memory_engine_quarantine_${chatId}_`;
+    const key = clean(backupKey || window.WORLD_ENGINE_STORE?.getItem(`memory_engine_quarantine_latest_${chatId}`));
+    if (!key.startsWith(prefix)) return null;
+    try { return JSON.parse(window.WORLD_ENGINE_STORE?.getItem(key) || 'null'); } catch (_) { return null; }
+  }
+
+  // 仅由作者显式从头重建时调用。无来源 Root 和人工全量快照先完整备份，再退出自动注入。
+  // 本地隔离不请求模型；仍有真实来源的节点继续沿原流程审计、修复。
+  function quarantineUnprovenancedHistory(options) {
+    const state = data().loadState(), chatId = data().getChatId(), timeline = ensureTimelineState(state), events = ensureEventState(state);
+    const checkpoint = data().loadCheckpoint?.() || null, linkCheckpoint = data().loadLinkCheckpoint?.() || null;
+    const stamp = Date.now(), prefix = `memory_engine_quarantine_${chatId}_`;
+    let backupKey = prefix + stamp, suffix = 0;
+    while (window.WORLD_ENGINE_STORE?.getItem(backupKey) != null) backupKey = prefix + stamp + '_' + ++suffix;
+    const backup = { type: 'memory-engine-quarantine-backup', version: 1, chatId, createdAt: stamp,
+      reason: clean(options?.reason || '作者显式从头重建，隔离无来源记忆'), state: clone(state), checkpoint: clone(checkpoint), linkCheckpoint: clone(linkCheckpoint) };
+    const store = window.WORLD_ENGINE_STORE;
+    const ownsTransaction = typeof store.beginTransaction === 'function' && !store.isTransactionActive?.();
+    if (ownsTransaction) store.beginTransaction();
+    try {
+    // 备份失败则直接抛出：不能在没有可恢复副本时清理任何记忆。
+    window.WORLD_ENGINE_STORE.setItem(backupKey, JSON.stringify(backup));
+    window.WORLD_ENGINE_STORE.setItem(`memory_engine_quarantine_latest_${chatId}`, backupKey);
+    try { window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('无来源记忆隔离前完整备份'); } catch (_) { /* 独立本地备份已成功。 */ }
+    abortController?.abort();
+    const root = timeline.root?.base || {};
+    const counts = { rootPeople: root.personal_memory?.length || 0,
+      rootEntities: ENTITY_TYPES.reduce((total, type) => total + (root.entity_memory?.[type]?.length || 0), 0),
+      manualNodes: 0, unprovenancedNodes: 0, staleNodes: 0, smallSummaries: 0, bigSummaries: 0 };
+    const supported = record => {
+      if (record?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(record.worldCommitId) === true) return true;
+      const refs = record?.sourceRefs;
+      return Array.isArray(refs) && refs.length > 0 && refs.every(ref => clean(ref.chatId) === chatId && clean(ref.messageId) && ref.synthetic !== true);
+    };
+    const audited = record => {
+      if (record.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(record.worldCommitId) === true) return true;
+      return timelineApi()?.auditRefs?.(record.sourceRefs)?.valid === true;
+    };
+    timeline.nodes = timeline.nodes.filter(node => {
+      if (node.kind === 'manual_snapshot' || node.snapshot) { counts.manualNodes++; return false; }
+      if (!supported(node)) { counts.unprovenancedNodes++; return false; }
+      node.status = audited(node) ? 'valid' : 'stale'; if (node.status === 'stale') counts.staleNodes++;
+      return true;
+    });
+    timeline.root.base = { personal_memory: [], knowledge_index: {}, entity_memory: { organization: [], object: [], ability: [], location: [] }, entity_index: {}, round: 0, chatLayer: null };
+    events.small_summaries = events.small_summaries.filter(summary => {
+      if (!supported(summary)) { counts.smallSummaries++; return false; }
+      summary.status = audited(summary) ? 'valid' : 'stale'; return true;
+    });
+    const smallById = new Map(events.small_summaries.map(item => [item.id, item]));
+    events.big_summaries = events.big_summaries.filter(summary => {
+      const children = summary.childIds || [];
+      if (!children.length || children.some(id => !smallById.has(id))) { counts.bigSummaries++; return false; }
+      summary.status = children.every(id => smallById.get(id).status === 'valid') ? 'valid' : 'stale'; return true;
+    });
+    const covered = new Set(events.big_summaries.filter(item => item.status === 'valid').flatMap(item => item.childIds || []));
+    events.big_summary_cursor = 0;
+    while (events.big_summary_cursor < events.small_summaries.length && covered.has(events.small_summaries[events.big_summary_cursor].id)) events.big_summary_cursor++;
+    // 隔离不是申请历史全量记忆重填；下一轮纪要从当前聊天基线继续。
+    events.small_summary_layer = currentLayer();
+    const safe = replayTimeline(state);
+    data().saveState(safe);
+    data().saveCheckpoint(safe);
+    data().clearLinkCheckpoint?.();
+    const persistence = ownsTransaction ? store.commitTransaction() : Promise.resolve();
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+    applyInjection(); refreshMemoryPanel();
+    return { changed: true, backupKey, quarantined: counts, retainedNodes: safe.timeline.nodes.length, needsAuthorReview: true, persistence };
+    } catch (error) {
+      if (ownsTransaction && store.isTransactionActive?.()) store.rollbackTransaction();
       throw error;
     }
   }
@@ -1973,7 +2178,8 @@ window.MEMORY_ENGINE = (function() {
       ctx.eventSource.on(types.MESSAGE_SWIPED || 'message_swiped', guardEvent('滑动重生成', () => {
         clearTimeout(autoTimer);
         abortController?.abort();
-        if (!rollbackLinkedLayer(currentLayer())) applyInjection({ isReroll: true });
+        if (window.STORY_ENGINE_PROJECTION?.active?.() === true) applyInjection();
+        else if (!rollbackLinkedLayer(currentLayer())) applyInjection({ isReroll: true });
         schedulePreparation(50);
       }));
       ctx.eventSource.on(types.MESSAGE_DELETED || 'message_deleted', guardEvent('删除消息', () => {
@@ -1993,6 +2199,8 @@ window.MEMORY_ENGINE = (function() {
   return {
     init, applyInjection, buildWorldEngineContext, ingestWorldEvolution, manualExtract, manualReextract, extractNow: manualExtract,
     reconcileHistory, prepareHistoryForGeneration, replayTimeline, commitManualState,
+    invalidateWorldCommits,
+    quarantineUnprovenancedHistory, getQuarantineBackup,
     manualSmallSummary, manualBigSummary,
     backfill, backfillSummaries, stopBackfill, abort,
     repairStateIndexes, replaceKnownByRecords,

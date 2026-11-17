@@ -331,7 +331,8 @@ window.WORLD_ENGINE_DIAG = (function() {
       outline: {
         revision: state.revision, currentChapterId: state.currentChapterId,
         chapters: state.plan?.chapters?.length || 0,
-        nodes: (state.plan?.chapters || []).reduce((total, chapter) => total + (chapter.nodes?.length || 0), 0),
+        nodes: state.plan?.nodes?.length || (state.plan?.chapters || []).reduce((total, chapter) => total + (chapter.nodes?.length || 0), 0),
+        tracks: state.plan?.tracks?.length || 0,
         tracking: safe(() => Object.fromEntries(
           ['anchorLayer', 'checkedLayer', 'roundsSinceCheck', 'pendingRecheck', 'recheckStartLayer']
             .map(key => [key, state.tracking?.[key] ?? null])
@@ -346,7 +347,8 @@ window.WORLD_ENGINE_DIAG = (function() {
         const { messages, ourContent, ourExcerpt, ...summary } = snapshot;
         return summary;
       }),
-      chatcache: safe(() => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.getStatus?.())
+        chatcache: safe(() => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.getStatus?.()),
+        history: safe(() => window.STORY_ENGINE_HISTORY?.getStatus?.())
     };
   }
 

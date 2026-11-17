@@ -1,7 +1,7 @@
 // 剧情大纲使用独立配置；复用世界 API 实现时不覆盖世界引擎的配置。
 window.OUTLINE_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'outline_engine_settings';
-  const VERSION = '1.0.0';
+  const VERSION = '2.0.0';
   const DEFAULTS = Object.freeze({
     engineEnabled: false,
     apiSource: 'world',
@@ -12,6 +12,9 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     injectIntoPrompt: true,
     injectIntoWorldEngine: true,
     injectMaxChars: 2500,
+    narrativeLimit: 3,
+    worldLimit: 3,
+    cooldownTicks: 1,
     syncToChat: false,
     autoBackup: false,
     apiUrl: '',
@@ -38,6 +41,9 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     next.autoBackup = next.autoBackup === true;
     next.checkEveryX = integer(next.checkEveryX, 3, 1, 1000);
     next.injectMaxChars = integer(next.injectMaxChars, 2500, 200, 20000);
+    next.narrativeLimit = integer(next.narrativeLimit, 3, 1, 20);
+    next.worldLimit = integer(next.worldLimit, 3, 1, 20);
+    next.cooldownTicks = integer(next.cooldownTicks, 1, 0, 100);
     next.maxTokens = integer(next.maxTokens, 8192, 1, 1000000);
     next.apiTimeoutMs = integer(next.apiTimeoutMs, 120000, 0, 3600000);
     next.apiAutoRetries = integer(next.apiAutoRetries, 0, 0, 10);

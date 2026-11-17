@@ -7,6 +7,8 @@
   // 历史记忆的 API 修复统一留到本轮 AI 回复完成后执行。
   window.worldEngineMemoryGenerateInterceptor = async function(_chat, _contextSize, _abort, _type) {
     try {
+      await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
+      await window.STORY_ENGINE_HISTORY?.prepareForGeneration?.({ type: _type });
       await window.MEMORY_ENGINE?.prepareHistoryForGeneration?.();
     } catch (error) {
       // 本地撤旧失败不阻断正常聊天；这里没有后台 API 请求。
@@ -92,13 +94,16 @@
     },
     {
       id: 'outline', label: '剧情大纲', modules: [
-        'outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-cache.js',
-        'outline-engine-prompt.js', 'outline-engine.js'
+        'outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-scheduler.js',
+        'outline-engine-prompt.js', 'story-engine-projection.js', 'story-engine-history.js',
+        'outline-engine-cache.js', 'outline-engine.js'
       ],
       contracts: {
         OUTLINE_ENGINE_SETTINGS: ['getSettings', 'patchSettings'],
         MEMORY_ENGINE_TIMELINE: ['captureRange', 'auditRefs', 'digestRefs', 'hashText'],
         OUTLINE_ENGINE_DATA: ['loadState', 'saveState', 'commitPlan'],
+        OUTLINE_ENGINE_SCHEDULER: ['select', 'evaluateConditions'],
+        STORY_ENGINE_HISTORY: ['captureWorldStep', 'commitWorldStep', 'reconcile'],
         OUTLINE_ENGINE_PROMPT: ['buildCheckPrompt', 'buildOrganizePrompt'],
         OUTLINE_ENGINE: ['init', 'applyInjection', 'checkNow', 'abort', 'isRunning']
       }
@@ -214,7 +219,7 @@
 
       // 酒馆缓存：装好同步槽并对当前聊天做一次恢复/收敛（须在首次注入正文之前，注入才用上同步到的状态）
       if (window.WORLD_ENGINE_CHATCACHE) {
-        window.WORLD_ENGINE_CHATCACHE.init();
+        await window.WORLD_ENGINE_CHATCACHE.init();
       }
       sharedRuntimeReady = true;
       if (loadedEngines.get('outline')) {
@@ -259,6 +264,7 @@
       let isEvolving = false;
       let autoEvolveTimer = null;
       let lastProcessedMessageKey = '';
+      let rebuildingLinkedHistory = false, cancelLinkedRebuild = false;
       const AUTO_EVOLVE_DELAY = 1500;
 
       // ========== 注入管理 ==========
@@ -363,6 +369,14 @@
       function applyInjectionForCurrentRound(opts) {
         if (api.getSettings(true).engineEnabled === false) {
           unregisterInjection();
+          return;
+        }
+        if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+          const history = window.STORY_ENGINE_HISTORY;
+          const status = history.getStatus?.();
+          if (status?.blocked || status?.recovery?.blocked) { unregisterInjection(); return; }
+          applyInjection(history.getWorldState?.() || core.loadState());
+          if (ui?.setInjectedScope) ui.setInjectedScope('state');
           return;
         }
         const state = core.loadState();
@@ -564,10 +578,16 @@
       // 执行一次推演（自动按轮 / 按时间 / 设置页手填时间 共用）。
       // storyDay 非 null → 推演成功后写入 state.time（按时间模式）。
       async function performEvolution(aiMsg, chat, storyDay, readRoundsOverride, opts) {
+        const requestedChatId = core.getChatId(), requestedLength = chat.length;
+        const requestedMessage = chat[chat.length - 1];
+        const requestedText = requestedMessage?.mes, requestedSwipe = requestedMessage?.swipe_id;
         isEvolving = true;
         let worldUiPhaseFinished = false;
         opts = opts || {};
         try {
+          await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
+          if (core.getChatId() !== requestedChatId || SillyTavern.getContext()?.chat !== chat || chat.length !== requestedLength ||
+              chat[chat.length - 1] !== requestedMessage || requestedMessage?.mes !== requestedText || requestedMessage?.swipe_id !== requestedSwipe) return false;
           const state = core.loadState();
           const isNewRound = core.isNewRound();
           setStatus('推演中...');
@@ -589,12 +609,16 @@
           }
           const dialogueText = buildDialogueText(chat, readRounds, settings);
 
-          const evolveOpts = { dialogueText };
+          const sourceStart = Math.max(settings.firstLayerIsAiOpening !== false ? 1 : 0, chat.length - readRounds * 2);
+          const evolveOpts = { dialogueText,
+            sourceRefs: window.MEMORY_ENGINE_TIMELINE?.captureRange?.(sourceStart, chat.length - 1) || [] };
+          if (storyDay != null) evolveOpts.storyDay = Number(storyDay);
           if (opts.mode) evolveOpts.mode = opts.mode;
           const success = await evolution.evolve(state, opts.userMsg || '', aiMsg, evolveOpts);
+          if (core.getChatId() !== requestedChatId || SillyTavern.getContext()?.chat !== chat) return false;
           if (success) {
-            ledger.recordChanges(state);
-            if (storyDay != null) { state.time = Number(storyDay); core.saveState(state); }
+            if (!window.STORY_ENGINE_PROJECTION?.active?.()) ledger.recordChanges(state);
+            if (storyDay != null && !window.STORY_ENGINE_PROJECTION?.active?.()) { state.time = Number(storyDay); core.saveState(state); }
             // 世界 API 已经完成：先落库、更新注入并刷新世界界面，再开始记忆联动。
             // isEvolving 继续作为内部互斥锁保持 true，防止联动期间再次启动世界推演；
             // UI 运行态则在这里结束，让两个引擎的动画严格按先后阶段显示。
@@ -608,7 +632,9 @@
                   layer: core.getChatLayer(),
                   worldRound: state.round,
                   worldDigest: state.worldDigest,
-                  worldUpdate: state.lastEvolveResult,
+                  worldUpdate: window.STORY_ENGINE_PROJECTION?.active?.()
+                    ? window.STORY_ENGINE_PROJECTION.forMemory(state.lastEvolveResult || state) : state.lastEvolveResult,
+                  worldCommitId: evolution.getLastWorldCommitId?.() || '',
                   replace: !isNewRound
                 });
               } catch (linkError) {
@@ -660,6 +686,9 @@
       }
 
       async function manualMemoryLink() {
+        const requestedChatId = core.getChatId();
+        await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
+        if (core.getChatId() !== requestedChatId) return false;
         if (isEvolving) { setStatus('世界引擎或联动任务正在运行...'); return false; }
         if (window.MEMORY_ENGINE?.isRunning?.()) { setStatus('记忆引擎已有任务正在运行...'); return false; }
         const state = core.loadState();
@@ -672,7 +701,9 @@
             layer: core.getChatLayer(),
             worldRound: state.round,
             worldDigest: digest,
-            worldUpdate: state.lastEvolveResult || state,
+            worldUpdate: window.STORY_ENGINE_PROJECTION?.active?.()
+              ? window.STORY_ENGINE_PROJECTION.forMemory(state.lastEvolveResult || state) : state.lastEvolveResult || state,
+            worldCommitId: window.STORY_ENGINE_HISTORY?.getStatus?.().currentCommitId || '',
             replace: true,
             force: true
           });
@@ -688,6 +719,82 @@
           isEvolving = false;
         }
       }
+
+      async function rebuildLinkedHistory(options = {}) {
+        const requestedChatId = core.getChatId();
+        await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
+        if (core.getChatId() !== requestedChatId) return { done: false, reason: 'chat-changed' };
+        if (rebuildingLinkedHistory || isEvolving || evolution.isRunning()) return { done: false, reason: 'busy' };
+        const history = window.STORY_ENGINE_HISTORY;
+        if (!window.STORY_ENGINE_PROJECTION?.active?.() || !history) return { done: false, reason: 'outline-disabled' };
+        const startId = core.getChatId();
+        const batchSize = Math.max(1, Math.floor(Number(options.batchSize) || Number(api.getSettings(true).backfillBatchSize) || 5));
+        let batches = 0, completed = 0;
+        rebuildingLinkedHistory = true; cancelLinkedRebuild = false; isEvolving = true;
+        try {
+          window.MEMORY_ENGINE?.abort?.();
+          const base = history.beginRebuild({ fromBeginning: options.fromBeginning === true });
+          // 在旧基底以前重新建立历史时，来源不明的旧记忆不能继续参与新分支。
+          // 完整副本与清理同批写盘成功后，才开始有费用的重建请求。
+          if (Number(base.fromChatIndex ?? base.fromLayer) === 0 && window.MEMORY_ENGINE?.quarantineUnprovenancedHistory) {
+            setStatus('正在备份并隔离缺少来源的旧记忆...');
+            const quarantine = window.MEMORY_ENGINE.quarantineUnprovenancedHistory({ reason: '联合历史从头重建，旧基底缺少可核验来源' });
+            await (quarantine?.persistence || window.WORLD_ENGINE_STORE.flush?.());
+            if (core.getChatId() !== startId) return { done: false, reason: 'chat-changed', completed, total: batches };
+          }
+          const context = SillyTavern.getContext(), all = context.chat || [];
+          const from = Math.max(0, Number(base.fromChatIndex ?? base.fromLayer) || 0);
+          const first = api.getSettings().firstLayerIsAiOpening !== false ? 1 : 0;
+          const indices = all.map((message, index) => ({ message, index })).filter(item => item.index >= Math.max(from, first) &&
+            !item.message.is_user && String(item.message.mes || '').trim()).map(item => item.index);
+          batches = Math.ceil(indices.length / batchSize);
+          for (let position = 0; position < indices.length; position += batchSize) {
+            if (cancelLinkedRebuild || core.getChatId() !== startId) break;
+            if (SillyTavern.getContext()?.chat !== all) throw new Error('聊天正文已重新加载，重建停止，请重新核对历史');
+            const end = indices[Math.min(position + batchSize - 1, indices.length - 1)];
+            let start = indices[position];
+            while (start > Math.max(from, first) && all[start - 1]?.is_user) start--;
+            const refs = window.MEMORY_ENGINE_TIMELINE.captureRange(start, end);
+            const dialogueText = all.slice(start, end + 1).map(message =>
+              `${message.is_user ? '用户' : 'AI'}：${core.filterDialogue(String(message.mes || ''), api.getSettings())}`).join('\n');
+            setStatus(`联合历史重建 ${completed + 1}/${batches}`);
+            const success = await evolution.evolve(core.loadState(), '', String(all[end].mes || ''), {
+              mode: 'forward', rebuild: true, dialogueText, sourceRefs: refs
+            });
+            if (core.getChatId() === startId && SillyTavern.getContext()?.chat !== all) throw new Error('聊天正文已重新加载，重建停止，请重新核对历史');
+            if (!success) throw new Error(evolution.getLastError?.() || '历史重建失败');
+            completed++;
+            options.onProgress?.({ completed, total: batches, layer: end });
+          }
+          if (core.getChatId() !== startId) return { done: false, reason: 'chat-changed', completed, total: batches };
+          const done = !cancelLinkedRebuild && completed === batches;
+          history.finishRebuild(done, { reason: done ? '' : '用户停止重建，成功批次已保留' });
+          applyInjectionForCurrentRound(); window.OUTLINE_ENGINE?.applyInjection?.();
+          await window.WORLD_ENGINE_STORE.flush?.();
+          setStatus(done ? '联合历史重建完成' : '重建已停止，保留已完成批次');
+          return { done, completed, total: batches };
+        } catch (error) {
+          if (core.getChatId() === startId) history.finishRebuild(false, { reason: error.message || String(error) });
+          setStatus('联合历史重建未完成：' + (error.message || error), true);
+          return { done: false, completed, total: batches, reason: error.message || String(error) };
+        } finally {
+          rebuildingLinkedHistory = false; isEvolving = false;
+          if (core.getChatId() !== startId) {
+            // 只清理原聊天的重建标记，绝不把它的世界写进新聊天。
+            const store = window.WORLD_ENGINE_STORE, key = `outline_engine_v2_bundle_${startId}`;
+            try {
+              const bundle = JSON.parse(store.getItem(key) || 'null');
+              if (bundle?.rebuilding) {
+                bundle.rebuilding = false; bundle.revision = (Number(bundle.revision) || 0) + 1;
+                bundle.recovery = { status: 'pending-rebuild', reason: '切换聊天已停止重建，成功批次保留' };
+                store.setItem(key, JSON.stringify(bundle));
+              }
+            } catch (_) {}
+          }
+          ui?.setEvolvingUI?.(false); ui?.refresh?.(true);
+        }
+      }
+      function abortLinkedRebuild() { cancelLinkedRebuild = true; evolution.abort(); }
 
       // 设置页「本轮对话时间」手填保存后：判断是否够时间，够则推演。
       async function manualTimeEvolve(currentDay) {
@@ -726,6 +833,14 @@
         // 回填捕获的是旧聊天的对话数组引用，继续跑会把旧聊天内容写进新聊天（跨聊天污染 + 旧存档已 clearState 丢失）。
         if (evolution && evolution.isRunning && evolution.isRunning()) {
           try { evolution.abort(); console.log('[世界引擎] 切聊天，中止进行中的推演/回填'); } catch (e) { console.warn('[世界引擎] 中止推演失败', e); }
+        }
+        const loadedChatId = core.getChatId();
+        await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
+        if (core.getChatId() !== loadedChatId) return;
+        if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+          window.STORY_ENGINE_HISTORY.reconcile();
+          applyInjectionForCurrentRound();
+          return;
         }
         // 共用 ChatCache 独立监听 CHAT_LOADED，并在各引擎回调之前完成 scope 恢复。
         const ctx = SillyTavern.getContext();
@@ -785,6 +900,11 @@
       //   dryRun（数据库类插件的预热/算 token 生成）→ 不动注入，避免「生成完又注入一遍」。
       function onGenerationStarted(type, _opts, dryRun) {
         if (dryRun) return; // 预热轮不重判注入
+        if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+          clearAutoEvolveTimer();
+          evolution.abort?.();
+          window.STORY_ENGINE_HISTORY.prepareForGeneration({ type });
+        }
         const isReroll = (type === 'swipe' || type === 'regenerate');
         applyInjectionForCurrentRound({ isReroll });
       }
@@ -798,6 +918,20 @@
         ctx.eventSource.on(ctx.event_types?.CHAT_LOADED || 'chat_loaded', guard('世界引擎', '聊天加载', onChatLoaded));
         ctx.eventSource.on(ctx.event_types?.MESSAGE_SWIPED || 'message_swiped', guard('世界引擎', '滑动重生成', onMessageSwiped));
         ctx.eventSource.on(ctx.event_types?.GENERATION_STARTED || 'generation_started', guard('世界引擎', '生成开始', onGenerationStarted));
+        for (const event of new Set([ctx.event_types?.MESSAGE_DELETED || 'message_deleted', ctx.event_types?.MESSAGE_EDITED || 'message_edited'])) {
+          ctx.eventSource.on(event, guard('联合存档', '正文变化', () => {
+            if (!window.STORY_ENGINE_PROJECTION?.active?.()) return;
+            clearAutoEvolveTimer(); evolution.abort?.();
+            window.STORY_ENGINE_HISTORY.reconcile(); applyInjectionForCurrentRound();
+          }));
+        }
+        ctx.eventSource.on(ctx.event_types?.GENERATION_STOPPED || 'generation_stopped', guard('联合存档', '取消生成', async () => {
+          if (!window.STORY_ENGINE_PROJECTION?.active?.()) return;
+          clearAutoEvolveTimer(); evolution.abort?.();
+          window.STORY_ENGINE_HISTORY.cancelGeneration?.(); applyInjectionForCurrentRound();
+          await window.MEMORY_ENGINE?.prepareHistoryForGeneration?.();
+          window.OUTLINE_ENGINE?.applyInjection?.();
+        }));
         console.log('[世界引擎] 事件绑定成功，自动推演事件:', autoEvolveEvent);
       } else {
         console.warn('[世界引擎] 无法绑定事件');
@@ -806,7 +940,8 @@
       // 初始化时立即按对话层数选择注入状态
       applyInjectionForCurrentRound();
       // 暴露按对话层数选择的注入入口供手动调用
-      window.WORLD_ENGINE = { applyInjection: applyInjectionForCurrentRound, manualEvolve, manualTimeEvolve, manualMemoryLink };
+      window.WORLD_ENGINE = { applyInjection: applyInjectionForCurrentRound, manualEvolve, manualTimeEvolve, manualMemoryLink,
+        rebuildLinkedHistory, abortLinkedRebuild };
 
       // ========== 添加面板入口按钮到酒馆输入栏 ==========
       // 已移至 world-engine-ui.js 的 buildInputButton()

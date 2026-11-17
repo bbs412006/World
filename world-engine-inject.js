@@ -84,6 +84,12 @@ window.WORLD_ENGINE_INJECT = (function() {
   };
 
   function buildContext(worldState, tags) {
+    const history = window.STORY_ENGINE_HISTORY;
+    if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+      const status = history?.getStatus?.();
+      if (status?.blocked || status?.status === 'blocked' || status?.recovery?.blocked) return '';
+      worldState = window.STORY_ENGINE_PROJECTION.publicWorld(worldState);
+    }
     const rulesLoader = window.WORLD_ENGINE_RULES;
     const rulesSummary = rulesLoader ? rulesLoader.getCoreRulesSummary() : '';
     let injectAllLevels = false;
@@ -203,7 +209,7 @@ window.WORLD_ENGINE_INJECT = (function() {
 社会评价：${repText}${repChange}
 经济：${econText}
 区域动态：${riText}
-未公开信息：${blackboxText}
+${window.STORY_ENGINE_PROJECTION?.active?.() ? '' : `未公开信息：${blackboxText}`}
 
 ${rulesSummary}
     `.trim();

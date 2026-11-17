@@ -124,6 +124,7 @@ window.MEMORY_ENGINE_DATA = (function() {
       // 联动来源只用于同楼层重 roll 识别；普通纪要不携带这些字段。
       if (item?.source === 'world_engine') normalizedItem.source = 'world_engine';
       if (item?.sourceKey) normalizedItem.sourceKey = String(item.sourceKey);
+      if (item?.worldCommitId) normalizedItem.worldCommitId = clean(item.worldCommitId);
       return normalizedItem;
     }).filter(item => item.content);
     // 0.4.x 只有一条滚动 big_summary；升级后迁移成可追加的 big_summaries。
@@ -177,6 +178,7 @@ window.MEMORY_ENGINE_DATA = (function() {
           kind: clean(node?.kind) || 'memory',
           ...(node?.source === 'world_engine' ? { source: 'world_engine' } : {}),
           ...(clean(node?.sourceKey) ? { sourceKey: clean(node.sourceKey) } : {}),
+          ...(clean(node?.worldCommitId) ? { worldCommitId: clean(node.worldCommitId) } : {}),
           originChatId: clean(node?.originChatId || originChatId),
           startLayer: Number.isFinite(Number(node?.startLayer)) ? Number(node.startLayer) : 0,
           endLayer: Number.isFinite(Number(node?.endLayer)) ? Number(node.endLayer) : 0,

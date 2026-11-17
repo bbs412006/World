@@ -916,6 +916,8 @@ ${JSON.stringify(sample || [], null, 2)}
   const DEFAULT_SEG_CAUSAL_STEPS = `推演时按以下因果顺序检查：\n1. 【私密判定·最先执行】先判定本轮 {{user}} 及相关人物的行为有无目击者、是否留下可追溯痕迹。凡在无目击、未留痕迹的情况下发生的私密行为（独处、私密情爱、闺房之事、密室密谈、隐秘潜入、无人时的杀伐等），一律计入 blackbox.secretActions（witnesses 标"无"或"仅XX"），并且：不得据此生成风声、不得改变任何维度声誉、不得形成或推进事件链、不得让任何不在场 NPC 据此行动。只有当该行为被目击、留下可追溯痕迹、或事后确实被传播后，才可转为公开影响。\n2. 将所有持续中的天下大势作为本轮世界级约束，并检查是否形成新大势或已有大势明确结束。\n3. 判断本轮事实、行动与公开信息是否形成新风声（私密行为除外，见第1步）。\n4. 检查已有风声是否获得新的合法传播节点，并据此更新 level/scope/content/source。\n5. 判断风声实际覆盖了哪些势力、圈层或行动者；只有被覆盖者才能据此改变判断与行动。\n6. 天下大势或风声造成跨系统变化时，在对应状态字段中落实结果，并用 influenceChain 记录传导过程。\n7. 声誉判定：只有当 {{user}} 的行为已形成覆盖对应圈层的风声后，才改动对应维度声誉；私密、未传播或仅单人目击的行为不改变群体声誉。\n8. 仇敌判定：判断本轮是否产生触发血仇/恩怨的不可逆伤害；已有仇敌只有通过覆盖其情报来源的风声或其他合法渠道获知线索后，才能推进追踪，且受势力等级约束，不得凭空定位 {{user}}。\n9. 经济判定：只有事件链或可追溯的外部原因驱动时才更新 climate 与 signals；重大经济变化须生成对应风声，禁止凭空波动。\n10. 不得从面板全知信息直接跳到 NPC 行动，不得为了产生联动而虚构传播节点。`;
 
   async function callEvolutionAPI(state, userMsg, aiMsg, extraInstruction = '', dialogueText = '') {
+    const projection = window.STORY_ENGINE_PROJECTION;
+    const linked = projection?.active?.() === true;
     const rulesLoader = window.WORLD_ENGINE_RULES;
     const fullRules = rulesLoader ? rulesLoader.getAllRulesText() : '【规则加载失败】';
     // 蓝绿灯触发：扫描本扩展自己喂给推演的近期对话（解耦，不读酒馆的聊天扫描）
@@ -978,7 +980,8 @@ ${JSON.stringify(sample || [], null, 2)}
       + '\n\n' + segDialogue
       + '\n\n' + segOutputInstructions
       + '\n' + segJsonExample
-      + '\n' + (extraInstruction ? '\n' + extraInstruction : '') + toneSection;
+      + '\n' + (extraInstruction ? '\n' + extraInstruction : '') + toneSection
+      + (linked ? '\n\n' + projection.worldOutputInstructions() : '');
 
     // [MAP] 分段镜像（全透明展示用，只读）。各段 content 与上方 prompt 引用同一变量。
     // worldbookSection / toneSection / extraInstruction 为空时 content 为空字符串，展示侧标注「本轮未启用」。
@@ -997,6 +1000,7 @@ ${JSON.stringify(sample || [], null, 2)}
       { key: 'extra-instr',    label: '⑩ 附加指令',                content: segExtraInstruction },
       { key: 'tone',           label: '⑪ 附加提示词（用户自定义）', content: segToneSection }
     ];
+    if (linked) _lastPromptSegments.push({ key: 'story-protocol', label: '多线事实与私密输出协议', content: projection.worldOutputInstructions() });
 
     _lastPrompt = prompt;
     _lastRawResult = '';
@@ -1007,6 +1011,7 @@ ${JSON.stringify(sample || [], null, 2)}
     const retrySettings = api.getSettings ? api.getSettings() : {};
     const maxRetries = Math.max(0, parseInt(retrySettings.apiAutoRetries) || 0);
     let update = null;
+    let storyResult = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -1016,7 +1021,9 @@ ${JSON.stringify(sample || [], null, 2)}
         if (!update || typeof update !== 'object' || Array.isArray(update)) {
           throw new Error('API 返回无法解析为有效 JSON，已保留重 roll 前的当前状态');
         }
-        if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field))) {
+        if (linked) { storyResult = projection.splitWorldResponse(update); update = storyResult.publicUpdate; }
+        if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field)) &&
+            !(linked && (storyResult.privateEvents.length || storyResult.observations.length))) {
           throw new Error('API 返回不包含任何世界状态字段，已保留重 roll 前的当前状态');
         }
         break;
@@ -1045,6 +1052,7 @@ ${JSON.stringify(sample || [], null, 2)}
     // regionalIncident 由本地骰子控制，不在 callEvolutionAPI 中自动补全
     // API 返回的 regionalIncident 在 mergeRegionalIncident 中验证
     if (!update.blackbox) update.blackbox = { secretActions: [], secretAssets: [] };
+    if (linked) update.__storyResult = storyResult;
 
     return update;
   }
@@ -1054,6 +1062,7 @@ ${JSON.stringify(sample || [], null, 2)}
   let _backfillRunning = false;
   let _backfillAborted = false;
   let _lastError = '';
+  let _lastWorldCommitId = '';
 
   async function evolve(state, userMsg, aiMsg, opts) {
     if (_isRunning) {
@@ -1062,6 +1071,22 @@ ${JSON.stringify(sample || [], null, 2)}
       return false;
     }
     _lastError = '';
+    _lastWorldCommitId = '';
+    const history = window.STORY_ENGINE_HISTORY;
+    const linked = window.STORY_ENGINE_PROJECTION?.active?.() === true;
+    const store = window.WORLD_ENGINE_STORE;
+    let storyToken = null, ownsTransaction = false;
+    if (linked) {
+      try {
+        const refs = opts?.sourceRefs || window.MEMORY_ENGINE_TIMELINE?.captureRange?.(
+          Math.max(0, core.getChatLayer() - 1), core.getChatLayer()) || [];
+        storyToken = history.captureWorldStep({ mode: opts?.mode, sourceRefs: refs, beforeWorld: state });
+        if (storyToken?.beforeWorld) {
+          for (const key of Object.keys(state)) delete state[key];
+          Object.assign(state, JSON.parse(JSON.stringify(storyToken.beforeWorld)));
+        }
+      } catch (error) { _lastError = error.message || String(error); return false; }
+    }
 
     delete state._terminalEventsThisRound;
     const hadStoredState = core.hasState();
@@ -1084,7 +1109,9 @@ ${JSON.stringify(sample || [], null, 2)}
     //   （PR#27 修法2 注释 line768 明说的「基于当前状态推的正道」，旧实现与注释不符，此处对齐）。
     const isForward = isNew;
 
-    if (isForward) {
+    if (linked) {
+      console.log('[世界引擎] 联合版本基底就绪，同楼重算不会累积推进');
+    } else if (isForward) {
       console.log('[世界引擎] 📌 新轮次 forward');
     } else if (mode === 'redo') {
       // redo（手动「重新推进」）：从存档点 a 恢复基底重推，轮次=存档点轮次
@@ -1136,6 +1163,12 @@ ${JSON.stringify(sample || [], null, 2)}
       // 第6步：喂给 API 做叙事更新
       const extraInstructions = [regionalIncidentRoll.injectPrompt, distantEventRoll.injectPrompt, nearEventRoll.injectPrompt].filter(Boolean).join('\n\n');
       const update = await callEvolutionAPI(state, userMsg, aiMsg, extraInstructions, (opts && opts.dialogueText) || '');
+      const storyResult = update.__storyResult;
+      delete update.__storyResult;
+      if (linked) {
+        if (!history.validateWorldStep(storyToken)) throw new Error('正文、计划或联合基底已变化，旧世界结果已丢弃');
+        if (!store.isTransactionActive?.()) { store.beginTransaction(); ownsTransaction = true; }
+      }
 
       // 随机对象先识别并清洗临时标记，再进入既有实体 ID 分配与合并流程。
       acceptDistantEventResult(state, update);
@@ -1306,7 +1339,7 @@ ${JSON.stringify(sample || [], null, 2)}
       }
       state.worldTrends = cleanedTrends;
 
-      state.lastEvolveResult = update;
+      state.lastEvolveResult = linked ? window.STORY_ENGINE_PROJECTION.publicUpdate(update) : update;
 
       // [FIX] 轮次块三分，对齐基底选择三分（见上方 isForward/isRedo/自动重roll）：
       //   isForward        → round++ + 存档点前移(saveCheckpoint(backup)) + 刷新指纹(saveFingerprint)。
@@ -1317,7 +1350,14 @@ ${JSON.stringify(sample || [], null, 2)}
       //     重 roll 后注入将拿到「重 roll 推演前」的状态而非「这层正文产生前」的，语义错位。
       //   旧代码无差别在 isNew=false 时打印「重roll/redo 轮次不变」，但上方基底选择已把自动重 roll
       //   错误 Object.assign(cp) 回存档点（症状B），现基底已纠正为不回存档点，此处轮次保持当前轮。
-      if (isForward) {
+      if (linked) {
+        state.round = (Number(backup.round) || 0) + 1;
+        if (opts?.storyDay != null) state.time = Number(opts.storyDay);
+        core.saveCheckpoint(backup);
+        state.chatLayer = storyToken.sourceRefs?.length ? Math.max(...storyToken.sourceRefs.map(ref => Number(ref.layer) || 0)) : core.getChatLayer();
+        core.saveFingerprint(String(state.chatLayer));
+        window.WORLD_ENGINE_LEDGER?.recordChanges?.(state);
+      } else if (isForward) {
         // 首次推演不创建空白存档点；后续旧当前状态成为存档点并保留原层数。
         state.round++;                             // 只在 forward 涨轮次
         if (hadStoredState) core.saveCheckpoint(backup);
@@ -1327,10 +1367,22 @@ ${JSON.stringify(sample || [], null, 2)}
         const label = (mode === 'redo') ? 'redo' : '自动重roll';
         console.log('[世界引擎] ✅ 推演完成（' + label + '），轮次不变：第', state.round, '轮');
       }
-      core.saveStateWithLayer(state);
+      if (linked) core.saveState(state); else core.saveStateWithLayer(state);
+      if (linked) {
+        const commit = history.commitWorldStep(storyToken, { worldState: state,
+          privateEvents: storyResult?.privateEvents || [], observations: storyResult?.observations || [] });
+        _lastWorldCommitId = commit?.id || commit?.commitId || '';
+        if (ownsTransaction) { ownsTransaction = false; await store.commitTransaction(); }
+      }
       return true;
 
     } catch(e) {
+      if (ownsTransaction) { store.rollbackTransaction(); ownsTransaction = false; }
+      if (linked) {
+        try { history.abortWorldStep?.(storyToken); } catch (_) {}
+        _lastError = e.message || String(e);
+        return false;
+      }
       if (e.name === 'AbortError') {
         console.log('[世界引擎] 🛑 推演已中止');
         _lastError = '已中止';
@@ -1385,6 +1437,10 @@ ${JSON.stringify(sample || [], null, 2)}
   // 返回 { done, totalBatches, completedBatches, failedAt }
   async function backfillEvolve(opts) {
     opts = opts || {};
+    if (window.STORY_ENGINE_PROJECTION?.active?.() && window.WORLD_ENGINE?.rebuildLinkedHistory) {
+      const result = await window.WORLD_ENGINE.rebuildLinkedHistory({ ...opts, fromBeginning: true });
+      return { ...result, totalBatches: result.total || 0, completedBatches: result.completed || 0 };
+    }
     if (_isRunning || _backfillRunning) {
       console.warn('[世界引擎] ⚠️ 已有推演/回填进行中，跳过批量回填');
       return { done: false, reason: 'busy' };
@@ -1480,7 +1536,8 @@ ${JSON.stringify(sample || [], null, 2)}
             return { done: false, reason: 'chat-changed', totalBatches, completedBatches, failedAt: b + 1 };
           }
           const state = core.loadState();
-          ok = await evolve(state, '', aiMsg, { mode: 'forward', dialogueText });
+          ok = await evolve(state, '', aiMsg, { mode: 'forward', dialogueText,
+            sourceRefs: window.MEMORY_ENGINE_TIMELINE?.captureRange?.(startChatIdx, lastChatIdx) || [] });
           if (ok || _backfillAborted) break;
           if (attempt < retries) {
             console.warn(`[世界引擎] ⚠️ 第 ${b + 1}/${totalBatches} 批 API fault，重试 ${attempt + 1}/${retries}`);
@@ -1541,5 +1598,6 @@ ${JSON.stringify(sample || [], null, 2)}
     'json-example':  JSON_EXAMPLE
   };
 
-  return { evolve, backfillEvolve, getLastDebug, abort, isRunning, getLastError };
+  return { evolve, backfillEvolve, getLastDebug, abort, isRunning, getLastError,
+    getLastWorldCommitId: () => _lastWorldCommitId };
 })();

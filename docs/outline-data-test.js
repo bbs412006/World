@@ -12,7 +12,7 @@ global.WORLD_ENGINE_STORE = {
   removeItem: key => storage.delete(key)
 };
 global.WORLD_ENGINE_CORE = { getChatId: () => currentChat };
-for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-prompt.js']) {
+for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-scheduler.js', 'outline-engine-prompt.js']) {
   vm.runInThisContext(fs.readFileSync(path.resolve(__dirname, '..', file), 'utf8'), { filename: file });
 }
 const data = OUTLINE_ENGINE_DATA, prompts = OUTLINE_ENGINE_PROMPT;
@@ -37,11 +37,11 @@ const sourcePlan = {
   ]
 };
 const malformed = data.normalizePlan({ chapters: [{ id: 'same', nodes: [{ id: 'same' }, { id: 'same', required: false }] }, {}] });
-const ids = malformed.chapters.flatMap(chapter => [chapter.id, ...chapter.nodes.map(node => node.id)]);
+const ids = [...malformed.chapters, ...malformed.tracks, ...malformed.nodes].map(item => item.id);
 assert.strictEqual(new Set(ids).size, ids.length, '重复及缺失 ID 必须补全为全局唯一');
 assert.deepStrictEqual(data.normalizePlan(malformed), malformed, '归一化后的 ID 必须稳定');
-assert.strictEqual(malformed.chapters[0].nodes[0].completionCriteria, '');
-assert.strictEqual(malformed.chapters[0].nodes[1].required, false);
+assert.strictEqual(malformed.nodes[0].completionCriteria, '');
+assert.strictEqual(malformed.nodes[1].required, false);
 
 let state = data.commitPlan(sourcePlan, 0);
 assert.strictEqual(state.revision, 1);
@@ -68,7 +68,7 @@ data.setNodeStatus('n-a', 'auto');
 assert.strictEqual(data.getNodeStatus(data.loadState(), 'n-a'), 'completed');
 
 const edit = data.loadState().plan;
-edit.chapters[0].nodes[1].completionCriteria = '钥匙已经装入口袋。';
+edit.nodes[1].completionCriteria = '钥匙已经装入口袋。';
 state = data.commitPlan(edit, 1);
 assert.strictEqual(state.revision, 2);
 assert.strictEqual(data.getNodeStatus(state, 'n-a'), 'completed', '无改动节点应保留自动进度');
@@ -125,19 +125,19 @@ dirty.progressEvents[0].evidence[0].apiKey = 'secret-evidence';
 dirty.manualOverrides['n-free'].apiKey = 'secret-manual';
 dirty.proposals.push({ id: 'safe-proposal', kind: 'replace_node', chapterId: 'chapter-a', nodeId: 'n-b', status: 'pending',
   planRevision: dirty.revision, apiKey: 'secret-proposal',
-  before: { ...dirty.plan.chapters[0].nodes[1], apiKey: 'secret-before' },
-  after: { ...dirty.plan.chapters[0].nodes[1], intent: '调整方向', apiKey: 'secret-after' },
+  before: { ...dirty.plan.nodes[1], apiKey: 'secret-before' },
+  after: { ...dirty.plan.nodes[1], intent: '调整方向', apiKey: 'secret-after' },
   sourceRefs: dirty.progressEvents[0].sourceRefs, evidence: dirty.progressEvents[0].evidence });
 const sanitized = data.importData({ type: 'outline-engine-data', state: dirty }, { includeProgress: true });
 assert(!JSON.stringify(sanitized).includes('secret-'), '导入不得保留任何层级的未知请求配置');
 assert(!JSON.stringify(data.exportData()).includes('secret-'), '完整备份不得重新导出误带的密钥');
-assert(!storage.get('outline_engine_state_' + currentChat).includes('secret-'), '进入缓存的原始状态必须已经过滤');
+assert(!storage.get(data.STATE_PREFIX + currentChat).includes('secret-'), '进入缓存的原始状态必须已经过滤');
 assert.strictEqual(sanitized.tracking.anchorMessageId, 'm1');
 assert.deepStrictEqual(sanitized.tracking.seenAssistantIds, ['m1']);
 assert.strictEqual(sanitized.tracking.lastProcessedMessageKey, 'm1:hash');
 assert.strictEqual(sanitized.tracking.recheckStartLayer, 2);
 assert.strictEqual(sanitized.progressEvents[0].nodeRevision, 'hash-string');
-assert.deepStrictEqual(sanitized.proposals.find(item => item.id === 'safe-proposal').before, dirty.plan.chapters[0].nodes[1], '建议diff必须保留完整节点结构及字段顺序');
+assert.deepStrictEqual(sanitized.proposals.find(item => item.id === 'safe-proposal').before, dirty.plan.nodes[1], '建议diff必须保留完整节点结构及字段顺序');
 
 const messages = [{ messageId: 'm1', role: 'assistant', content: '她读完信，看到了仓库地址。' }];
 const checked = prompts.parseCheckResponse(JSON.stringify({
@@ -161,6 +161,6 @@ const blocked = prompts.parseCheckResponse({ nodeUpdates: [{ nodeId: 'n-a', stat
   evidence: [{ messageId: 'm1', quote: '读完信' }] }], proposals: [] }, { state, messages });
 assert.strictEqual(blocked.nodeUpdates[0].status, 'blocked', '有原文证据的受阻判断应保留');
 const organized = prompts.parseOrganizeResponse('```json\n' + JSON.stringify(sourcePlan) + '\n```');
-assert.strictEqual(organized.chapters[0].nodes[0].id, 'n-a');
+assert.strictEqual(organized.nodes[0].id, 'n-a');
 assert(prompts.buildOrganizePrompt('第一章：调查信件').includes('不得自行发明'));
 console.log('outline data/settings/prompt tests passed');

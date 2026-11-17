@@ -11,7 +11,7 @@ function sandbox(extra = {}) {
   box.run = name => vm.runInContext(read(name), box, { filename: name });
   return box;
 }
-function testScopedStorageAndSync() {
+async function testScopedStorageAndSync() {
   let sink;
   const values = new Map(), listeners = new Map();
   const chats = new Map();
@@ -36,7 +36,7 @@ function testScopedStorageAndSync() {
   });
   for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'world-engine-chatcache.js', 'outline-engine-cache.js']) box.run(file);
   const settings = box.OUTLINE_ENGINE_SETTINGS, data = box.OUTLINE_ENGINE_DATA;
-  box.WORLD_ENGINE_CHATCACHE.init();
+  await box.WORLD_ENGINE_CHATCACHE.init();
   const cache = box.WORLD_ENGINE_CHATCACHE.forScope('outline');
   const plan = { title: '计划', chapters: [{ id: 'chapter', title: '第一章', nodes: [{ id: 'node', title: '发现线索', completionCriteria: '找到货单' }] }] };
   data.commitPlan(plan, 0);
@@ -59,35 +59,36 @@ function testScopedStorageAndSync() {
   assert.ok(cache.pushLiveNow());
   const remote = JSON.parse(JSON.stringify(context.chatMetadata));
   assert.ok(!JSON.stringify(remote).includes('never-in-chat'));
-  const remoteRev = remote.outline_engine.live.rev;
+  const remoteRev = remote.outline_engine_v2.live.rev;
   // Simulate a second device opening the same server-side chat: no local outline.
-  values.delete('outline_engine_state_A'); values.delete('outline_engine_A_syncrev');
+  values.delete('outline_engine_v2_state_A'); values.delete('outline_engine_v2_A_syncrev');
   context.chatMetadata = remote;
-  cache.onChatLoaded();
+  await cache.onChatLoaded();
   assert.strictEqual(data.loadState().revision, aRevision, 'sync must not create a new plan revision');
   assert.strictEqual(data.getNodeStatus(data.loadState(), 'node'), 'completed');
   cache.pushLiveNow();
-  assert.strictEqual(context.chatMetadata.outline_engine.live.rev, remoteRev, 'unchanged sync must converge');
-  values.set('outline_engine_A_syncrev', String(remoteRev + 5));
-  cache.onChatLoaded();
-  assert.strictEqual(Number(values.get('outline_engine_A_syncrev')), context.chatMetadata.outline_engine.live.rev,
+  assert.strictEqual(context.chatMetadata.outline_engine_v2.live.rev, remoteRev, 'unchanged sync must converge');
+  values.set('outline_engine_v2_A_syncrev', String(remoteRev + 5));
+  await cache.onChatLoaded();
+  assert.strictEqual(Number(values.get('outline_engine_v2_A_syncrev')), context.chatMetadata.outline_engine_v2.live.rev,
     'identical data with unequal clocks must converge before another device edits');
-  const convergedRevision = context.chatMetadata.outline_engine.live.rev;
+  const convergedRevision = context.chatMetadata.outline_engine_v2.live.rev;
   chats.set('A', context.chatMetadata);
   context.chatId = 'B'; context.chatMetadata = { unrelated: { keep: true } };
   box.WORLD_ENGINE_CHATCACHE.onChatLoaded();
+  await box.WORLD_ENGINE_CHATCACHE.whenReady();
   assert.strictEqual(data.loadState().plan.chapters.length, 0, 'chat B must not inherit A');
   const imported = cache.importSnapshot(exported);
-  assert.ok(cache.restoreSnapshot(imported.id));
+  assert.ok(await cache.restoreSnapshot(imported.id));
   assert.strictEqual(data.getNodeStatus(data.loadState(), 'node'), 'pending', 'foreign snapshots reset progress');
   assert.strictEqual(data.loadState().originChatId, 'B');
   assert.ok(context.chatMetadata.unrelated.keep);
   assert.throws(() => cache.importSnapshot({ type: exported.type, v: 1, data: { state: 'broken' } }), /有效/);
   // Main world and outline scopes keep independent revision numbers.
   assert.ok(values.has('world_engine_B_syncrev') || !context.chatMetadata.world_engine);
-  assert.strictEqual(values.get('outline_engine_A_syncrev'), String(convergedRevision));
+  assert.strictEqual(values.get('outline_engine_v2_A_syncrev'), String(convergedRevision));
   settings.patchSettings({ syncToChat: false, autoBackup: false });
-  cache.onChatLoaded(); // clear pending write timers so the test has no stray work.
+  await cache.onChatLoaded(); // clear pending write timers so the test has no stray work.
 }
 function testActualPromptInspector() {
   const events = new Map();
@@ -155,6 +156,8 @@ async function testIndependentOutlineStartup() {
     'world-engine-inject-inspector.js': ['WORLD_ENGINE_INJECT_INSPECTOR', { init() {} }],
     'outline-engine-settings.js': ['OUTLINE_ENGINE_SETTINGS', { getSettings() {}, patchSettings() {} }],
     'outline-engine-data.js': ['OUTLINE_ENGINE_DATA', { loadState() {}, saveState() {}, commitPlan() {} }],
+    'outline-engine-scheduler.js': ['OUTLINE_ENGINE_SCHEDULER', { select() {}, evaluateConditions() {} }],
+    'story-engine-history.js': ['STORY_ENGINE_HISTORY', { captureWorldStep() {}, commitWorldStep() {}, reconcile() {} }],
     'outline-engine-cache.js': null,
     'outline-engine-prompt.js': ['OUTLINE_ENGINE_PROMPT', { buildCheckPrompt() {}, buildOrganizePrompt() {} }],
     'outline-engine.js': ['OUTLINE_ENGINE', { init() { called.push('outline'); }, applyInjection() {}, checkNow() {}, abort() {}, isRunning() {} }],
@@ -179,6 +182,6 @@ async function testIndependentOutlineStartup() {
   assert.ok(called.includes('outline-ui'));
 }
 (async () => {
-  testScopedStorageAndSync(); testActualPromptInspector(); await testFallbackMigration(); await testIndependentOutlineStartup();
+  await testScopedStorageAndSync(); testActualPromptInspector(); await testFallbackMigration(); await testIndependentOutlineStartup();
   console.log('outline integration tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

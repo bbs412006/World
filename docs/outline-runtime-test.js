@@ -233,7 +233,7 @@ async function testApiAndPreviewIsolation() {
   assert.ok(h.engine.buildNarrativeGuidance().includes('【剧情指导】'));
   h.config.patchSettings({ injectIntoPrompt: false, injectIntoWorldEngine: true }); h.engine.applyInjection();
   assert.strictEqual(h.injections.get('outline-engine-outline'), '');
-  assert.ok(h.engine.buildWorldGuidance(h.worldState).includes('不是已经发生的世界事实'));
+  assert.ok(h.engine.buildWorldGuidance(h.worldState).includes('不是事实'));
   h.config.patchSettings({ apiSource: 'custom', apiUrl: '' });
   const count = h.calls.length, result = await h.engine.checkNow();
   assert.strictEqual(result.ok, false); assert.strictEqual(h.calls.length, count, 'incomplete custom configuration fails locally');
@@ -252,7 +252,7 @@ async function testProposalReview() {
   assert.strictEqual(suggestion.before.title, '核实印章', 'review shows the actual old value, not model-supplied before');
   assert.throws(() => h.engine.applyProposal(suggestion.id, state.revision + 1), /大纲已修改/);
   h.engine.applyProposal(suggestion.id, state.revision); state = h.data.loadState();
-  assert.strictEqual(state.plan.chapters[1].nodes[0].title, '核实编号');
+  assert.strictEqual(state.plan.nodes.find(node => node.id === 'n2').title, '核实编号');
   assert.strictEqual(state.proposals[0].status, 'accepted');
   assert.strictEqual(state.revision, suggestion.planRevision + 1);
 

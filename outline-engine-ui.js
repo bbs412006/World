@@ -11,8 +11,11 @@ window.OUTLINE_ENGINE_UI = (function() {
   const settings = () => window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true) || {};
   const chatId = () => String(data()?.getChatId?.() || window.WORLD_ENGINE_CORE?.getChatId?.() || 'default');
   const cache = () => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline');
-  const state = () => data()?.loadState?.() || { plan: { title: '', synopsis: '', constraints: '', chapters: [] }, revision: 0, proposals: [], progressEvents: [] };
+  const state = () => data()?.loadState?.() || { plan: { title: '', synopsis: '', constraints: '', chapters: [], tracks: [], nodes: [] }, revision: 0, proposals: [], progressEvents: [] };
+  const history = () => window.STORY_ENGINE_HISTORY;
+  const TRACK_LABELS = { main: '主线', side: '支线', hidden: '暗线' };
   const refresh = () => window.WORLD_ENGINE_UI?.refresh?.();
+  function isRebuilding() { try { return history()?.getStatus?.().phase==='rebuilding'; } catch (_) { return false; } }
 
   function draftFor(id) {
     id = id || chatId();
@@ -20,7 +23,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       view: 'home', settingsOpen: false, settingsDraft: null, editorOpen: false,
       plan: null, expectedRevision: null, expectedPlanSnapshot: '', selectedChapterId: '', lastCurrentChapterId: '', sourceText: '',
       textOpen: false, preview: null, previewRevision: null, previewPlanSnapshot: '', pendingJson: null,
-      snapshotName: '', message: '', error: false, busy: false
+      snapshotName: '', newFlagId: '', newFlagValue: true, message: '', error: false, busy: false
     });
     return drafts.get(id);
   }
@@ -70,13 +73,148 @@ window.OUTLINE_ENGINE_UI = (function() {
     catch (_) { return 'pending'; }
   }
   function chaptersOf(plan) { return Array.isArray(plan?.chapters) ? plan.chapters : []; }
+  function nodesOf(plan) { return Array.isArray(plan?.nodes) ? plan.nodes : chaptersOf(plan).flatMap(chapter => chapter.nodes || []); }
+  function tracksOf(plan) { return Array.isArray(plan?.tracks) ? plan.tracks : []; }
+  function chapterNodes(plan, id) { return data()?.getChapterNodes?.(plan, id) || chaptersOf(plan).find(chapter => chapter.id === id)?.nodes || []; }
+  function trackNodes(plan, id) { return data()?.getTrackNodes?.(plan, id) || nodesOf(plan).filter(node => node.trackId === id); }
+  function nodeTitle(plan, id) { return nodesOf(plan).find(node => node.id === id)?.title || id; }
+  function dependencyIds(node) { return (node.dependencies || []).map(dep => typeof dep === 'string' ? dep : dep.nodeId); }
+  function findDraftNode(draft, ds) { return nodesOf(draft.plan).find(node => node.id === ds.outlineNid) || draft.plan?.chapters?.[Number(ds.outlineCi)]?.nodes?.[Number(ds.outlineNi)]; }
+
+  function selectControl(label, value, attributes, choices) {
+    const options=[...choices];
+    if(value!=null&&value!==''&&!options.some(([id])=>String(id)===String(value)))options.push([value,`${value}（当前引用缺失）`]);
+    return `<label class="we-outline-field"><span>${h(label)}</span><select ${attributes}>${options.map(([id, text]) => `<option value="${h(id)}"${String(value ?? '') === String(id) ? ' selected' : ''}>${h(text)}</option>`).join('')}</select></label>`;
+  }
+  function choiceList(label, selected, choices, attributes) {
+    const selectedSet = new Set(selected || []);
+    const options=[...choices];for(const id of selectedSet)if(!options.some(([key])=>key===id))options.push([id,`${id}（引用缺失，可取消关联）`]);
+    return `<fieldset class="we-outline-choices"><legend>${h(label)}</legend>${options.map(([id, text]) => `<label class="we-outline-check"><input type="checkbox" ${attributes} value="${h(id)}"${selectedSet.has(id) ? ' checked' : ''}>${h(text)}</label>`).join('') || '<span class="we-outline-hint">暂无可选择项目</span>'}</fieldset>`;
+  }
+  function conditionSummary(condition, plan) {
+    if (!condition) return '无额外条件';
+    if (condition.all || condition.any) return `${condition.all ? '全部满足' : '任一满足'}：${(condition.all || condition.any).map(item => conditionSummary(item, plan)).join('；') || '空条件组'}`;
+    if (condition.type === 'literal') return condition.value ? '作者固定为满足' : '作者固定为不满足';
+    if (condition.type === 'nodeStatus') return `${nodeTitle(plan, condition.nodeId)}：${STATUS_LABELS[condition.status] || condition.status || '完成'}`;
+    if (condition.type === 'chapter') return `章节范围：${(condition.chapterIds || []).join(' / ') || `${condition.fromChapterId || '不限'} → ${condition.toChapterId || '不限'}`}`;
+    if (condition.type === 'worldField') return `世界 ${condition.collection || '?'} / ${condition.entityId || '?'} / ${condition.field || '?'} ${condition.op || 'eq'} ${String(condition.value ?? '')}`;
+    if (condition.type === 'clueContact') return `已接触线索 ${condition.clueId || '?'}${condition.actorId ? `（${condition.actorId}）` : ''}`;
+    if (condition.type === 'time') return `${condition.basis==='storyDay'?'剧情总天数':'剧情日历日期'} ${condition.op || 'gte'} ${condition.value ?? '?'}`;
+    if (condition.type === 'authorFlag') return `作者标记 ${condition.flagId || '?'} = ${condition.value === false ? '否' : '是'}`;
+    return `待配置：${condition.text || '尚未定义的自然语言条件'}`;
+  }
+
+  function conditionRoot(node, slot) { return slot === 'disclosure' ? node.disclosure?.condition : node.trigger; }
+  function conditionAt(node, slot, path) {
+    let current = conditionRoot(node, slot);
+    for (const index of path) current = (current?.all || current?.any || [])[index];
+    return current;
+  }
+  function replaceCondition(node, slot, path, replacement) {
+    if (!path.length) {
+      if (slot === 'disclosure') node.disclosure = { ...(node.disclosure || {}), condition: replacement };
+      else node.trigger = replacement;
+      return;
+    }
+    const parent = conditionAt(node, slot, path.slice(0, -1));
+    const list = parent?.all || parent?.any;
+    if (!list) throw new Error('条件组已变化，请重新选择。');
+    if (replacement === undefined) list.splice(path[path.length - 1], 1);
+    else list[path[path.length - 1]] = replacement;
+  }
+  function blankCondition(type) {
+    if (type === 'none') return null;
+    if (type === 'all' || type === 'any') return { [type]: [] };
+    if (type === 'literal') return { type, value: false };
+    if (type === 'nodeStatus') return { type, nodeId: '', status: 'completed', allowSkipped: false };
+    if (type === 'chapter') return { type, chapterIds: [], fromChapterId: '', toChapterId: '' };
+    if (type === 'worldField') return { type, collection: 'events', entityId: '', field: '', op: 'eq', value: '' };
+    if (type === 'clueContact') return { type, clueId: '', actorId: '' };
+    if (type === 'time') return { type, basis:'storyDay', op: 'gte', value: 0 };
+    if (type === 'authorFlag') return { type, flagId: '', value: true };
+    return { type: 'unconfigured', text: '' };
+  }
+
+  function renderCondition(condition, node, slot, path, plan) {
+    const at = path || [], type = !condition ? 'none' : condition.all ? 'all' : condition.any ? 'any' : condition.type;
+    const attrs = `data-outline-nid="${h(node.id)}" data-outline-condition-slot="${slot}" data-outline-condition-path="${h(JSON.stringify(at))}"`;
+    const cf = name => `${attrs} data-outline-condition-field="${name}"`;
+    const choices = [['none', '无额外条件'], ['all', '以下全部满足'], ['any', '以下任一满足'], ['nodeStatus', '节点状态'], ['chapter', '章节范围'], ['worldField', '世界实体字段'], ['clueContact', '人物已接触线索'], ['time', '剧情时间'], ['authorFlag', '作者标记'], ['literal', '固定开关'], ['unconfigured', '自然语言（待配置）']];
+    let body = '';
+    if (type === 'all' || type === 'any') body = (condition.all || condition.any).map((child, index) => renderCondition(child, node, slot, [...at, index], plan)).join('') + button('condition-add', '增加条件', ` ${attrs}`);
+    else if (type === 'nodeStatus') body = selectControl('节点', condition.nodeId, cf('nodeId'), [['', '选择节点'], ...nodesOf(plan).filter(item => item.id !== node.id).map(item => [item.id, item.title || item.id])]) + selectControl('状态', condition.status, cf('status'), Object.entries(STATUS_LABELS)) + `<label class="we-outline-check"><input type="checkbox" ${cf('allowSkipped')}${condition.allowSkipped ? ' checked' : ''}>跳过也视为满足</label>`;
+    else if (type === 'chapter') body = choiceList('指定章节（不选则使用下方范围）', condition.chapterIds, chaptersOf(plan).map(item => [item.id, item.title || item.id]), `${cf('chapterIds')} data-outline-condition-array="true"`) + selectControl('起始章', condition.fromChapterId, cf('fromChapterId'), [['', '不限'], ...chaptersOf(plan).map(item => [item.id, item.title || item.id])]) + selectControl('结束章', condition.toChapterId, cf('toChapterId'), [['', '不限'], ...chaptersOf(plan).map(item => [item.id, item.title || item.id])]);
+    else if (type === 'worldField') {
+      let world = {}; try { world = window.WORLD_ENGINE_CORE?.loadState?.() || {}; } catch (_) {}
+      const collections = Object.keys(world).filter(key => Array.isArray(world[key]));
+      if (!collections.includes(condition.collection)) collections.push(condition.collection || 'events');
+      const entities = Array.isArray(world[condition.collection]) ? world[condition.collection].filter(item => item && item.id) : [];
+      const entity = entities.find(item => item.id === condition.entityId);
+      const fields = entity ? Object.keys(entity).filter(key => entity[key] === null || ['string', 'number', 'boolean'].includes(typeof entity[key])) : [];
+      if (condition.field && !fields.includes(condition.field)) fields.push(condition.field);
+      body = selectControl('实体集合', condition.collection, cf('collection'), collections.map(key => [key, key])) + selectControl('稳定实体 ID', condition.entityId, cf('entityId'), [['', '选择已有世界实体'], ...entities.map(item => [item.id, `${item.name || item.title || item.id} · ${item.id}`]), ...(!entities.some(item => item.id === condition.entityId) && condition.entityId ? [[condition.entityId, `${condition.entityId}（当前未找到）`]] : [])]) + selectControl('字段', condition.field, cf('field'), [['', '选择字段'], ...fields.map(key => [key, key])]) + selectControl('比较', condition.op, cf('op'), [['eq', '等于'], ['ne', '不等于'], ['gt', '大于'], ['gte', '大于等于'], ['lt', '小于'], ['lte', '小于等于'], ['contains', '包含'], ['exists', '存在']]) + selectControl('比较值类型', typeof condition.value, `${attrs} data-outline-condition-value-type="true"`, [['string', '文本'], ['number', '数字'], ['boolean', '是／否']]) + (typeof condition.value === 'boolean' ? `<label class="we-outline-check"><input type="checkbox" ${cf('value')}${condition.value ? ' checked' : ''}>比较值为是</label>` : editorField('比较值', condition.value, `${cf('value')} data-outline-numeric="${typeof condition.value === 'number'}"`)) + (!entities.length ? '<p class="we-outline-hint">当前未找到带稳定 ID 的实体。缺少来源时条件会等待信息，不会自动放行。</p>' : '');
+    } else if (type === 'clueContact') {
+      const clueList=uid('we-outline-clue-options'),actorList=uid('we-outline-actor-options');
+      const clues=[...(state().clues||[])],actors=availableEntities().filter(ref=>ref.source==='memory'&&ref.type==='character');
+      for(const planned of nodesOf(plan))if(planned.id!==node.id&&planned.disclosure?.clueText&&engine()?.clueIdForNode){const id=engine().clueIdForNode(planned.id);if(!clues.some(clue=>clue.id===id))clues.push({id,publicHint:`计划线索：${planned.title}（尚未出现）`});}
+      body=`<label class="we-outline-field"><span>线索稳定 ID（已有或计划线索）</span><input ${cf('clueId')} list="${clueList}" value="${h(condition.clueId)}"><datalist id="${clueList}">${clues.map(clue=>`<option value="${h(clue.id)}">${h(clue.publicHint||clue.id)}</option>`).join('')}</datalist></label><label class="we-outline-field"><span>接触者稳定 ID（留空为任意接触者）</span><input ${cf('actorId')} list="${actorList}" value="${h(condition.actorId)}"><datalist id="${actorList}">${actors.map(ref=>`<option value="${h(ref.id)}">${h(ref.nameSnapshot)}</option>`).join('')}</datalist></label><p class="we-outline-hint">尚未出现的线索会保持等待信息，不会自动认为人物已经知情。</p>`;
+    }
+    else if (type === 'time') {
+      const basis=condition.basis||'calendar';
+      body=selectControl('时间依据',basis,cf('basis'),[['storyDay','剧情总天数'],['calendar','日历日期']])+selectControl('时间比较',condition.op,cf('op'),[['gte','不早于'],['lte','不晚于'],['eq','等于']])+(basis==='storyDay'?`<label class="we-outline-field"><span>剧情总天数阈值</span><input type="number" step="any" ${cf('value')} data-outline-numeric="true" value="${h(condition.value)}"></label><p class="we-outline-hint">使用已提交世界状态的总天数 world.time；缺少该值时等待信息。</p>`:editorField('剧情日历日期（如 2026-11-17）',condition.value,cf('value'))+'<p class="we-outline-hint">日历条件需要可靠的故事日期；不会使用电脑日期推测。</p>');
+    }
+    else if (type === 'authorFlag') body = editorField('作者标记名称', condition.flagId, cf('flagId')) + `<label class="we-outline-check"><input type="checkbox" ${cf('value')}${condition.value !== false ? ' checked' : ''}>标记必须为是</label>`;
+    else if (type === 'literal') body = `<label class="we-outline-check"><input type="checkbox" ${cf('value')}${condition.value ? ' checked' : ''}>固定为满足</label>`;
+    else if (type === 'unconfigured') body = editorField('保留原文条件（配置前不执行）', condition.text, cf('text'), true);
+    return `<div class="we-outline-condition">${selectControl('条件类型', type, `${attrs} data-outline-condition-type="true"`, choices)}${body}${at.length ? button('condition-remove', '移除此条件', ` ${attrs}`) : ''}</div>`;
+  }
 
   function renderEvidence(current, node) {
     const manual = current.manualOverrides?.[node.id];
     const events = (current.progressEvents || []).filter(item => item.nodeId === node.id && !['stale', 'invalid'].includes(item.validity) && item.valid !== false && item.stale !== true && Number(item.planRevision) === Number(current.revision));
-    const event = events[events.length - 1];
-    const evidence = event?.evidence || [];
-    return `${manual ? '<div class="we-outline-hint">当前状态由手动指定。</div>' : ''}${evidence.length ? `<details class="we-outline-evidence"><summary>判断证据 ${evidence.length} 条</summary>${evidence.map(item => `<blockquote><span>消息 ${h(item.messageId ?? '未标记')}</span><p>${h(item.quote || '')}</p></blockquote>`).join('')}</details>` : '<div class="we-outline-hint">暂无有效正文证据。</div>'}`;
+    const event = events[events.length - 1], evidence = event?.evidence || [];
+    const sourceName = item => item.kind === 'world_fact' || item.source === 'world' || item.factId || item.worldCommitId ? '世界事实' : '正文证据';
+    return `${manual ? '<div class="we-outline-hint">当前状态由手动指定。</div>' : ''}${evidence.length ? `<details class="we-outline-evidence"><summary>判断证据 ${evidence.length} 条</summary>${evidence.map(item => `<blockquote><span>${sourceName(item)} · ${h(item.messageId || item.factId || item.worldCommitId || item.commitId || '')}</span><p>${h(item.quote || item.text || '')}</p></blockquote>`).join('')}</details>` : '<div class="we-outline-hint">暂无有效事实证据；作者计划本身不算证据。</div>'}`;
+  }
+
+  function schedule(channel) {
+    try { return engine()?.getSchedule?.(channel) || { selected: [], nodeIds: [], explanations: [] }; }
+    catch (error) { return { selected: [], explanations: [], error: String(error?.message || error) }; }
+  }
+  function scheduleRows(value) { return value?.explanations || value?.candidates || []; }
+  function reasonText(value) {
+    const code = typeof value === 'object' ? value.message || value.text || value.reason || value.code : value;
+    const labels = { selected: '本轮选中', paused: '剧情线已暂停', track_paused:'剧情线已暂停', unknown:'条件信息不足', waiting:'条件尚未满足', budget:'本轮数量预算已满', budget_waiting:'本轮节点预算已满', cooldown:'等待冷却', completed:'节点已完成', node_already_closed:'节点已经完成或跳过', dependency:'等待前置节点', trigger:'等待触发条件', private:'作者私密内容不提供给正文', blocked:'当前受阻', eligible:'具备调度资格', no_extra_condition:'无额外解锁条件', author_literal:'作者固定开关', current_chapter_missing:'当前章节缺失', condition_chapter_missing:'条件引用的章节不存在', chapter_range:'检查章节范围', world_reference_unconfigured:'世界实体引用待配置', world_collection_missing:'当前世界未提供该实体集合', world_field_missing:'世界实体字段缺失', world_field_exists:'检查世界字段是否存在', field_equality:'检查字段是否相等', field_inequality:'检查字段是否不等', field_contains:'检查字段是否包含目标内容', numeric_comparison:'检查字段数值范围', comparison_requires_numbers:'比较值不是可用数字', contains_requires_text_or_array:'包含操作需要文本或列表', unsupported_operator:'比较操作尚未配置', unsafe_field_path:'字段路径不受支持', actual_clue_contact:'检查实际线索接触证据', story_time_unreliable:'剧情时间来源不可靠', absolute_story_time_missing:'缺少可靠的剧情绝对时间', condition_requires_configuration_or_evidence:'自然语言条件待配置或缺少可复核证据', verified_condition_evidence:'条件已有可复核正文证据', track_missing:'剧情线引用缺失', recovery_required:'联合历史需要先恢复或重建', node_chapter_missing:'关联章节不存在', main_chapter_gate:'主线遵守当前章节范围', cross_chapter_track_persists:'此剧情线从起始章起持续跨章生效', player_action_requires_dialogue:'玩家行动必须由正文确认，后台不会代为完成', private_node_requires_available_public_clue:'私密节点仅在已有可发现公开线索时进入正文', one_node_per_track_tick:'此后台轮次已为同线安排一个节点' };
+    if(labels[code])return labels[code];
+    const timeReasons={story_day_missing:'尚无已提交的剧情总天数',story_day_target_unconfigured:'剧情总天数阈值尚未配置为数字'};
+    if(timeReasons[code])return timeReasons[code];
+    const [prefix,...parts]=String(code||'').split(':');
+    if(prefix==='node_status')return `前置节点 ${nodeTitle(state().plan,parts[0])} 当前${STATUS_LABELS[parts[1]]||parts[1]||'状态未知'}`;
+    const dynamic={dependency_node_missing:'依赖节点不存在',world_entity_missing:'世界稳定实体不存在',clue_missing:'线索尚未出现',author_flag_unconfigured:'作者标记尚未配置',author_flag:'检查作者标记'};
+    return dynamic[prefix]?`${dynamic[prefix]}：${parts.join(':')}`:String(code||'暂无说明');
+  }
+  function schedulingLabel(row, selected) {
+    if(row.selected||selected?.includes(row.nodeId))return '本轮选中';
+    const reasons=row.reasons||[];
+    if(reasons.includes('track_paused'))return '已暂停';
+    if(reasons.includes('node_already_closed'))return '已完成／跳过';
+    if(reasons.includes('cooldown'))return '冷却中';
+    if(reasons.includes('recovery_required'))return '等待联合恢复';
+    return row.eligible===null?'信息不足':row.eligible===false?'等待条件':'预算或轮转延后';
+  }
+
+  function renderNodeCard(current, node, index) {
+    const status = nodeStatus(current, node.id), track = tracksOf(current.plan).find(item => item.id === node.trackId);
+    const chapters = (node.chapterIds || []).map(id => chaptersOf(current.plan).find(ch => ch.id === id)?.title || id);
+    return `<article class="we-outline-node" data-outline-node="${h(node.id)}">
+      <div class="we-outline-node-head"><strong>${index + 1}. ${h(node.title || '未命名节点')}</strong><span class="we-outline-badge">${h(TRACK_LABELS[track?.kind] || '剧情')}</span><span class="we-outline-badge">${node.required === false ? '可选' : '必要'}</span><span class="we-outline-status we-outline-status-${h(status)}">${h(STATUS_LABELS[status] || status)}</span></div>
+      ${chapters.length ? `<p class="we-outline-hint">关联章节：${h(chapters.join(' / '))}（不限制跨章调度）</p>` : '<p class="we-outline-hint">跨章节点</p>'}
+      ${node.publicHint ? `<p><strong>公开提示：</strong>${h(node.publicHint)}</p>` : ''}
+      <details class="we-outline-author-content"><summary>${node.visibility === 'private' || track?.kind === 'hidden' ? '作者私密内容' : '作者计划与判据'}</summary>
+        <p>${h(node.intent || '未填写意图')}</p><dl><dt>完成判据</dt><dd>${h(node.completionCriteria || '尚未填写；不会自动标记完成。')}</dd>${node.notes ? `<dt>作者备注</dt><dd>${h(node.notes)}</dd>` : ''}<dt>完成来源</dt><dd>${h({ dialogue: '正文', world: '世界后台事实', either: '正文或世界事实' }[node.completionSource] || '正文')}</dd><dt>解锁条件</dt><dd>${h(conditionSummary(node.trigger, current.plan))}</dd><dt>揭示条件</dt><dd>${h(conditionSummary(node.disclosure?.condition, current.plan))}</dd>${node.disclosure?.clueText ? `<dt>满足条件后可发现的线索</dt><dd>${h(node.disclosure.clueText)}</dd>` : ''}</dl>
+      </details>${renderEvidence(current, node)}
+      <label class="we-outline-status-select">手动指定状态 <select data-outline-status="${h(node.id)}" aria-label="${h(node.title)}状态"><option value="" selected>选择手动状态</option>${Object.entries(STATUS_LABELS).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}${current.manualOverrides?.[node.id] ? '<option value="auto">恢复自动判断</option>' : ''}</select></label>
+    </article>`;
   }
 
   function renderHome(current, draft) {
@@ -85,15 +223,26 @@ window.OUTLINE_ENGINE_UI = (function() {
     draft.lastCurrentChapterId = current.currentChapterId;
     const selected = chapters.find(ch => ch.id === draft.selectedChapterId) || chapters.find(ch => ch.id === current.currentChapterId) || chapters[0];
     const sidebar = chapters.map((chapter, index) => {
-      const required = (chapter.nodes || []).filter(node => node.required !== false);
-      const done = required.filter(node => ['completed', 'skipped'].includes(nodeStatus(current, node.id))).length;
-      return `<button type="button" class="we-outline-chapter${selected?.id === chapter.id ? ' is-selected' : ''}" data-outline-action="select-chapter" data-outline-chapter="${h(chapter.id)}"><span>${index + 1}. ${h(chapter.title || '未命名章节')}</span><small>${chapter.id === current.currentChapterId ? '当前章 · ' : ''}必要节点 ${done}/${required.length}</small></button>`;
+      const gates = chapter.exitNodeIds || chapterNodes(plan, chapter.id).filter(node => node.required !== false).map(node => node.id);
+      const done = gates.filter(id => ['completed', 'skipped'].includes(nodeStatus(current, id))).length;
+      return `<button type="button" class="we-outline-chapter${selected?.id === chapter.id ? ' is-selected' : ''}" data-outline-action="select-chapter" data-outline-chapter="${h(chapter.id)}"><span>${index + 1}. ${h(chapter.title || '未命名章节')}</span><small>${chapter.id === current.currentChapterId ? '当前章 · ' : ''}章末门槛 ${done}/${gates.length}</small></button>`;
     }).join('');
-    const nodes = (selected?.nodes || []).map((node, index) => {
-      const status = nodeStatus(current, node.id);
-      return `<article class="we-outline-node" data-outline-node="${h(node.id)}"><div class="we-outline-node-head"><strong>${index + 1}. ${h(node.title || '未命名节点')}</strong><span class="we-outline-badge">${node.required === false ? '可选' : '必要'}</span><span class="we-outline-status we-outline-status-${h(status)}">${h(STATUS_LABELS[status] || status)}</span></div>${node.intent ? `<p>${h(node.intent)}</p>` : ''}<dl><dt>完成判据</dt><dd>${h(node.completionCriteria || '尚未填写；自动检查不会将此节点标记为完成。')}</dd>${node.notes ? `<dt>备注</dt><dd>${h(node.notes)}</dd>` : ''}</dl>${renderEvidence(current, node)}<label class="we-outline-status-select">手动指定状态 <select data-outline-status="${h(node.id)}" aria-label="${h(node.title)}状态"><option value="" selected>选择手动状态</option>${Object.entries(STATUS_LABELS).map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}${current.manualOverrides?.[node.id] ? '<option value="auto">恢复自动判断</option>' : ''}</select></label></article>`;
-    }).join('');
-    return `<section class="we-outline-plan-heading"><h3>${h(plan.title || '还没有剧情大纲')}</h3>${plan.synopsis ? `<p>${h(plan.synopsis)}</p>` : ''}${plan.constraints ? `<details><summary>剧情约束</summary><p>${h(planText(plan.constraints))}</p></details>` : ''}</section>${chapters.length ? `<div class="we-outline-workspace"><nav class="we-outline-chapters" aria-label="章节列表">${sidebar}</nav><section class="we-outline-chapter-detail"><div class="we-outline-section-head"><h3>${h(selected?.title || '')}</h3>${selected && selected.id !== current.currentChapterId ? button('set-current-chapter', '指定为当前章', ` data-outline-chapter="${h(selected.id)}"`) : '<span class="we-outline-badge">当前章</span>'}</div>${selected?.goal ? `<p class="we-outline-goal">章节目标：${h(selected.goal)}</p>` : ''}${nodes || '<p class="we-outline-empty">本章暂无节点，可在结构编辑中添加。</p>'}</section></div>` : '<p class="we-outline-empty">先手工建立章节，或导入文本让 AI 整理为可编辑的大纲。</p>'}${renderSuggestions(current)}`;
+    const nodes = selected ? chapterNodes(plan, selected.id) : [];
+    return `<section class="we-outline-plan-heading"><h3>${h(plan.title || '还没有剧情大纲')}</h3>${plan.synopsis ? `<details><summary>作者梗概</summary><p>${h(plan.synopsis)}</p></details>` : ''}${plan.constraints ? `<details><summary>作者完整约束</summary><p>${h(planText(plan.constraints))}</p></details>` : ''}</section>
+      ${chapters.length ? `<div class="we-outline-workspace"><nav class="we-outline-chapters" aria-label="章节列表">${sidebar}</nav><section class="we-outline-chapter-detail"><div class="we-outline-section-head"><h3>${h(selected?.title || '')}</h3>${selected && selected.id !== current.currentChapterId ? button('set-current-chapter', '指定为当前章', ` data-outline-chapter="${h(selected.id)}"`) : '<span class="we-outline-badge">当前章</span>'}</div>${selected?.goal ? `<p class="we-outline-goal">章节目标：${h(selected.goal)}</p>` : ''}<p class="we-outline-hint">章节用于故事节奏，其他章节的剧情线仍可并行推进。</p>${nodes.map((node, index) => renderNodeCard(current, node, index)).join('') || '<p class="we-outline-empty">本章暂无关联节点。跨章节点可在剧情线看板查看。</p>'}</section></div>` : '<p class="we-outline-empty">先手工建立剧情线与节点，或导入文本整理为大纲。</p>'}${renderSuggestions(current)}`;
+  }
+
+  function renderTracks(current) {
+    const tracks = tracksOf(current.plan), narrative = schedule('narrative'), world = schedule('world');
+    const narrIds = new Set(narrative.nodeIds || (narrative.selected || []).map(node => node.id));
+    const worldIds = new Set(world.nodeIds || (world.selected || []).map(node => node.id));
+    return `<section class="we-outline-track-board"><h3>跨章节剧情线</h3><p class="we-outline-hint">作者看板包含完整计划；实际正文与后台收到的内容以“调度与注入”页为准。</p>${tracks.map(track => {
+      const nodes = trackNodes(current.plan, track.id);
+      return `<section class="we-outline-track we-outline-track-${h(track.kind)}"><div class="we-outline-section-head"><div><span class="we-outline-badge">${h(TRACK_LABELS[track.kind] || track.kind)}</span><h3>${h(track.title || '未命名剧情线')}</h3></div><div class="we-outline-actions"><span class="we-outline-hint">优先级 ${h(track.priority ?? 0)}</span>${button('track-pause', track.paused ? '继续此线' : '暂停此线', ` data-outline-track="${h(track.id)}"`)}</div></div><p>${h(track.goal || '')}</p>${track.paused ? '<p class="we-outline-message">此线已由作者暂停。</p>' : ''}${nodes.map((node, index) => {
+        const row = [...scheduleRows(narrative), ...scheduleRows(world)].find(item => item.nodeId === node.id);
+        return `<div class="we-outline-track-node"><div class="we-outline-selection-tags">${narrIds.has(node.id) ? '<span class="we-outline-badge">本轮正文</span>' : ''}${worldIds.has(node.id) ? '<span class="we-outline-badge">本轮后台</span>' : ''}${!narrIds.has(node.id) && !worldIds.has(node.id) && row ? `<span class="we-outline-hint">${h((row.reasons || []).map(reasonText).join('；') || (row.eligible === null ? '等待信息' : '等待调度'))}</span>` : ''}</div>${renderNodeCard(current, node, index)}</div>`;
+      }).join('') || '<p class="we-outline-empty">此线暂无节点。</p>'}</section>`;
+    }).join('') || '<p class="we-outline-empty">尚未建立剧情线。可在结构编辑中新增主线、支线或暗线。</p>'}${renderSuggestions(current)}</section>`;
   }
 
   function displayDiff(value) {
@@ -119,16 +268,54 @@ window.OUTLINE_ENGINE_UI = (function() {
     return `<label class="we-outline-field"><span>${h(label)}</span>${multiline ? `<textarea ${attributes} rows="3">${h(planText(value))}</textarea>` : `<input type="text" ${attributes} value="${h(value)}">`}</label>`;
   }
 
+  function availableEntities() {
+    const result = [], originChatId = chatId();
+    try {
+      const world = window.WORLD_ENGINE_CORE?.loadState?.() || {};
+      for (const [type, list] of Object.entries(world)) if (Array.isArray(list)) {
+        for (const item of list) if (item?.id) result.push({ source: 'world', originChatId, type, id: item.id, nameSnapshot: item.name || item.title || item.id });
+      }
+    } catch (_) {}
+    try {
+      const memory = window.MEMORY_ENGINE_DATA?.loadState?.() || {};
+      for (const item of memory.personal_memory || []) if (item.id) result.push({ source: 'memory', originChatId, type: 'character', id: item.id, nameSnapshot: item.names?.[0] || item.id });
+      for (const [type, list] of Object.entries(memory.entity_memory || {})) if (Array.isArray(list)) for (const item of list) if (item.id) result.push({ source: 'memory', originChatId, type, id: item.id, nameSnapshot: item.name || item.id });
+    } catch (_) {}
+    return result;
+  }
+  function renderEntityRefs(node, draft) {
+    const choices = availableEntities();
+    return `<div class="we-outline-entity-links"><h4>世界／记忆稳定实体关联</h4>${(node.entityRefs || []).map((ref, index) => `<p>${h(ref.nameSnapshot || ref.id)} <span class="we-outline-hint">${h(ref.source)} / ${h(ref.type)} / ${h(ref.id)}</span> ${button('entity-remove', '移除', ` data-outline-nid="${h(node.id)}" data-outline-ref-index="${index}"`)}</p>`).join('')}${selectControl('选择当前聊天实体', draft.entityPicks?.[node.id] || '', `data-outline-entity-pick="true" data-outline-nid="${h(node.id)}"`, [['', '选择实体'], ...choices.map(ref => [JSON.stringify(ref), `${ref.source === 'world' ? '世界' : '记忆'} · ${ref.nameSnapshot} · ${ref.id}`])])}${button('entity-add', '增加关联', ` data-outline-nid="${h(node.id)}"`)}</div>`;
+  }
+
+  function renderPlanPreview(plan) {
+    return `<div class="we-outline-plan-preview"><h4>${h(plan?.title || '未命名大纲')}</h4><p>${h(plan?.synopsis || '')}</p><p class="we-outline-hint">${chaptersOf(plan).length} 章 · ${tracksOf(plan).length} 条剧情线 · ${nodesOf(plan).length} 个节点</p>${tracksOf(plan).map(track => `<details open><summary>${h(TRACK_LABELS[track.kind] || track.kind)}：${h(track.title)}</summary><p>${h(track.goal)}</p><ol>${trackNodes(plan, track.id).map(node => `<li><strong>${h(node.title)}</strong><p>${h(node.intent)}</p><p>完成判据：${h(node.completionCriteria || '未填写')}</p><p>依赖：${h(dependencyIds(node).map(id => nodeTitle(plan, id)).join(' / ') || '无')}</p><p>解锁：${h(conditionSummary(node.trigger, plan))}</p><p>公开提示：${h(node.publicHint || '无')}</p><p>揭示：${h(conditionSummary(node.disclosure?.condition, plan))}；${h(node.disclosure?.clueText || '')}</p></li>`).join('')}</ol></details>`).join('')}${!tracksOf(plan).length ? chaptersOf(plan).map(ch => `<h4>${h(ch.title)}</h4><ol>${chapterNodes(plan,ch.id).map(node => `<li>${h(node.title)}：${h(node.completionCriteria)}</li>`).join('')}</ol>`).join('') : ''}</div>`;
+  }
+
+  function renderValidation(plan) {
+    try {
+      const result=data().validatePlan?.(plan), messages=[...(result?.errors||[]),...(result?.warnings||[])];
+      return messages.length?`<div class="we-outline-validation" role="status"><strong>计划关联与条件核对</strong><ul>${messages.map(message=>`<li>${h(message)}</li>`).join('')}</ul></div>`:'';
+    }catch(error){return `<p class="we-outline-message is-error">${h(error?.message||error)}</p>`;}
+  }
+
   function renderEditor(draft) {
-    const plan = draft.plan || { title: '', synopsis: '', constraints: '', chapters: [] };
-    const saved = state();
+    const plan = draft.plan || { title: '', synopsis: '', constraints: '', chapters: [], tracks: [], nodes: [] }, saved = state();
     const changed = Number(draft.expectedRevision) !== Number(saved.revision) || draft.expectedPlanSnapshot !== JSON.stringify(saved.plan);
-    const conflict = changed ? `<section class="we-outline-preview"><h4>当前保存的大纲已发生变化</h4><p>你的草稿已保留。继续保存会用草稿替换当前版本，请先核对下面的内容。</p><details><summary>查看当前版本：${h(saved.plan?.title || '未命名大纲')}</summary>${chaptersOf(saved.plan).map(chapter => `<h4>${h(chapter.title)}</h4><p>${h(chapter.goal)}</p><ol>${(chapter.nodes || []).map(node => `<li>${h(node.title)}<p>${h(node.completionCriteria)}</p></li>`).join('')}</ol>`).join('')}</details>${button('rebase-editor', '已核对，保留草稿继续保存')}</section>` : '';
-    return `<section class="we-outline-editor"><div class="we-outline-section-head"><h3>编辑大纲结构</h3><span class="we-outline-hint">未保存的草稿会保留到关闭页面。</span></div>${conflict}${editorField('大纲标题', plan.title, 'data-outline-plan-field="title"')}${editorField('剧情梗概', plan.synopsis, 'data-outline-plan-field="synopsis"', true)}${editorField('全局约束', plan.constraints, 'data-outline-plan-field="constraints"', true)}${chaptersOf(plan).map((chapter, ci) => `<section class="we-outline-edit-chapter" data-outline-chapter-index="${ci}"><div class="we-outline-section-head"><strong>第 ${ci + 1} 章</strong><div class="we-outline-actions">${button('chapter-up', '上移', ` data-outline-ci="${ci}"${ci === 0 ? ' disabled' : ''}`)}${button('chapter-down', '下移', ` data-outline-ci="${ci}"${ci === plan.chapters.length - 1 ? ' disabled' : ''}`)}${button('chapter-remove', '删除章节', ` data-outline-ci="${ci}"`)}</div></div>${editorField('章节标题', chapter.title, `data-outline-chapter-field="title" data-outline-ci="${ci}"`)}${editorField('章节目标', chapter.goal, `data-outline-chapter-field="goal" data-outline-ci="${ci}"`, true)}${(chapter.nodes || []).map((node, ni) => `<article class="we-outline-edit-node"><div class="we-outline-section-head"><strong>节点 ${ni + 1}</strong><div class="we-outline-actions">${button('node-up', '上移', ` data-outline-ci="${ci}" data-outline-ni="${ni}"${ni === 0 ? ' disabled' : ''}`)}${button('node-down', '下移', ` data-outline-ci="${ci}" data-outline-ni="${ni}"${ni === chapter.nodes.length - 1 ? ' disabled' : ''}`)}${button('node-remove', '删除节点', ` data-outline-ci="${ci}" data-outline-ni="${ni}"`)}</div></div>${editorField('节点标题', node.title, `data-outline-node-field="title" data-outline-ci="${ci}" data-outline-ni="${ni}"`)}${editorField('节点意图', node.intent, `data-outline-node-field="intent" data-outline-ci="${ci}" data-outline-ni="${ni}"`, true)}${editorField('完成判据', node.completionCriteria, `data-outline-node-field="completionCriteria" data-outline-ci="${ci}" data-outline-ni="${ni}"`, true)}${editorField('备注', node.notes, `data-outline-node-field="notes" data-outline-ci="${ci}" data-outline-ni="${ni}"`, true)}<label class="we-outline-check"><input type="checkbox" data-outline-node-field="required" data-outline-ci="${ci}" data-outline-ni="${ni}"${node.required !== false ? ' checked' : ''}>必要节点</label></article>`).join('')}${button('node-add', '增加节点', ` data-outline-ci="${ci}"`)}</section>`).join('')}<div class="we-outline-actions">${button('chapter-add', '增加章节')}${button('save-plan', '确认保存大纲')}${button('close-editor', '收起编辑（保留草稿）')}${button('discard-editor', '放弃草稿')}</div></section>`;
+    const conflict = changed ? `<section class="we-outline-preview"><h4>当前保存的大纲已发生变化</h4><p>你的草稿已保留。继续保存会用草稿替换当前版本，请先核对下面的内容。</p><details><summary>查看当前版本</summary>${renderPlanPreview(saved.plan)}</details>${button('rebase-editor', '已核对，保留草稿继续保存')}</section>` : '';
+    const chapterChoices = chaptersOf(plan).map(ch => [ch.id, ch.title || ch.id]);
+    const nodeChoices = nodesOf(plan).map(node => [node.id, node.title || node.id]);
+    return `<section class="we-outline-editor"><h3>编辑章节、剧情线与节点</h3><p class="we-outline-hint">草稿在收起、切换页面和后台刷新后保留；确认保存才替换计划。</p>${conflict}${renderValidation(plan)}
+      ${editorField('大纲标题', plan.title, 'data-outline-plan-field="title"')}${editorField('作者梗概', plan.synopsis, 'data-outline-plan-field="synopsis"', true)}${editorField('作者完整约束（仅后台）', plan.constraints, 'data-outline-plan-field="constraints"', true)}${editorField('正文可见梗概', plan.publicSynopsis, 'data-outline-plan-field="publicSynopsis"', true)}${editorField('正文可见约束', plan.publicConstraints, 'data-outline-plan-field="publicConstraints"', true)}<p class="we-outline-hint">作者梗概与完整约束只供作者和后台使用。正文只读取公开梗概、公开约束与已允许的提示。</p>
+      <h4>章节节奏与章末门槛</h4>${chaptersOf(plan).map((chapter, ci) => `<section class="we-outline-edit-chapter"><div class="we-outline-section-head"><strong>第 ${ci + 1} 章</strong><div class="we-outline-actions">${button('chapter-up', '上移', ` data-outline-ci="${ci}"${ci === 0 ? ' disabled' : ''}`)}${button('chapter-down', '下移', ` data-outline-ci="${ci}"${ci === plan.chapters.length-1 ? ' disabled' : ''}`)}${button('chapter-remove', '删除章节', ` data-outline-ci="${ci}"`)}</div></div>${editorField('章节标题', chapter.title, `data-outline-chapter-field="title" data-outline-ci="${ci}"`)}${editorField('章节目标', chapter.goal, `data-outline-chapter-field="goal" data-outline-ci="${ci}"`, true)}${choiceList('章末门槛（这些节点完成或作者跳过后才推进章节）', chapter.exitNodeIds, nodeChoices, `data-outline-chapter-list="exitNodeIds" data-outline-ci="${ci}"`)}</section>`).join('')}${button('chapter-add', '增加章节')}
+      <h4>剧情线</h4>${tracksOf(plan).map((track, ti) => `<section class="we-outline-edit-track"><div class="we-outline-section-head"><strong>${h(TRACK_LABELS[track.kind] || '剧情线')} ${ti+1}</strong><div class="we-outline-actions">${button('track-up','上移',` data-outline-ti="${ti}"`)}${button('track-down','下移',` data-outline-ti="${ti}"`)}${button('track-remove','删除剧情线',` data-outline-ti="${ti}"`)}</div></div>${editorField('名称',track.title,`data-outline-track-field="title" data-outline-ti="${ti}"`)}${selectControl('类型',track.kind,`data-outline-track-field="kind" data-outline-ti="${ti}"`,Object.entries(TRACK_LABELS))}${editorField('目标',track.goal,`data-outline-track-field="goal" data-outline-ti="${ti}"`,true)}<label class="we-outline-field"><span>优先级（数字越大越优先）</span><input type="number" data-outline-track-field="priority" data-outline-ti="${ti}" value="${h(track.priority ?? 0)}"></label><label class="we-outline-check"><input type="checkbox" data-outline-track-field="paused" data-outline-ti="${ti}"${track.paused?' checked':''}>暂停此线</label>${button('node-add','为此线增加节点',` data-outline-track="${h(track.id)}"`)}</section>`).join('')}${button('track-add','增加剧情线')}
+      <h4>跨章节点</h4>${nodesOf(plan).map((node,ni)=> `<details class="we-outline-edit-node" open><summary>${ni+1}. ${h(node.title || '新节点')}</summary><div class="we-outline-actions">${button('node-up','上移',` data-outline-nid="${h(node.id)}"`)}${button('node-down','下移',` data-outline-nid="${h(node.id)}"`)}${button('node-remove','删除节点',` data-outline-nid="${h(node.id)}"`)}</div>${editorField('节点标题',node.title,`data-outline-node-field="title" data-outline-nid="${h(node.id)}"`)}${selectControl('所属剧情线',node.trackId,`data-outline-node-field="trackId" data-outline-nid="${h(node.id)}"`,tracksOf(plan).map(track=>[track.id,`${TRACK_LABELS[track.kind] || ''} · ${track.title}`]))}${choiceList('关联章节（只标叙事位置，不限制跨章调度）',node.chapterIds,chapterChoices,`data-outline-node-list="chapterIds" data-outline-nid="${h(node.id)}"`)}${choiceList('前置节点',dependencyIds(node),nodeChoices.filter(([id])=>id!==node.id),`data-outline-node-list="dependencies" data-outline-nid="${h(node.id)}"`)}${editorField('作者意图',node.intent,`data-outline-node-field="intent" data-outline-nid="${h(node.id)}"`,true)}${editorField('完成判据',node.completionCriteria,`data-outline-node-field="completionCriteria" data-outline-nid="${h(node.id)}"`,true)}${editorField('作者备注',node.notes,`data-outline-node-field="notes" data-outline-nid="${h(node.id)}"`,true)}${editorField('可供正文使用的公开提示',node.publicHint,`data-outline-node-field="publicHint" data-outline-nid="${h(node.id)}"`,true)}<div class="we-outline-form-grid">${selectControl('执行主体',node.actorKind || 'player',`data-outline-node-field="actorKind" data-outline-nid="${h(node.id)}"`,[['player','玩家相关'],['npc','NPC后台']])}${selectControl('完成证据来源',node.completionSource || 'dialogue',`data-outline-node-field="completionSource" data-outline-nid="${h(node.id)}"`,[['dialogue','正文'],['world','世界事实'],['either','正文或世界事实']])}${selectControl('作者内容可见性',node.visibility || 'public',`data-outline-node-field="visibility" data-outline-nid="${h(node.id)}"`,[['public','公开'],['private','仅作者与后台']])}</div><label class="we-outline-check"><input type="checkbox" data-outline-node-field="required" data-outline-nid="${h(node.id)}"${node.required!==false?' checked':''}>必要节点</label>${(node.dependencies || []).filter(dep => typeof dep === 'object').map(dep => `<label class="we-outline-check"><input type="checkbox" data-outline-dependency-skip="${h(dep.nodeId)}" data-outline-nid="${h(node.id)}"${dep.allowSkipped ? ' checked' : ''}>前置 ${h(nodeTitle(plan,dep.nodeId))} 被跳过时也视为满足</label>`).join('')}${renderEntityRefs(node,draft)}<h4>解锁条件</h4>${renderCondition(node.trigger,node,'trigger',[],plan)}<h4>线索揭示</h4>${editorField('条件满足后可被发现的线索文本',node.disclosure?.clueText,`data-outline-disclosure-text="true" data-outline-nid="${h(node.id)}"`,true)}${renderCondition(node.disclosure?.condition,node,'disclosure',[],plan)}<p class="we-outline-hint">满足揭示条件只代表线索可发现；人物实际接触后才形成知情记录。</p></details>`).join('')}
+      <div class="we-outline-actions">${button('node-add','增加节点')}${button('save-plan','确认保存大纲')}${button('close-editor','收起编辑（保留草稿）')}${button('discard-editor','放弃草稿')}</div>
+    </section>`;
   }
 
   function renderTextImport(draft) {
-    return `<section class="we-outline-text-import"><h3>将文本整理成大纲</h3><label class="we-outline-field"><span>粘贴已有剧情计划，或选择 .txt / .md 文件</span><textarea id="we-outline-source-text" rows="9">${h(draft.sourceText)}</textarea></label><input id="we-outline-text-file" type="file" accept=".txt,.md,text/plain,text/markdown"><div class="we-outline-actions">${button('organize-text', draft.busy ? '正在整理…' : 'AI 整理并预览', draft.busy ? ' disabled' : '')}${button('close-text', '收起（保留文本）')}</div><p class="we-outline-hint">整理结果会先显示预览，确认后才替换当前大纲。</p>${draft.preview ? `<section class="we-outline-preview"><h4>整理预览：${h(draft.preview.title || '未命名大纲')}</h4><p>${h(draft.preview.synopsis || '')}</p>${chaptersOf(draft.preview).map(chapter => `<details open><summary>${h(chapter.title || '未命名章节')} · ${(chapter.nodes || []).length} 个节点</summary><p>${h(chapter.goal || '')}</p><ol>${(chapter.nodes || []).map(node => `<li><strong>${h(node.title)}</strong><p>${h(node.completionCriteria || '未设置完成判据')}</p></li>`).join('')}</ol></details>`).join('')}<div class="we-outline-actions">${button('adopt-preview', '确认采用整理结果')}${button('edit-preview', '先编辑此结果')}${button('discard-preview', '丢弃预览')}</div></section>` : ''}</section>`;
+    return `<section class="we-outline-text-import"><h3>将多线文本整理成大纲</h3><label class="we-outline-field"><span>粘贴主线、支线、暗线及章节安排，或选择 .txt / .md</span><textarea id="we-outline-source-text" rows="9">${h(draft.sourceText)}</textarea></label><input id="we-outline-text-file" type="file" accept=".txt,.md,text/plain,text/markdown"><div class="we-outline-actions">${button('organize-text',draft.busy?'正在整理…':'AI整理并预览',draft.busy?' disabled':'')}${button('close-text','收起（保留文本）')}</div><p class="we-outline-hint">无法确定的条件会保留原文并标待配置；不会默认为满足。整理不会立即覆盖计划。</p>${draft.preview?`<section class="we-outline-preview">${renderPlanPreview(draft.preview)}<div class="we-outline-actions">${button('adopt-preview','确认采用整理结果')}${button('edit-preview','先编辑此结果')}${button('discard-preview','丢弃预览')}</div></section>`:''}</section>`;
   }
 
   function renderSettings(draft) {
@@ -139,6 +326,9 @@ window.OUTLINE_ENGINE_UI = (function() {
         ${field('启用剧情模块', 'engineEnabled', value.engineEnabled, { type: 'checkbox' })}
         ${field('自动检查新增正文', 'autoCheck', value.autoCheck !== false, { type: 'checkbox' })}
         ${field('每多少个新增轮次检查一次', 'checkEveryX', value.checkEveryX ?? 3, { type: 'number', min: 1, step: 1 })}
+        ${field('每轮正文最多安排节点数', 'narrativeLimit', value.narrativeLimit ?? 3, { type: 'number', min: 1, step: 1 })}
+        ${field('每轮后台最多安排节点数', 'worldLimit', value.worldLimit ?? 3, { type: 'number', min: 1, step: 1 })}
+        ${field('重复安排冷却轮次', 'cooldownTicks', value.cooldownTicks ?? 1, { type: 'number', min: 0, step: 1 })}
         ${field('允许 AI 提出结构调整建议', 'allowProposals', value.allowProposals !== false, { type: 'checkbox' })}
         ${field('注入正文指导', 'injectIntoPrompt', value.injectIntoPrompt !== false, { type: 'checkbox' })}
         ${field('将当前剧情指导提供给世界推演', 'injectIntoWorldEngine', value.injectIntoWorldEngine !== false, { type: 'checkbox' })}
@@ -166,11 +356,69 @@ window.OUTLINE_ENGINE_UI = (function() {
     </section>`;
   }
 
-  function renderTransfer(current, draft) {
-    let cc, status, snapshots = [];
-    try { cc = cache(); status = cc?.getStatus?.(); snapshots = cc?.listSnapshots?.() || []; } catch (_) {}
+  function renderImportReview(draft) {
     const preview = draft.pendingJson;
-    return `<section class="we-outline-transfer"><h3>导入导出与聊天存档</h3><div class="we-outline-actions">${button('export-full', '导出完整 JSON')}${button('export-plan', '只导出大纲 JSON')}</div><label class="we-outline-field"><span>导入大纲或完整 JSON</span><input id="we-outline-json-file" type="file" accept=".json,application/json"></label><p class="we-outline-hint">导入会先预览。跨聊天导入会清除原聊天的执行进度与证据。</p>${preview ? `<section class="we-outline-preview"><h4>待导入：${h(preview.plan?.title || '未命名大纲')}</h4><p>${chaptersOf(preview.plan).length} 个章节；${chaptersOf(preview.plan).reduce((sum, ch) => sum + (ch.nodes || []).length, 0)} 个节点。</p>${preview.sameChat ? `<label class="we-outline-check"><input id="we-outline-import-progress" type="checkbox"${preview.includeProgress ? ' checked' : ''}>恢复此聊天的原执行进度</label>` : '<p class="we-outline-hint">执行进度将从当前聊天重新开始。</p>'}<div class="we-outline-actions">${button('confirm-json-import', '确认导入')}${button('cancel-json-import', '取消导入')}</div></section>` : ''}<h4>聊天存档</h4><p class="we-outline-hint">${status ? `实时同步${status.syncEnabled ? '已开启' : '已关闭'} · 本地修订 ${h(status.localRev ?? 0)} / 聊天修订 ${h(status.liveRev ?? 0)} · ${snapshots.length} 份存档` : '当前未启用聊天存档接口。'}</p><div class="we-outline-actions"><input id="we-outline-snapshot-name" type="text" value="${h(draft.snapshotName)}" placeholder="存档名称">${button('snapshot-create', '新建命名存档', cc ? '' : ' disabled')}</div>${snapshots.map(snap => `<article class="we-outline-snapshot"><div><strong>${h(snap.name || '未命名存档')}</strong><small>${snap.auto ? '自动' : '手动'} · ${h(snap.createdAt ? new Date(snap.createdAt).toLocaleString() : '')}</small></div><div class="we-outline-actions">${button('snapshot-restore', '恢复', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-rename', '重命名', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-export', '导出', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-delete', '删除', ` data-outline-snapshot="${h(snap.id)}"`)}</div></article>`).join('')}<label class="we-outline-field"><span>导入聊天存档 JSON</span><input id="we-outline-snapshot-file" type="file" accept=".json,application/json"></label></section>`;
+    if (!preview) return '';
+    const joint = preview.kind === 'history';
+    return `<section class="we-outline-preview we-outline-import-review"><h3>${joint ? '确认联合历史恢复' : '确认大纲导入'}</h3>
+      ${joint ? `<p>此文件包含世界、剧情与联合提交链，并用于核对来源记忆。${preview.sameChat ? '将恢复此聊天的历史位置，保留当前作者计划与手动标记。' : '跨聊天只采用作者计划，清除来源聊天的运行游标、证据与自动进度。'}</p><p class="we-outline-hint">来源聊天：${h(preview.sourceChatId || '未提供')} · ${h(preview.journalCount??0)} 个提交 · ${h(preview.snapshotCount??0)} 份历史快照</p>${preview.plan?`<details><summary>备份内作者计划${preview.sameChat?'（同聊天恢复时保留当前计划）':''}</summary>${renderPlanPreview(preview.plan)}</details>`:''}` : renderPlanPreview(preview.plan)}
+      ${preview.warnings?.length ? `<ul class="we-outline-validation">${preview.warnings.map(warning => `<li>${h(warning)}</li>`).join('')}</ul>` : ''}
+      ${!joint && preview.sameChat && preview.payload.state ? `<label class="we-outline-check"><input id="we-outline-import-progress" type="checkbox"${preview.includeProgress ? ' checked' : ''}>${preview.payload.bundle?.bundle ? '恢复此聊天世界／剧情历史，并核对来源记忆' : '恢复此聊天的原执行进度'}</label>` : !joint ? '<p class="we-outline-hint">执行进度从当前聊天重新开始。</p>' : ''}
+      <div class="we-outline-actions">${button('confirm-json-import', joint ? '确认联合恢复' : '确认导入')}${button('cancel-json-import','取消导入')}</div></section>`;
+  }
+
+  function renderTransfer(current, draft) {
+    let cc, status, snapshots=[];
+    try { cc=cache();status=cc?.getStatus?.();snapshots=cc?.listSnapshots?.()||[]; } catch (_) {}
+    return `<section class="we-outline-transfer"><h3>计划、剧情数据与联合备份</h3><div class="we-outline-actions">${button('export-plan','只导出作者计划 JSON')}${button('export-full','导出完整联动 JSON')}${button('history-export','导出联合历史')}</div><label class="we-outline-field"><span>导入计划、剧情完整 JSON 或联合历史（先预览）</span><input id="we-outline-json-file" type="file" accept=".json,application/json"></label><p class="we-outline-hint">作者计划包含暗线与私密设定。跨聊天导入会清除旧聊天的运行状态；高于当前支持版本的文件不会被写入。</p><h4>聊天备份保存点</h4><p class="we-outline-hint">${status?`实时同步${status.syncEnabled?'已开启':'已关闭'} · 本地修订 ${h(status.localRev??0)} / 聊天修订 ${h(status.liveRev??0)} · ${snapshots.length} 份保存点`:'当前聊天存档接口尚未就绪。'}</p><div class="we-outline-actions"><input id="we-outline-snapshot-name" value="${h(draft.snapshotName)}" placeholder="保存点名称">${button('snapshot-create','新建命名保存点',cc?'':' disabled')}</div>${snapshots.map(snap=>`<article class="we-outline-snapshot"><div><strong>${h(snap.name||'未命名保存点')}</strong><small>${snap.auto?'自动':'手动'} · ${h(snap.createdAt?new Date(snap.createdAt).toLocaleString():'')}</small></div><div class="we-outline-actions">${button('snapshot-restore','恢复',` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-rename','重命名',` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-export','导出',` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-delete','删除',` data-outline-snapshot="${h(snap.id)}"`)}</div></article>`).join('')}<label class="we-outline-field"><span>导入聊天保存点 JSON</span><input id="we-outline-snapshot-file" type="file" accept=".json,application/json"></label></section>`;
+  }
+
+  function renderScheduleView(current) {
+    const pane = (channel, title) => {
+      const value = schedule(channel), rows = scheduleRows(value);
+      const selected = value.nodeIds || (value.selected || []).map(node => node.id);
+      let projection = '';
+      try { projection = channel === 'narrative' ? engine()?.buildNarrativeGuidance?.() || '' : engine()?.buildWorldGuidance?.(window.WORLD_ENGINE_CORE?.loadState?.()) || ''; }
+      catch (error) { projection = `预览失败：${error?.message || error}`; }
+      return `<section class="we-outline-schedule-pane"><h4>${title}</h4><p class="we-outline-hint">选中 ${selected.length} 个节点 · ${channel === 'narrative' ? settings().narrativeLimit ?? 3 : settings().worldLimit ?? 3} 个节点预算</p>${value.error ? `<p class="we-outline-message is-error">${h(value.error)}</p>` : ''}<div class="we-outline-table-scroll"><table><thead><tr><th>节点</th><th>本轮结果</th><th>原因与等待</th></tr></thead><tbody>${rows.map(row => `<tr><td>${h(nodeTitle(current.plan, row.nodeId))}</td><td>${h(schedulingLabel(row,selected))}</td><td>${h((row.reasons || []).map(reasonText).join('；'))}<small>已等待 ${h(row.waitTurns ?? 0)} 轮 · 优先分 ${h(row.score ?? 0)}</small></td></tr>`).join('') || '<tr><td colspan="3">暂无候选节点</td></tr>'}</tbody></table></div><details open class="we-outline-projection"><summary>${channel === 'narrative' ? '正文实际会收到的指导' : '世界后台实际会收到的指导'}</summary><pre>${h(projection || '当前没有注入内容。')}</pre></details></section>`;
+    };
+    return `<section><h3>本轮调度与实际注入</h3><p class="we-outline-hint">选中、信息不足、暂停、冷却和预算延后是不同结果。正文与后台投影独立；作者私密字段不会直接进入正文。</p>${pane('narrative','正文前台')}${pane('world','世界后台')}</section>`;
+  }
+
+  function renderFacts(current, draft) {
+    const valid = items => (items || []).filter(item => item.validity !== 'stale' && item.validity !== 'invalid');
+    const facts = valid(current.privateFacts), clues = valid(current.clues), contacts = valid(current.contacts), knowledge = valid(current.knowledge);
+    return `<section class="we-outline-facts"><h3>作者全知事实与线索链</h3><p class="we-outline-hint">后台事实、线索可发现、人物实际接触和人物知情分别保存。可发现不会自动让人物知情。</p>
+      <details open><summary>后台私密事实 ${facts.length} 条（作者可见）</summary>${facts.map(fact => `<article class="we-outline-fact"><p>${h(fact.text)}</p><small>事实 ${h(fact.id)} · 世界提交 ${h(fact.commitId)} · 已知人物 ${h((fact.knownBy || []).join(' / ') || '无')}</small></article>`).join('') || '<p class="we-outline-empty">暂无已提交的后台事实；计划不计为事实。</p>'}</details>
+      <details open><summary>可发现线索 ${clues.length} 条</summary>${clues.map(clue => `<article class="we-outline-fact"><strong>${h(clue.publicHint || clue.id)}</strong><p>${clue.available ? '已满足发现条件' : '尚未满足发现条件'} · ${h({available:'可发现',contacted:'已接触',known:'已有知情记录'}[clue.status] || '等待')}</p><small>线索 ID ${h(clue.id)} · 接触者 ${h((clue.contacts || []).join(' / ') || '无')} · 知情者 ${h((clue.knownBy || []).join(' / ') || '无')}</small></article>`).join('') || '<p class="we-outline-empty">暂无线索。</p>'}</details>
+      <details><summary>实际接触记录 ${contacts.length} 条</summary>${contacts.map(contact => `<blockquote><span>${h(contact.actorId)} 接触 ${h(contact.clueId)} · 正文 ${h(contact.messageId)}</span><p>${h(contact.quote)}</p></blockquote>`).join('') || '<p class="we-outline-empty">尚无正文确认的接触。</p>'}</details>
+      <details><summary>人物知情记录 ${knowledge.length} 条</summary>${knowledge.map(item => `<p>${h(item.actorId)} 知道事实 ${h(item.factId)} <small>依据接触 ${h(item.contactId)}</small></p>`).join('') || '<p class="we-outline-empty">尚无已验证知情记录。</p>'}</details>
+      <h4>作者标记（手动设定，历史回退时保留）</h4>${Object.entries(current.authorFlags || {}).map(([id, value]) => `<label class="we-outline-check"><input type="checkbox" data-outline-author-flag="${h(id)}"${value ? ' checked' : ''}>${h(id)}</label>`).join('')}
+      <div class="we-outline-actions"><input id="we-outline-flag-name" value="${h(draft.newFlagId)}" placeholder="新标记名称"><label class="we-outline-check"><input id="we-outline-flag-value" type="checkbox"${draft.newFlagValue ? ' checked' : ''}>设为是</label>${button('author-flag-add','保存作者标记')}</div></section>`;
+  }
+
+  function renderQuarantineNotice() {
+    let backup=null;
+    try { backup=window.MEMORY_ENGINE?.getQuarantineBackup?.()||null; } catch (_) {}
+    if(!backup)return '';
+    return `<section class="we-outline-preview we-outline-quarantine"><h3>旧记忆资料待作者复核</h3><p>从头重建时，无法核对原文来源的旧 Root 和手工记忆已完整保留到隔离备份，暂不参与自动注入。普通历史回退不会触发此隔离。</p>${backup.reason?`<p class="we-outline-hint">${h(backup.reason)}</p>`:''}<div class="we-outline-actions">${button('memory-quarantine-export','导出旧记忆隔离备份')}</div><p class="we-outline-hint">导出只读取本地备份，不会自动导入旧资料，也不会额外调用记忆 API。</p></section>`;
+  }
+
+  function renderRecovery() { return renderQuarantineNotice()+renderRecoveryDetails(); }
+
+  function renderRecoveryDetails() {
+    const service = history();
+    if (!service?.getStatus) return '<section><h3>联合历史与恢复</h3><p class="we-outline-empty">联合历史模块尚未就绪。当前不会自动执行回退或重建。</p></section>';
+    const status = service.getStatus(), commits = service.listCommits?.() || [];
+    const phases = { ready: '可继续', preview: '历史预览', 'pending-rebuild': '等待显式重建', blocked: '恢复受阻', rebuilding:'正在重建', uninitialized:'尚未建立联合基线', disabled:'联合历史未启用' };
+    return `<section class="we-outline-recovery"><h3>世界、记忆与剧情联合历史</h3><p class="we-outline-message${status.phase === 'blocked' ? ' is-error' : ''}">${h(phases[status.phase] || status.phase || '状态待确认')}${status.reason ? ` · ${h(status.reason)}` : ''}</p><dl><dt>初始基线</dt><dd>${h(status.baselineLayer ?? '未建立')}</dd><dt>可恢复起始边界</dt><dd>${h(status.recoverableFromLayer ?? '未建立')}</dd><dt>最后有效楼层</dt><dd>${h(status.lastValidLayer ?? '未记录')}</dd><dt>待重建范围起点</dt><dd>${h(status.pendingFromLayer ?? '无')}</dd><dt>当前提交</dt><dd>${h(status.currentCommitId || '无')} · 分支 ${h(status.branchId || '无')}</dd><dt>完整 journal</dt><dd>${h(status.journalCount ?? commits.length)} 个提交 · ${h(status.snapshotCount ?? 0)} 份历史快照</dd></dl><p class="we-outline-hint">联合 journal 保存世界与剧情自动状态，并撤下失效的来源记忆；普通滚动备份是保存点，两者用途不同。作者大纲与手动标记在回退时保留。</p><div class="we-outline-actions">${button('history-audit','审计当前原文')}${button('history-export','导出联合历史备份')}${button('history-rebuild','从待重建边界批量重建')}</div><label class="we-outline-field"><span>导入联合历史备份（先预览再确认）</span><input id="we-outline-history-file" type="file" accept=".json,application/json"></label><div class="we-outline-table-scroll"><table><thead><tr><th>提交／分支</th><th>位置</th><th>类型与状态</th><th>恢复</th></tr></thead><tbody>${commits.map(commit => `<tr><td>${h(commit.id)}<small>${h(commit.branchId || '')}</small></td><td>${h(commit.layer ?? '—')}</td><td>${h(commit.kind || '')} · ${h(commit.status || '')}</td><td>${button('history-restore','恢复此提交',` data-outline-commit="${h(commit.id)}"`)}</td></tr>`).join('') || '<tr><td colspan="4">尚无联合提交记录</td></tr>'}</tbody></table></div></section>`;
+  }
+
+  function renderTemporalNotice(current) {
+    const notice=current.tracking?.temporalNotice;
+    if(!notice||notice.kind==='normal')return '';
+    const labels={flashback:'回忆片段',dream:'梦境片段',return_scene:'返回当前场景',contradiction:'原文时序存在矛盾',in_world_rewind:'故事内发生时间回溯'};
+    return `<section class="we-outline-temporal"><strong>${h(labels[notice.kind]||'时序待核对')}</strong><p>${h(notice.reason||'请核对正文与事实来源。')}</p><p class="we-outline-hint">回忆、梦境或故事内时间变化不会自动等同于删除真实聊天历史。需要联合恢复时请进入恢复页明确操作。</p>${(notice.evidence||[]).map(item=>`<blockquote><span>正文 ${h(item.messageId)}</span><p>${h(item.quote)}</p></blockquote>`).join('')}</section>`;
   }
 
   function renderDebug() {
@@ -181,15 +429,17 @@ window.OUTLINE_ENGINE_UI = (function() {
   }
 
   function render() {
-    const draft = draftFor(), current = state();
-    const running = draft.busy || Boolean(engine()?.isRunning?.());
-    const enabled = settings().engineEnabled === true;
-    return `<div class="we-outline-root"><div class="we-outline-toolbar"><div class="we-outline-actions">${button('view-home', '章节与进度')}${button('edit-plan', draft.plan ? '继续编辑草稿' : '编辑大纲')}${button('open-text', '整理文本')}${button('view-transfer', '存档与导入导出')}${button('view-debug', '调试')}</div><div class="we-outline-actions">${button('toggle-settings', '剧情设置')}${button('check-now', running ? '检查中…' : '立即检查', running || !enabled ? ' disabled' : '')}${running ? button('abort', '停止') : ''}</div></div><p class="we-outline-hint">${enabled ? '剧情模块已启用' : '剧情模块当前关闭；可编辑和保存大纲，启用后才自动检查与注入。'}</p>${draft.message ? `<p role="status" class="we-outline-message${draft.error ? ' is-error' : ''}">${h(draft.message)}</p>` : ''}${draft.settingsOpen ? renderSettings(draft) : `${draft.editorOpen ? renderEditor(draft) : ''}${draft.textOpen ? renderTextImport(draft) : ''}${draft.view === 'transfer' ? renderTransfer(current, draft) : draft.view === 'debug' ? renderDebug() : renderHome(current, draft)}`}</div>`;
+    const draft=draftFor(),current=state(),running=draft.busy||Boolean(engine()?.isRunning?.())||isRebuilding(),enabled=settings().engineEnabled===true;
+    const views={home:()=>renderHome(current,draft),tracks:()=>renderTracks(current),schedule:()=>renderScheduleView(current),facts:()=>renderFacts(current,draft),recovery:()=>renderRecovery(),transfer:()=>renderTransfer(current,draft),debug:()=>renderDebug()};
+    return `<div class="we-outline-root"><div class="we-outline-toolbar"><div class="we-outline-actions">${button('view-home','章节与进度')}${button('view-tracks','跨章剧情线')}${button('view-schedule','调度与注入')}${button('view-facts','作者事实与线索')}${button('view-recovery','联合历史恢复')}${button('edit-plan',draft.plan?'继续编辑草稿':'编辑大纲')}${button('open-text','整理文本')}${button('view-transfer','导入导出')}${button('view-debug','调试')}</div><div class="we-outline-actions">${button('toggle-settings','剧情设置')}${button('check-now',running?'检查中…':'立即检查',running||!enabled?' disabled':'')}${running?button('abort','停止'):''}</div></div><p class="we-outline-hint">${enabled?'剧情模块已启用':'剧情模块当前关闭；仍可编辑与保存计划，启用后才检查和注入。'}</p>${draft.message?`<p role="status" class="we-outline-message${draft.error?' is-error':''}">${h(draft.message)}</p>`:''}${renderTemporalNotice(current)}${renderImportReview(draft)}${draft.settingsOpen?renderSettings(draft):`${draft.editorOpen?renderEditor(draft):''}${draft.textOpen?renderTextImport(draft):''}${(views[draft.view]||views.home)()}`}</div>`;
   }
 
   function commitReviewedPlan(plan, revision, snapshot) {
     // 导入或恢复存档可能带回相同修订号；还需比对用户开始审阅时的计划本身。
     if (snapshot && snapshot !== JSON.stringify(state().plan)) throw new Error('审阅期间大纲已变化。草稿已保留，请对照当前大纲后重试。');
+    const validation = data().validatePlan?.(data().normalizePlan(plan));
+    if (validation && !validation.valid) throw new Error(validation.errors.join('\n'));
+    engine()?.abort?.();
     return data().commitPlan(clone(plan), revision);
   }
 
@@ -209,6 +459,8 @@ window.OUTLINE_ENGINE_UI = (function() {
     const draft = draftFor(), ds = element.dataset || {};
     if (element.id === 'we-outline-source-text') draft.sourceText = element.value;
     else if (element.id === 'we-outline-snapshot-name') draft.snapshotName = element.value;
+    else if (element.id === 'we-outline-flag-name') draft.newFlagId = element.value;
+    else if (element.id === 'we-outline-flag-value') draft.newFlagValue = element.checked;
     else if (element.id === 'we-outline-import-progress' && draft.pendingJson) draft.pendingJson.includeProgress = element.checked;
     else if (ds.outlineSetting) {
       if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
@@ -220,12 +472,64 @@ window.OUTLINE_ENGINE_UI = (function() {
       }
       if (name === 'apiTimeoutSeconds') { draft.settingsDraft.apiTimeoutMs = Math.max(0, value) * 1000; }
       else draft.settingsDraft[name] = value;
+    } else if (ds.outlineConditionType || ds.outlineConditionField || ds.outlineConditionValueType) {
+      const node = findDraftNode(draft, ds);
+      if (!node) return;
+      const path = JSON.parse(ds.outlineConditionPath || '[]'), slot = ds.outlineConditionSlot || 'trigger';
+      let condition = conditionAt(node, slot, path);
+      if (ds.outlineConditionType) {
+        const next = blankCondition(element.value);
+        if ((element.value === 'all' || element.value === 'any') && (condition?.all || condition?.any)) next[element.value] = condition.all || condition.any;
+        replaceCondition(node, slot, path, next);
+      } else if (ds.outlineConditionValueType && condition) condition.value = element.value === 'number' ? 0 : element.value === 'boolean' ? true : '';
+      else if (condition) {
+        const key = ds.outlineConditionField;
+        if (ds.outlineConditionArray) condition[key] = toggleChoice(condition[key], element.value, element.checked);
+        else condition[key] = element.type === 'checkbox' ? element.checked : ds.outlineNumeric === 'true' ? Number(element.value) : element.value;
+        if (key === 'collection') { condition.entityId = ''; condition.field = ''; }
+        else if (key === 'entityId') condition.field = '';
+        else if (key === 'basis') condition.value = element.value === 'storyDay' ? 0 : '';
+      }
     } else if (ds.outlinePlanField && draft.plan) draft.plan[ds.outlinePlanField] = element.value;
     else if (ds.outlineChapterField && draft.plan?.chapters?.[Number(ds.outlineCi)]) draft.plan.chapters[Number(ds.outlineCi)][ds.outlineChapterField] = element.value;
-    else if (ds.outlineNodeField) {
-      const node = draft.plan?.chapters?.[Number(ds.outlineCi)]?.nodes?.[Number(ds.outlineNi)];
-      if (node) node[ds.outlineNodeField] = element.type === 'checkbox' ? element.checked : element.value;
+    else if (ds.outlineChapterList && draft.plan?.chapters?.[Number(ds.outlineCi)]) {
+      const chapter = draft.plan.chapters[Number(ds.outlineCi)];
+      chapter[ds.outlineChapterList] = toggleChoice(chapter[ds.outlineChapterList], element.value, element.checked);
+    } else if (ds.outlineTrackField) {
+      const track = draft.plan?.tracks?.[Number(ds.outlineTi)];
+      if (track) {
+        track[ds.outlineTrackField] = element.type === 'checkbox' ? element.checked : element.type === 'number' ? Number(element.value) : element.value;
+        if (ds.outlineTrackField === 'kind' && element.value === 'hidden') trackNodes(draft.plan, track.id).forEach(node => { node.visibility = 'private'; });
+      }
+    } else if (ds.outlineNodeList) {
+      const node = findDraftNode(draft, ds);
+      if (node) {
+        const selected = toggleChoice(ds.outlineNodeList === 'dependencies' ? dependencyIds(node) : node[ds.outlineNodeList], element.value, element.checked);
+        node[ds.outlineNodeList] = ds.outlineNodeList === 'dependencies' ? selected.map(id => (node.dependencies || []).find(dep => dep.nodeId === id) || { nodeId: id, allowSkipped: false }) : selected;
+      }
+    } else if (ds.outlineDependencySkip) {
+      const node = findDraftNode(draft, ds), dep = node?.dependencies?.find(item => item.nodeId === ds.outlineDependencySkip);
+      if (dep) dep.allowSkipped = element.checked;
+    } else if (ds.outlineDisclosureText) {
+      const node = findDraftNode(draft, ds);
+      if (node) node.disclosure = { ...(node.disclosure || {}), clueText: element.value };
+    } else if (ds.outlineEntityPick) {
+      if (!draft.entityPicks) draft.entityPicks = {};
+      draft.entityPicks[ds.outlineNid] = element.value;
     }
+    else if (ds.outlineNodeField) {
+      const node = findDraftNode(draft, ds);
+      if (node) {
+        node[ds.outlineNodeField] = element.type === 'checkbox' ? element.checked : element.value;
+        if (ds.outlineNodeField === 'trackId' && tracksOf(draft.plan).find(track => track.id === element.value)?.kind === 'hidden') node.visibility = 'private';
+      }
+    }
+  }
+
+  function toggleChoice(values, id, selected) {
+    const set = new Set(values || []);
+    if (selected) set.add(id); else set.delete(id);
+    return [...set];
   }
 
   function download(value, name) {
@@ -246,7 +550,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   async function handleAction(action, element) {
     const draft = draftFor(), ds = element?.dataset || {}, current = state();
     const ci = Number(ds.outlineCi), ni = Number(ds.outlineNi);
-    if (action === 'view-home' || action === 'view-transfer' || action === 'view-debug') { draft.view = action.slice(5); draft.settingsOpen = false; }
+    if (['home', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug'].some(view => action === 'view-' + view)) { draft.view = action.slice(5); draft.settingsOpen = false; }
     else if (action === 'toggle-settings') { draft.settingsOpen = !draft.settingsOpen; if (!draft.settingsDraft) draft.settingsDraft = clone(settings()); }
     else if (action === 'close-settings') draft.settingsOpen = false;
     else if (action === 'edit-plan') startEditor();
@@ -257,12 +561,53 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (action === 'close-text') draft.textOpen = false;
     else if (action === 'select-chapter') draft.selectedChapterId = ds.outlineChapter === current.currentChapterId ? '' : ds.outlineChapter;
     else if (action === 'set-current-chapter') { engine()?.abort?.(); data().setCurrentChapter(ds.outlineChapter); draft.selectedChapterId = ''; engine()?.applyInjection?.(); notify('已指定当前章节。'); }
-    else if (action === 'chapter-add') { draft.plan.chapters.push({ id: uid('chapter'), title: '新章节', goal: '', nodes: [] }); }
-    else if (action === 'chapter-remove') { if (!window.confirm || window.confirm('从草稿删除此章节及其节点？')) draft.plan.chapters.splice(ci, 1); }
+    else if (action === 'chapter-add') { draft.plan.chapters.push({ id: uid('chapter'), title: '新章节', goal: '', exitNodeIds: [] }); }
+    else if (action === 'chapter-remove') {
+      if (!window.confirm || window.confirm('从草稿删除章节？剧情节点会保留，只移除与此章的关联。')) {
+        const removed = draft.plan.chapters.splice(ci, 1)[0];
+        nodesOf(draft.plan).forEach(node => { node.chapterIds = (node.chapterIds || []).filter(id => id !== removed.id); });
+      }
+    }
     else if (action === 'chapter-up' || action === 'chapter-down') reorder(draft.plan.chapters, ci, action.endsWith('up') ? -1 : 1);
-    else if (action === 'node-add') draft.plan.chapters[ci].nodes.push({ id: uid('node'), title: '新节点', intent: '', completionCriteria: '', notes: '', required: true });
-    else if (action === 'node-remove') draft.plan.chapters[ci].nodes.splice(ni, 1);
-    else if (action === 'node-up' || action === 'node-down') reorder(draft.plan.chapters[ci].nodes, ni, action.endsWith('up') ? -1 : 1);
+    else if (action === 'track-add') { if (!draft.plan.tracks) draft.plan.tracks=[]; draft.plan.tracks.push({ id:uid('track'), kind:draft.plan.tracks.length?'side':'main', title:'新剧情线', goal:'', priority:0, paused:false }); }
+    else if (action === 'track-up' || action === 'track-down') reorder(draft.plan.tracks, Number(ds.outlineTi), action.endsWith('up') ? -1 : 1);
+    else if (action === 'track-remove') {
+      const track = draft.plan.tracks[Number(ds.outlineTi)];
+      if (trackNodes(draft.plan, track.id).length) throw new Error('此线仍有节点，请先将节点移动到其他剧情线或删除节点。');
+      draft.plan.tracks.splice(Number(ds.outlineTi),1);
+    } else if (action === 'track-pause') {
+      const plan=clone(current.plan), track=tracksOf(plan).find(item=>item.id===ds.outlineTrack);
+      if (!track) throw new Error('剧情线已不存在。');
+      track.paused=!track.paused; engine()?.abort?.(); data().commitPlan(plan,current.revision); engine()?.applyInjection?.();
+    } else if (action === 'node-add') {
+      if (!draft.plan.nodes) draft.plan.nodes=[];
+      if (!tracksOf(draft.plan).length) draft.plan.tracks=[{id:uid('track'),kind:'main',title:'主线',goal:'',priority:0,paused:false}];
+      const track=tracksOf(draft.plan).find(item=>item.id===ds.outlineTrack)||tracksOf(draft.plan)[0], hidden=track.kind==='hidden';
+      draft.plan.nodes.push({id:uid('node'),trackId:track.id,chapterIds:[],dependencies:[],title:'新节点',intent:'',completionCriteria:'',notes:'',required:true,trigger:null,publicHint:'',disclosure:{condition:null,clueText:''},entityRefs:[],actorKind:hidden?'npc':'player',completionSource:hidden?'world':'dialogue',visibility:hidden?'private':'public'});
+    } else if (action === 'node-remove') {
+      const node=findDraftNode(draft,ds);
+      if (!node) throw new Error('节点已不存在。');
+      if (nodesOf(draft.plan).some(other=>dependencyIds(other).includes(node.id)) || chaptersOf(draft.plan).some(chapter=>(chapter.exitNodeIds||[]).includes(node.id))) throw new Error('此节点仍被前置依赖或章末门槛引用，请先移除相关引用。');
+      draft.plan.nodes=draft.plan.nodes.filter(item=>item.id!==node.id);
+    } else if (action === 'node-up' || action === 'node-down') {
+      const node=findDraftNode(draft,ds), peers=trackNodes(draft.plan,node.trackId),index=peers.findIndex(item=>item.id===node.id),other=peers[index+(action.endsWith('up')?-1:1)];
+      if (other) { const a=draft.plan.nodes.findIndex(item=>item.id===node.id), b=draft.plan.nodes.findIndex(item=>item.id===other.id); [draft.plan.nodes[a],draft.plan.nodes[b]]=[draft.plan.nodes[b],draft.plan.nodes[a]]; }
+    } else if (action === 'condition-add' || action === 'condition-remove') {
+      const node=findDraftNode(draft,ds),path=JSON.parse(ds.outlineConditionPath||'[]'),slot=ds.outlineConditionSlot||'trigger';
+      if (!node) throw new Error('节点已不存在。');
+      if (action==='condition-add') { const condition=conditionAt(node,slot,path); const list=condition?.all||condition?.any; if(!list)throw new Error('请先选择全部或任一条件组。'); list.push(blankCondition('unconfigured')); }
+      else replaceCondition(node,slot,path,undefined);
+    } else if (action === 'entity-add') {
+      const node=findDraftNode(draft,ds),raw=draft.entityPicks?.[ds.outlineNid];
+      if(!node||!raw)throw new Error('请先选择当前聊天的稳定实体。');
+      const ref=JSON.parse(raw); if(!availableEntities().some(item=>item.source===ref.source&&item.type===ref.type&&item.id===ref.id))throw new Error('此实体已不存在，请重新选择。');
+      if(!node.entityRefs)node.entityRefs=[];
+      if(!node.entityRefs.some(item=>item.source===ref.source&&item.type===ref.type&&item.id===ref.id))node.entityRefs.push(ref);
+    } else if (action==='entity-remove') { const node=findDraftNode(draft,ds);node?.entityRefs?.splice(Number(ds.outlineRefIndex),1); }
+    else if (action==='author-flag-add') {
+      const id=draft.newFlagId.trim(); if(!id)throw new Error('请输入作者标记名称。');
+      engine()?.abort?.(); const next=state();next.authorFlags={...(next.authorFlags||{}),[id]:draft.newFlagValue};data().saveState(next);draft.newFlagId='';engine()?.applyInjection?.();
+    }
     else if (action === 'save-plan') {
       commitReviewedPlan(draft.plan, draft.expectedRevision, draft.expectedPlanSnapshot);
       draft.plan = null; draft.editorOpen = false; draft.message = '大纲已保存。'; draft.error = false;
@@ -274,7 +619,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       next.maxTokens = Math.max(1, Math.floor(Number(next.maxTokens) || 65000));
       next.apiTimeoutMs = Math.max(0, Number(next.apiTimeoutMs) || 0);
       const previous = settings();
-      const requestKeys = ['engineEnabled', 'autoCheck', 'checkEveryX', 'allowProposals', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs'];
+      const requestKeys = ['engineEnabled', 'autoCheck', 'checkEveryX', 'allowProposals', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs'];
       if (requestKeys.some(key => previous[key] !== next[key])) engine()?.abort?.();
       window.OUTLINE_ENGINE_SETTINGS.patchSettings(next);
       draft.settingsDraft = clone(settings());
@@ -298,23 +643,43 @@ window.OUTLINE_ENGINE_UI = (function() {
         origin.message = result?.reason ? (reasons[result.reason] || `检查结果：${result.reason}`) : '正文检查完成。节点状态与调整建议已更新。';
         origin.error = result?.ok === false && result?.reason !== 'aborted';
       }, '正在检查新增正文…');
-    } else if (action === 'abort') { engine()?.abort?.(); notify('已发送停止信号。'); }
-    else if (action === 'accept-proposal') { await engine().applyProposal(ds.outlineProposal, current.revision); notify('已采纳剧情调整建议。'); }
+    } else if (action === 'abort') { if(isRebuilding()){if(!window.WORLD_ENGINE?.abortLinkedRebuild)throw new Error('联合重建停止接口尚未就绪。');await window.WORLD_ENGINE.abortLinkedRebuild();}engine()?.abort?.(); notify('已发送停止信号。'); }
+    else if (action === 'accept-proposal') { engine()?.abort?.(); await engine().applyProposal(ds.outlineProposal, current.revision); notify('已采纳剧情调整建议。'); }
     else if (action === 'dismiss-proposal') { await engine().dismissProposal(ds.outlineProposal); notify('已拒绝此建议。'); }
-    else if (action === 'export-full') download(data().exportData(), `outline-full-${Date.now()}.json`);
-    else if (action === 'export-plan') download({ __outlineEnginePlan: true, schemaVersion: 1, plan: current.plan }, `outline-plan-${Date.now()}.json`);
+    else if (action === 'export-full') { const bundle=history()?.exportBundle?.()||null;download({...data().exportData(),bundle}, `outline-linked-full-${Date.now()}.json`);if(!bundle?.bundle)draft.message='已导出剧情数据；当前尚无联合历史基线，因此此文件没有历史 journal。'; }
+    else if (action === 'export-plan') download({ __outlineEnginePlan: true, schemaVersion: data().SCHEMA_VERSION || 2, plan: current.plan }, `outline-plan-${Date.now()}.json`);
     else if (action === 'cancel-json-import') draft.pendingJson = null;
     else if (action === 'confirm-json-import') {
       const preview = draft.pendingJson;
       if (!preview) throw new Error('请先选择待导入文件。');
-      data().importData(preview.payload, { includeProgress: preview.sameChat && preview.includeProgress });
-      draft.pendingJson = null; draft.message = '大纲数据已导入。'; engine()?.applyInjection?.();
+      engine()?.abort?.();
+      if(preview.kind==='history') { if(!history()?.importBundle)throw new Error('联合历史模块尚未就绪。'); await history().importBundle(preview.payload); }
+      else {
+        const before=state();
+        try { data().importData(preview.payload, { includeProgress: preview.sameChat && preview.includeProgress }); if(preview.sameChat&&preview.includeProgress&&preview.payload.bundle?.bundle)await history().importBundle(preview.payload.bundle); }
+        catch(error){data().saveState(before);throw error;}
+      }
+      await window.WORLD_ENGINE_STORE?.flush?.();
+      draft.pendingJson = null; draft.message = '已按确认范围完成导入。'; engine()?.applyInjection?.();
+    } else if (action === 'history-export') {
+      if(!history()?.exportBundle)throw new Error('联合历史模块尚未就绪。');
+      const value=history().exportBundle();if(!value?.bundle)throw new Error('尚未建立联合历史基线，请先启用剧情模块并建立历史记录。');download(value,`story-linked-history-${Date.now()}.json`);
+    } else if (action === 'history-audit') {
+      if(!history()?.reconcile)throw new Error('联合历史模块尚未就绪。');
+      await history().reconcile();notify('原文审计已完成，请查看恢复状态与待重建范围。');
+    } else if (action === 'history-restore') {
+      if(!history()?.restoreCommit)throw new Error('联合历史恢复接口尚未就绪。');
+      if(!window.confirm||window.confirm('恢复到此联合提交？后续自动状态将撤回并标记待重建，作者大纲与手动标记会保留。'))await run(async(origin,id)=>{ensureCurrentChat(id);await history().restoreCommit(ds.outlineCommit);await window.WORLD_ENGINE_STORE?.flush?.();origin.message='已恢复联合提交，后续原文需显式批量重建。';},'正在恢复联合历史…');
+    } else if (action === 'history-rebuild') {
+      if(!history()?.rebuild)throw new Error('联合批量重建接口尚未就绪。');
+      const status=history().getStatus();
+      if(!window.confirm||window.confirm(`从待重建边界 ${status.pendingFromLayer??status.lastValidLayer??'当前有效位置'} 批量重建世界、记忆与剧情？此操作会调用已配置API，作者计划与手动标记保留。`))await run(async(origin,id)=>{ensureCurrentChat(id);await history().rebuild();origin.message='批量重建已返回，请核对联合历史状态与剩余待重建范围。';},'正在批量重建联合历史…');
     } else if (action === 'snapshot-create') {
       if (!cache()?.createSnapshot?.(draft.snapshotName.trim() || '剧情存档')) throw new Error('未能创建存档，请检查当前聊天与剧情数据。');
       draft.snapshotName = ''; draft.message = '剧情存档已创建。';
     } else if (action === 'snapshot-restore') {
       if (!window.confirm || window.confirm('恢复此剧情存档？当前剧情状态将替换为存档内容。')) {
-        if (!cache()?.restoreSnapshot?.(ds.outlineSnapshot)) throw new Error('恢复存档失败。');
+        if (!(await cache()?.restoreSnapshot?.(ds.outlineSnapshot))) throw new Error('恢复存档失败。');
         engine()?.applyInjection?.(); draft.message = '剧情存档已恢复。';
       }
     } else if (action === 'snapshot-rename') {
@@ -327,6 +692,10 @@ window.OUTLINE_ENGINE_UI = (function() {
       download(exported, `outline-snapshot-${Date.now()}.json`);
     } else if (action === 'snapshot-delete') {
       if ((!window.confirm || window.confirm('删除这份剧情存档？')) && !cache()?.deleteSnapshot?.(ds.outlineSnapshot)) throw new Error('删除存档失败。');
+    } else if (action === 'memory-quarantine-export') {
+      const backup=window.MEMORY_ENGINE?.getQuarantineBackup?.();
+      if(!backup)throw new Error('当前聊天没有可导出的旧记忆隔离备份。');
+      download(backup,`memory-quarantine-${Date.now()}.json`);
     } else if (action === 'export-diag') window.WORLD_ENGINE_DIAG?.download?.('outline');
     refresh();
   }
@@ -336,13 +705,18 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (!file) return;
     const allowed = kind === 'text' ? /\.(txt|md)$/i : /\.json$/i;
     if (!allowed.test(String(file.name || ''))) throw new Error(kind === 'text' ? '仅支持 .txt 和 .md 文本文件。' : '请选择 .json 文件。');
-    if (Number(file.size) > 5 * 1024 * 1024) throw new Error('文件超过 5 MB，请先精简内容。');
+    const sizeLimit=kind==='text'?5:64;
+    if (Number(file.size) > sizeLimit * 1024 * 1024) throw new Error(`文件超过 ${sizeLimit} MB，请先精简内容。`);
     const text = await file.text();
     ensureCurrentChat(originId);
     if (kind === 'text') { draft.sourceText = text; draft.message = '文本已载入，点击 AI 整理并预览后再确认采用。'; }
     else {
       let payload;
       try { payload = JSON.parse(text); } catch (_) { throw new Error('JSON 格式无效，尚未导入任何内容。'); }
+      for (const version of [payload?.schemaVersion, payload?.state?.schemaVersion, payload?.bundle?.schemaVersion, payload?.bundle?.bundle?.schemaVersion]) {
+        if(version!=null&&(!Number.isInteger(Number(version))||Number(version)<1))throw new Error('文件的数据版本字段无效，尚未写入任何内容。');
+        if (Number(version) > (data().SCHEMA_VERSION || 2)) throw new Error('文件来自更新的数据版本，当前版本不能读取；没有写入任何内容。');
+      }
       if (kind === 'snapshot') {
         if (!window.confirm || window.confirm('将这份剧情快照导入当前聊天的存档列表？')) {
           if (!cache()?.importSnapshot?.(payload)) throw new Error('文件不是有效的剧情存档。');
@@ -350,10 +724,20 @@ window.OUTLINE_ENGINE_UI = (function() {
         }
       } else {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('文件不包含有效的大纲对象。');
-        const candidate = payload.plan || payload.state?.plan || payload;
-        if (!Array.isArray(candidate.chapters)) throw new Error('文件中没有 chapters 章节列表。');
-        const plan = data().normalizePlan(candidate);
-        draft.pendingJson = { payload: clone(payload), plan, sameChat: String(payload.chatId || '') === originId, includeProgress: false };
+        const isHistory=payload.type==='story-engine-bundle'||(payload.schemaVersion===2&&payload.baseline&&Array.isArray(payload.journal));
+        if(isHistory){
+          const bundle=payload.bundle||payload;
+          if(!bundle?.baseline||!Array.isArray(bundle.journal))throw new Error('联合历史文件缺少完整基线或journal。');
+          draft.pendingJson={kind:'history',payload:clone(payload),sourceChatId:bundle.chatId,sameChat:String(bundle.chatId||'')===originId,includeProgress:false,journalCount:bundle.journal.length,snapshotCount:bundle.snapshots?.length||0,plan:payload.outline?.plan?data().normalizePlan(payload.outline.plan):null};
+        } else {
+          const candidate = payload.plan || payload.state?.plan || payload;
+          if (!Array.isArray(candidate.chapters)) throw new Error('文件中没有 chapters 章节列表。');
+          const seen=new Set();
+          for(const item of [...chaptersOf(candidate),...tracksOf(candidate),...nodesOf(candidate)])if(item?.id){if(seen.has(item.id))throw new Error(`文件存在重复 ID：${item.id}，请先修正引用。`);seen.add(item.id);}
+          const plan = data().normalizePlan(candidate), validation=data().validatePlan?.(plan);
+          if(validation&&!validation.valid)throw new Error(validation.errors.join('\n'));
+          draft.pendingJson = { kind:'data', payload: clone(payload), plan, warnings:validation?.warnings||[], sourceChatId:payload.chatId||payload.state?.originChatId||'', sameChat: String(payload.chatId || payload.state?.originChatId || '') === originId, includeProgress: false };
+        }
         draft.message = 'JSON 已读取。请确认导入范围后再写入。';
       }
     }
@@ -363,7 +747,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   function bind(body) {
     const root = body?.querySelector?.('.we-outline-root') || document.querySelector('.we-outline-root');
     if (!root) return;
-    root.oninput = event => captureInput(event.target);
+    root.oninput = event => { try { captureInput(event.target); } catch(error) { notify(error?.message||error,true); } };
     root.onchange = async event => {
       const element = event.target;
       try {
@@ -374,10 +758,12 @@ window.OUTLINE_ENGINE_UI = (function() {
           const advanced = data().advanceChapter(next);
           if (advanced.currentChapterId !== next.currentChapterId) data().saveState(advanced);
           engine()?.applyInjection?.(); refresh();
-        } else if (element.id === 'we-outline-text-file' || element.id === 'we-outline-json-file' || element.id === 'we-outline-snapshot-file') {
+        } else if (element?.dataset?.outlineAuthorFlag) {
+          engine()?.abort?.();const next=state();next.authorFlags={...(next.authorFlags||{}),[element.dataset.outlineAuthorFlag]:element.checked};data().saveState(next);engine()?.applyInjection?.();refresh();
+        } else if (['we-outline-text-file','we-outline-json-file','we-outline-snapshot-file','we-outline-history-file'].includes(element.id)) {
           await importFile(element.files?.[0], element.id === 'we-outline-text-file' ? 'text' : element.id === 'we-outline-snapshot-file' ? 'snapshot' : 'json');
           element.value = '';
-        } else if (element?.dataset?.outlineSetting === 'apiSource') refresh();
+        } else if (element?.dataset?.outlineSetting === 'apiSource' || element?.dataset?.outlineConditionType || element?.dataset?.outlineConditionValueType || ['collection','entityId','basis'].includes(element?.dataset?.outlineConditionField) || element?.dataset?.outlineNodeList==='dependencies' || element?.dataset?.outlineTrackField==='kind' || element?.dataset?.outlineNodeField==='trackId') refresh();
       } catch (error) { notify(error?.message || error, true); }
     };
     root.onclick = async event => {
@@ -403,8 +789,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       getVersion: () => window.OUTLINE_ENGINE_SETTINGS?.VERSION || '1.0.0',
       getSettings: settings,
       setEnabled: enabled => { if (!enabled) engine()?.abort?.(); window.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: enabled }); if (draftFor().settingsDraft) draftFor().settingsDraft.engineEnabled = enabled; engine()?.applyInjection?.(); },
-      isRunning: () => draftFor().busy || Boolean(engine()?.isRunning?.()),
-      getRunningLabel: () => engine()?.getRunningLabel?.() || (draftFor().busy ? '剧情任务' : ''),
+      isRunning: () => draftFor().busy || Boolean(engine()?.isRunning?.()) || isRebuilding(),
+      getRunningLabel: () => engine()?.getRunningLabel?.() || (isRebuilding() ? '联合历史重建' : draftFor().busy ? '剧情任务' : ''),
       showForward: true, showRedo: false, forwardTitle: '立即检查剧情进度',
       forward: () => handleAction('check-now'), redo: () => handleAction('check-now'), abort: () => engine()?.abort?.()
     });

@@ -369,7 +369,15 @@ window.WORLD_ENGINE_CORE = (function() {
     const key = STORAGE_PREFIX + chatId;
     ensureArrays(state);
     state.lastUpdated = { chatId, timestamp: Date.now() };
-    window.WORLD_ENGINE_STORE.setItem(key, JSON.stringify(state));
+    const linked = window.STORY_ENGINE_PROJECTION?.active?.();
+    const publicState = linked ? window.STORY_ENGINE_PROJECTION.publicWorld(state) : state;
+    const before = linked ? window.WORLD_ENGINE_STORE.getItem(key) : null;
+    window.WORLD_ENGINE_STORE.setItem(key, JSON.stringify(publicState));
+    const history = window.STORY_ENGINE_HISTORY;
+    if (linked && history && !history.isApplying?.() && !window.WORLD_ENGINE_STORE.isTransactionActive?.()) {
+      try { history.recordWorldEdit?.(before ? JSON.parse(before) : null, publicState); }
+      catch (error) { console.warn('[联合存档] 手工世界变更记录失败', error); }
+    }
   }
 
   function clearState() {

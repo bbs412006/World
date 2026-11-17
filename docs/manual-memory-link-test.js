@@ -11,7 +11,7 @@ assert.ok(world.includes('async function manualMemoryLink()'));
 assert.ok(world.includes('window.MEMORY_ENGINE?.ingestWorldEvolution?.({'));
 assert.ok(world.includes('replace: true'));
 assert.ok(world.includes('force: true'));
-assert.ok(world.includes('manualMemoryLink }'));
+assert.match(world, /window\.WORLD_ENGINE\s*=\s*\{[^}]*\bmanualMemoryLink\b/);
 assert.ok(ui.includes('id="we-memory-link-now"'));
 assert.ok(ui.includes('window.WORLD_ENGINE?.manualMemoryLink?.()'));
 

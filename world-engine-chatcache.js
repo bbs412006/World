@@ -57,6 +57,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   };
   const SLOT_NAMES = Object.keys(SLOTS);
   const extraScopes = new Map();
+  let restoreReady = Promise.resolve();
   function registerScope(id, scope) {
     if (!id || id === 'world' || id === 'memory' || !scope ||
         typeof scope.onStoreWrite !== 'function' || typeof scope.onChatLoaded !== 'function') {
@@ -65,10 +66,18 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     extraScopes.set(id, scope);
   }
   function notifyExtraScopes(method, ...args) {
+    const tasks = [];
     for (const [id, scope] of extraScopes) {
-      try { scope[method](...args); }
+      try {
+        const result = scope[method](...args);
+        if (result?.then) {
+          tasks.push(result);
+          result.catch(error => console.warn(`[${id}] 聊天缓存异步处理失败`, error));
+        }
+      }
       catch (error) { console.warn(`[${id}] 聊天缓存处理失败（已隔离）`, error); }
     }
+    return tasks;
   }
 
   // 本地修订号键：仅设备本地记账（Lamport 计数器），不属于 slot、不进聊天、不触发同步
@@ -297,7 +306,9 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   // ========== 聊天加载：实时同步的恢复 / 收敛 ==========
 
   function onChatLoaded() {
-    notifyExtraScopes('onChatLoaded');
+    const tasks = notifyExtraScopes('onChatLoaded');
+    restoreReady = Promise.all(tasks).then(() => store().flush?.());
+    restoreReady.catch(error => console.warn('[联合存档] 聊天恢复尚未完成', error));
     try { memoryScope.onChatLoaded(); }
     catch (e) { console.warn('[记忆引擎] 酒馆缓存恢复失败（已隔离）', e); }
     // 丢弃上一个聊天遗留的 pending tick，避免它在 B 上下文意外写盘 / 生成自动备份
@@ -636,7 +647,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
 
   let _inited = false;
   function init() {
-    if (_inited) return;
+    if (_inited) return restoreReady;
     _inited = true;
     store().setSyncSink({ onWrite: onStoreWrite, onRemove: onStoreRemove });
     // 聊天缓存属于共用底座，生命周期不能挂靠在世界或任一业务引擎上。
@@ -652,6 +663,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     }
     // 扩展加载时聊天通常已就绪（页面刷新、扩展中途启用）：对当前聊天做一次恢复 / 收敛
     try { onChatLoaded(); } catch (e) { console.warn('[世界引擎] 酒馆缓存初始化恢复失败', e); }
+    return restoreReady;
   }
 
   function forScope(scope) {
@@ -665,6 +677,6 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     init, onChatLoaded, pushLiveNow, getStatus,
     listSnapshots, createSnapshot, restoreSnapshot, renameSnapshot, deleteSnapshot,
     exportSnapshot, importSnapshot,
-    forScope, registerScope
+    forScope, registerScope, whenReady: () => restoreReady
   };
 })();
