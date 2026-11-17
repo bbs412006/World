@@ -921,6 +921,9 @@ ${JSON.stringify(sample || [], null, 2)}
     // 蓝绿灯触发：扫描本扩展自己喂给推演的近期对话（解耦，不读酒馆的聊天扫描）
     const worldbookScanText = dialogueText || `${userMsg || ''}\n${aiMsg || ''}`;
     const worldbookSection = await window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection?.(worldbookScanText) || '';
+    let outlineSection = '';
+    try { outlineSection = window.OUTLINE_ENGINE?.buildWorldGuidance?.(state) || ''; }
+    catch (error) { console.error('[世界引擎] 大纲指导读取失败（已隔离）', error); }
     let memoryEngineSection = '';
     try {
       memoryEngineSection = window.MEMORY_ENGINE?.buildWorldEngineContext?.(state) || '';
@@ -969,6 +972,7 @@ ${JSON.stringify(sample || [], null, 2)}
     const prompt = segEngineRole + '\n\n' + ENTITY_ID_PROTOCOL + '\n\n' + segCausalSteps
       + '\n\n========== 世界推演规则 ==========\n' + fullRules
       + '\n\n' + worldbookSection
+      + (outlineSection ? '\n\n' + outlineSection : '')
       + (memoryEngineSection ? '\n\n' + memoryEngineSection : '')
       + '\n\n' + segStateBlock
       + '\n\n' + segDialogue
@@ -984,6 +988,7 @@ ${JSON.stringify(sample || [], null, 2)}
       { key: 'causal-steps',   label: '③ 因果检查（10 步）',        content: segCausalSteps },
       { key: 'rules',          label: '④ 世界推演规则',            content: fullRules },
       { key: 'worldbook',      label: '⑤ 世界书注入',              content: worldbookSection },
+      { key: 'outline-guidance', label: '⑤a 剧情大纲（未来指导）', content: outlineSection },
       { key: 'memory-engine',  label: '⑤b 记忆引擎人物/实体注入',   content: memoryEngineSection },
       { key: 'state',          label: '⑥ 当前世界状态（JSON）',     content: segStateBlock },
       { key: 'dialogue',       label: '⑦ 近期对话',                content: segDialogue },

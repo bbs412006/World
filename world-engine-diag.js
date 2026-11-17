@@ -43,6 +43,7 @@ window.WORLD_ENGINE_DIAG = (function() {
   }
 
   function collect(scope) {
+    if (scope === 'outline') return collectOutline();
     if (scope === 'memory') return collectMemory();
     if (scope != null && scope !== '' && scope !== 'world') throw new Error(`未知诊断 scope: ${scope}`);
     const core = window.WORLD_ENGINE_CORE;
@@ -321,6 +322,34 @@ window.WORLD_ENGINE_DIAG = (function() {
     };
   }
 
+  function collectOutline() {
+    const state = safe(() => window.OUTLINE_ENGINE_DATA?.loadState?.()) || {};
+    return {
+      type: 'outline-engine-diagnostic', version: window.OUTLINE_ENGINE_SETTINGS?.VERSION || null,
+      collectedAt: new Date().toISOString(),
+      settings: safe(() => sanitizeSettings(window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true))),
+      outline: {
+        revision: state.revision, currentChapterId: state.currentChapterId,
+        chapters: state.plan?.chapters?.length || 0,
+        nodes: (state.plan?.chapters || []).reduce((total, chapter) => total + (chapter.nodes?.length || 0), 0),
+        tracking: safe(() => Object.fromEntries(
+          ['anchorLayer', 'checkedLayer', 'roundsSinceCheck', 'pendingRecheck', 'recheckStartLayer']
+            .map(key => [key, state.tracking?.[key] ?? null])
+        )),
+        progressEventCount: state.progressEvents?.length || 0,
+        proposalCount: state.proposals?.length || 0
+      },
+      execution: safe(() => ({ running: window.OUTLINE_ENGINE?.isRunning?.(), lastError: window.OUTLINE_ENGINE?.getLastError?.() || '' })),
+      injectionInspector: safe(() => {
+        const snapshot = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastSnapshot?.('outline');
+        if (!snapshot) return null;
+        const { messages, ourContent, ourExcerpt, ...summary } = snapshot;
+        return summary;
+      }),
+      chatcache: safe(() => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.getStatus?.())
+    };
+  }
+
   // 下载诊断包为 JSON 文件
   function download(scope) {
     const diag = collect(scope);
@@ -334,7 +363,7 @@ window.WORLD_ENGINE_DIAG = (function() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (scope === 'memory' ? 'memory-engine-diag-' : 'world-engine-diag-') + chatId + '-' + Date.now() + '.json';
+    a.download = (scope === 'outline' ? 'outline-engine-diag-' : scope === 'memory' ? 'memory-engine-diag-' : 'world-engine-diag-') + chatId + '-' + Date.now() + '.json';
     a.click();
     URL.revokeObjectURL(url);
     return content;

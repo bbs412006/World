@@ -19,12 +19,15 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // 与 world-engine.js 的 INJECTION_NAME 对应（我们注册到 ST extension_prompts 用的 key）。
   const INJECTION_NAME = 'world-engine-world';
   const MEMORY_INJECTION_NAME = 'memory-engine-memory';
+  const OUTLINE_INJECTION_NAME = 'outline-engine-outline';
 
   // 着陆哨兵：buildContext() 输出永远以「【世界信息】」开头（world-engine-inject.js），
   //   该子串无任何 {{...}} 宏，不被 ST substituteParams 改写 → 拿它判「注入是否进了最终 prompt」最稳。
   //   （注：拿完整注入串做 indexOf 会因 {{user}} 等宏被展开而假阴性，故只认这个无宏哨兵。）
   const SENTINEL = '【世界信息】';
   const MEMORY_SENTINEL = '【记忆信息】';
+  const OUTLINE_SENTINEL = '【剧情指导】';
+  const sentinelOf = scope => scope === 'outline' ? OUTLINE_SENTINEL : scope === 'memory' ? MEMORY_SENTINEL : SENTINEL;
 
   // 事件名（字面量；运行时优先用 ctx.event_types 的常量，取不到再回退字面量）。
   const EV_TEXT = 'generate_after_combine_prompts';   // 文本补全/经典 API：eventData={prompt,dryRun}
@@ -33,6 +36,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   let _subscribed = false;
   let _last = null;  // 只留最后一份快照
   let _lastMemory = null;
+  let _lastOutline = null;
 
   function getCtx() {
     try { return (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null; }
@@ -42,20 +46,23 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // —— 在事件当下采集只读环境字段（此刻 extension_prompts 仍持有本轮注册） ——
   function snapEnv(ctx, scope) {
     const memoryScope = scope === 'memory';
+    const outlineScope = scope === 'outline';
     const api = window.WORLD_ENGINE_API;
     const core = window.WORLD_ENGINE_CORE;
     let injectEnabled = true, registeredAtSend = false, sameLayerReroll = false, round = null;
 
     try {
-      const settings = memoryScope ? window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) : (api && api.getSettings ? api.getSettings(true) : {});
-      injectEnabled = settings?.injectIntoPrompt !== false;
+      const settings = outlineScope ? window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true)
+        : memoryScope ? window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) : (api && api.getSettings ? api.getSettings(true) : {});
+      injectEnabled = settings?.injectIntoPrompt !== false && (!outlineScope || settings?.engineEnabled === true);
     } catch (e) {}
 
     // 独立确认「我们这轮到底注册没注册」——区分「注册了没着陆=真bug」与「我们自己没注册=按设计跳过」。
     try {
       const ep = ctx && ctx.extensionPrompts;
-      const entry = ep && ep[memoryScope ? MEMORY_INJECTION_NAME : INJECTION_NAME];
-      registeredAtSend = !!(entry && entry.value && String(entry.value).length);
+      const name = outlineScope ? OUTLINE_INJECTION_NAME : memoryScope ? MEMORY_INJECTION_NAME : INJECTION_NAME;
+      const entry = Array.isArray(ep) ? ep.find(item => item.name === name) : ep?.[name];
+      registeredAtSend = !!String(entry?.value || entry?.content || '');
     } catch (e) {}
 
     // 同层重 roll 判据（与 world-engine.js applyInjectionForCurrentRound 同一 fingerprint 口径）。
@@ -63,10 +70,10 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       const fp = core && core.loadFingerprint ? core.loadFingerprint() : '';
       const fpLayer = (fp !== '' && Number.isFinite(Number(fp))) ? Number(fp) : null;
       const chatLayer = core && core.getChatLayer ? core.getChatLayer() : null;
-      sameLayerReroll = (fpLayer != null && chatLayer != null && fpLayer === chatLayer);
+      sameLayerReroll = !outlineScope && (fpLayer != null && chatLayer != null && fpLayer === chatLayer);
     } catch (e) {}
 
-    try { round = core && core.loadState ? core.loadState().round : null; } catch (e) {}
+    try { round = outlineScope ? window.OUTLINE_ENGINE_DATA?.loadState?.().tracking?.checkedLayer : core && core.loadState ? core.loadState().round : null; } catch (e) {}
 
     return { injectEnabled, registeredAtSend, sameLayerReroll, round };
   }
@@ -75,7 +82,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   //   每条都克隆完整 content 供 UI 只读展开（用户需要核对全部 role 的实际内容，不只是我们注入那条）。
   //   仅留最后一份快照、内存有界；diag 导出侧不带 content（隐私：含角色卡/世界书/聊天历史原文）。
   function snapChat(chat, env, scope) {
-    const sentinel = scope === 'memory' ? MEMORY_SENTINEL : SENTINEL;
+    const sentinel = sentinelOf(scope);
     const messages = [];
     let landed = false, ourContent = '', ourIndex = -1;
     for (let i = 0; i < chat.length; i++) {
@@ -108,7 +115,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // —— 文本补全：prompt 已 flatten 成单串，链不可分 role；存长度 + 哨兵命中 + 哨兵附近摘录 ——
   function snapText(prompt, env, scope) {
     const text = String(prompt || '');
-    const idx = text.indexOf(scope === 'memory' ? MEMORY_SENTINEL : SENTINEL);
+    const idx = text.indexOf(sentinelOf(scope));
     const landed = idx >= 0;
     let excerpt = '';
     if (landed) {
@@ -147,6 +154,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       const ctx = getCtx();
       _last = snapChat(eventData.chat, snapEnv(ctx, 'world'), 'world');
       _lastMemory = snapChat(eventData.chat, snapEnv(ctx, 'memory'), 'memory');
+      _lastOutline = snapChat(eventData.chat, snapEnv(ctx, 'outline'), 'outline');
     } catch (e) { /* 只读自检绝不影响生成 */ }
   }
 
@@ -157,6 +165,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       const ctx = getCtx();
       _last = snapText(eventData.prompt, snapEnv(ctx, 'world'), 'world');
       _lastMemory = snapText(eventData.prompt, snapEnv(ctx, 'memory'), 'memory');
+      _lastOutline = snapText(eventData.prompt, snapEnv(ctx, 'outline'), 'outline');
     } catch (e) {}
   }
 
@@ -172,6 +181,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       const et = ctx.event_types || {};
       ctx.eventSource.on(et.CHAT_COMPLETION_PROMPT_READY || EV_CHAT, onChatPromptReady);
       ctx.eventSource.on(et.GENERATE_AFTER_COMBINE_PROMPTS || EV_TEXT, onTextPromptReady);
+      ctx.eventSource.on(et.CHAT_LOADED || 'chat_loaded', () => { _last = null; _lastMemory = null; _lastOutline = null; });
       _subscribed = true;
       console.log('[世界引擎] 注入自检查看器就绪（只读订阅 prompt-ready 事件）');
     } catch (e) {
@@ -181,6 +191,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
 
   // 返回最后一份快照（只读副本引用；UI/diag 只读不写）。无则 null。
   function getLastSnapshot(scope) {
+    if (scope === 'outline') return _lastOutline;
     if (scope === 'memory') return _lastMemory;
     if (scope == null || scope === '' || scope === 'world') return _last;
     throw new Error(`未知注入检查 scope: ${scope}`);
@@ -197,8 +208,9 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   };
   function statusText(status, scope) {
     const text = STATUS_TEXT[status] || STATUS_TEXT.NOT_YET;
+    if (scope === 'outline') return text.replace(/世界状态/g, '剧情指导').replace(/推演/g, '检查');
     return scope === 'memory' ? text.replace(/世界状态/g, '记忆信息').replace(/无世界状态/g, '无记忆信息') : text;
   }
 
-  return { init, getLastSnapshot, statusText, SENTINEL, MEMORY_SENTINEL };
+  return { init, getLastSnapshot, statusText, SENTINEL, MEMORY_SENTINEL, OUTLINE_SENTINEL };
 })();

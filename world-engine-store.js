@@ -5,7 +5,7 @@
 window.WORLD_ENGINE_STORE = (function() {
   const DB_NAME = 'world_engine';
   const STORE_NAME = 'kv';
-  const PREFIX = 'world_engine_';
+  const PREFIXES = ['world_engine_', 'memory_engine_', 'outline_engine_'];
 
   let db = null;
   let ready = false;
@@ -76,7 +76,7 @@ window.WORLD_ENGINE_STORE = (function() {
       const legacyKeys = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && k.startsWith(PREFIX)) legacyKeys.push(k);
+        if (k && PREFIXES.some(prefix => k.startsWith(prefix))) legacyKeys.push(k);
       }
       for (const k of legacyKeys) {
         const v = localStorage.getItem(k);

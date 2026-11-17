@@ -1643,14 +1643,24 @@ window.WORLD_ENGINE_UI = (function() {
     const settingsOpen = currentFace.id === 'world'
       ? _currentView === 'settings'
       : Boolean(callEngineFace(currentFace, 'isSettingsOpen', false));
-    if (auto && (settingsOpen || isEditingPanelContent())) return;
+    if (auto && (settingsOpen || isEditingPanelContent() || callEngineFace(currentFace, 'isEditing', false))) return;
     if (currentFace.id !== 'world') {
       if (panelBodyElement) panelBodyElement.innerHTML = callEngineFace(
         currentFace,
         'render',
         '<div class="we-empty">该引擎界面加载失败或尚未提供渲染器；其他引擎不受影响。</div>'
       );
-      if (currentFace.id === 'memory') updateMemoryPanelHeader();
+      if (currentFace.id === 'memory') {
+        const mood = document.getElementById('we-header-mood');
+        if (mood) mood.style.display = '';
+        updateMemoryPanelHeader();
+      }
+      else {
+        const header = document.getElementById('we-header-round');
+        const mood = document.getElementById('we-header-mood');
+        if (header) header.textContent = String(callEngineFace(currentFace, 'getHeaderText', '') || '');
+        if (mood) mood.style.display = 'none';
+      }
       bindEvents(null);
       callEngineFace(currentFace, 'bind', undefined, panelBodyElement);
       return;
@@ -1679,6 +1689,8 @@ window.WORLD_ENGINE_UI = (function() {
     }
 
     updatePanelHeader(s, active.layer);
+    const mood = document.getElementById('we-header-mood');
+    if (mood) mood.style.display = '';
     bindEvents(state);
   }
 
@@ -1927,6 +1939,7 @@ window.WORLD_ENGINE_UI = (function() {
   //   date    —— 可选，日期不确定的留月份/年份；
   //   items   —— 该版本改动条目（每条一行，渲染时走 h() 转义）。
   const CHANGELOG = [
+    { version: '3.1.0', date: '2026-11-17', items: ['新增独立剧情大纲：手写章节节点，或将 txt/md 文本整理并预览确认后采用。', '当前大纲柔性引导正文与世界推演；按可配置的 N 轮检查进度，改纲建议需用户确认，必要节点完成后自动切章。', '剧情进度关联真实消息来源，重生成与删改正文会撤回失效判断；支持独立 JSON、聊天存档、同步、注入检查和诊断。'] },
     { version: '3.0.2', date: '2026-07-19', items: ['放宽事件链的早期创建条件：已有具体迹象的筹划、试探、调查起步或矛盾初现，可以在尚未成熟时进入事件链持续观察。', '放宽风声的传播起点：明确信息主题一旦开始公开发布、被他人听闻或转述、经渠道传递或形成小范围议论，即可创建，不再要求已影响其他持久状态。', '保留事件与风声的归并、去重和合法传播边界，避免放宽准入后产生重复条目或私密信息泄露。'] },
     { version: '3.0.1', date: '2026-07-16', items: ['修复云白、早樱浅色主题下事件链标题与 Lv.2 等级文字接近背景色、难以阅读的问题。', '事件等级、类型、阶段、推演结果、终局印章与倒计时改为浅色主题自适应对比度；深色主题保持原有配色。'] },
     { version: '3.0.0', date: '2026-07-14', items: ['世界引擎进入 3.0 正式版本：继续以独立世界状态推演、分层注入、本地事件机制、可编辑面板与聊天级存档为核心。', '记忆引擎 1.0 正式接入：人物、实体、纪要与总述保持独立数据和故障边界，并可按需向世界推演提供命中的最新人物与实体记忆。', '自动纪要从首次进入聊天时的当前层开始统计新增轮次；历史对话整理仅由纪要与总述批量重填执行。'] },
@@ -6265,6 +6278,7 @@ window.WORLD_ENGINE_UI = (function() {
       fwd.title = face.forwardTitle || `向前推进${face.label}`;
     }
     if (redo) {
+      redo.style.display = face.showRedo === false ? 'none' : '';
       redo.classList.toggle('we-sat-off', active);
       redo.title = `重新推演${face.label}`;
     }
@@ -6278,14 +6292,14 @@ window.WORLD_ENGINE_UI = (function() {
       power.title = `开关${face.label}推演与注入`;
     }
     if (engineSwitch) {
-      const targetId = face.id === 'memory' ? 'world' : 'memory';
-      const target = getEngineFace(targetId);
+      const target = getNextEngineFace();
       const targetActive = Boolean(callEngineFace(target, 'isRunning', false));
       const targetRunningLabel = String(callEngineFace(target, 'getRunningLabel', '') || '');
       engineSwitch.dataset.targetEngine = target.id;
       engineSwitch.dataset.engineRunning = targetActive ? 'true' : 'false';
       engineSwitch.classList.toggle('we-sat-target-world', target.id === 'world');
       engineSwitch.classList.toggle('we-sat-target-memory', target.id === 'memory');
+      engineSwitch.classList.toggle('we-sat-target-outline', target.id === 'outline');
       engineSwitch.classList.toggle('we-sat-engine-running', targetActive);
       engineSwitch.title = targetActive
         ? `${target.label}正在${targetRunningLabel || '推演'} · 点击切换查看`
@@ -6576,7 +6590,7 @@ window.WORLD_ENGINE_UI = (function() {
     });
     wire('we-sat-engine-switch', () => {
       const shortcut = ball.querySelector('#we-sat-engine-switch');
-      switchEngineFace(shortcut?.dataset.targetEngine || (getEngineFace().id === 'memory' ? 'world' : 'memory'));
+      switchEngineFace(shortcut?.dataset.targetEngine || getNextEngineFace().id);
     });
   }
 
@@ -6594,7 +6608,7 @@ window.WORLD_ENGINE_UI = (function() {
       btn.innerHTML =
         '<span class="we-ball-orbit"></span>' +
         '<span class="we-ball-ring"></span>' +
-        '<span class="we-ball-core"><span class="we-ball-globe"></span><span class="we-ball-memory"><span class="we-memory-scan"></span></span></span>' +
+        '<span class="we-ball-core"><span class="we-ball-globe"></span><span class="we-ball-memory"><span class="we-memory-scan"></span></span><span class="we-ball-outline"><i class="fa-solid fa-book-open"></i></span></span>' +
         '<span class="we-ball-count"></span>' +
         '<span class="we-ball-badge"></span>' +
         '<span class="we-ball-tip"></span>' +

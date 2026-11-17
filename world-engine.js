@@ -12,6 +12,11 @@
       // 本地撤旧失败不阻断正常聊天；这里没有后台 API 请求。
       console.error('[记忆引擎] 生成前撤下失效摘要失败', error);
     }
+    try {
+      await window.OUTLINE_ENGINE?.prepareHistoryForGeneration?.();
+    } catch (error) {
+      console.error('[剧情大纲] 生成前进度审计失败（已隔离）', error);
+    }
   };
 
   // 所有引擎共用同一事件故障边界：同步异常与异步 rejection 都只记到所属引擎。
@@ -70,7 +75,6 @@
       id: 'memory', label: '记忆引擎', modules: [
         'memory-engine-settings.js',
         'memory-engine-data.js',
-        'memory-engine-timeline.js',
         'memory-engine-prompt.js',
         'memory-engine-small-summary-prompt.js',
         'memory-engine-big-summary-prompt.js',
@@ -78,12 +82,25 @@
       ],
       contracts: {
         MEMORY_ENGINE_SETTINGS: ['getSettings', 'patchSettings'],
-        MEMORY_ENGINE_DATA: ['loadState', 'saveState'],
         MEMORY_ENGINE_TIMELINE: ['captureRange', 'auditRefs', 'syncHidden'],
+        MEMORY_ENGINE_DATA: ['loadState', 'saveState'],
         MEMORY_ENGINE_PROMPT: ['buildUserPrompt'],
         MEMORY_ENGINE_SMALL_SUMMARY_PROMPT: ['buildUserPrompt'],
         MEMORY_ENGINE_BIG_SUMMARY_PROMPT: ['buildUserPrompt'],
         MEMORY_ENGINE: ['init', 'applyInjection', 'abort', 'isRunning']
+      }
+    },
+    {
+      id: 'outline', label: '剧情大纲', modules: [
+        'outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-cache.js',
+        'outline-engine-prompt.js', 'outline-engine.js'
+      ],
+      contracts: {
+        OUTLINE_ENGINE_SETTINGS: ['getSettings', 'patchSettings'],
+        MEMORY_ENGINE_TIMELINE: ['captureRange', 'auditRefs', 'digestRefs', 'hashText'],
+        OUTLINE_ENGINE_DATA: ['loadState', 'saveState', 'commitPlan'],
+        OUTLINE_ENGINE_PROMPT: ['buildCheckPrompt', 'buildOrganizePrompt'],
+        OUTLINE_ENGINE: ['init', 'applyInjection', 'checkNow', 'abort', 'isRunning']
       }
     }
   ];
@@ -160,11 +177,26 @@
     try {
       await loadRequiredModules(baseUrl, SHARED_MODULES, '共用底座');
       validateContracts('共用底座', SHARED_CONTRACTS);
+      // 来源工具供记忆和大纲共用；加载失败不能拖垮不依赖它的世界引擎。
+      await loadEngineGroup(baseUrl, {
+        label: '共享消息来源', modules: ['memory-engine-timeline.js'],
+        contracts: { MEMORY_ENGINE_TIMELINE: ['captureRange', 'auditRefs', 'syncHidden'] }
+      });
       for (const group of ENGINE_MODULE_GROUPS) {
         loadedEngines.set(group.id, await loadEngineGroup(baseUrl, group));
       }
       await loadRequiredModules(baseUrl, SHARED_UI_MODULES, '共用界面');
       validateContracts('共用界面', SHARED_UI_CONTRACTS);
+      if (loadedEngines.get('outline')) {
+        try {
+          await loadScript(baseUrl + '/outline-engine-ui.js');
+          validateContracts('剧情大纲界面', { OUTLINE_ENGINE_UI: ['init'] });
+          const style = document.createElement('link');
+          style.rel = 'stylesheet';
+          style.href = baseUrl + '/outline-engine.css';
+          document.head.appendChild(style);
+        } catch (error) { console.warn('[剧情大纲] 界面加载失败（已隔离）', error); }
+      }
 
       // 读取扩展版本号（来自 manifest.json，单一真相源）供 UI 显示；失败不阻断启动
       try {
@@ -185,6 +217,10 @@
         window.WORLD_ENGINE_CHATCACHE.init();
       }
       sharedRuntimeReady = true;
+      if (loadedEngines.get('outline')) {
+        try { window.OUTLINE_ENGINE_UI?.init?.(); }
+        catch (error) { console.warn('[剧情大纲] 界面注册失败（已隔离）', error); }
+      }
 
       // 注入自检查看器：只读订阅 ST prompt-ready 事件，核对世界状态是否真进了最终 prompt（解耦，订阅失败不阻断启动）
       if (window.WORLD_ENGINE_INJECT_INSPECTOR) {
@@ -794,6 +830,10 @@
       if (sharedRuntimeReady && loadedEngines.get('memory') && window.MEMORY_ENGINE) {
         try { window.MEMORY_ENGINE.init(); }
         catch (e) { console.warn('[记忆引擎] 初始化失败（非致命）', e); }
+      }
+      if (sharedRuntimeReady && loadedEngines.get('outline') && window.OUTLINE_ENGINE) {
+        try { window.OUTLINE_ENGINE.init(); }
+        catch (e) { console.warn('[剧情大纲] 初始化失败（非致命）', e); }
       }
     }
   }

@@ -56,6 +56,20 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     worldbook:   id => `world_engine_worldbook_selection_${id}`
   };
   const SLOT_NAMES = Object.keys(SLOTS);
+  const extraScopes = new Map();
+  function registerScope(id, scope) {
+    if (!id || id === 'world' || id === 'memory' || !scope ||
+        typeof scope.onStoreWrite !== 'function' || typeof scope.onChatLoaded !== 'function') {
+      throw new Error('聊天缓存 scope 注册无效');
+    }
+    extraScopes.set(id, scope);
+  }
+  function notifyExtraScopes(method, ...args) {
+    for (const [id, scope] of extraScopes) {
+      try { scope[method](...args); }
+      catch (error) { console.warn(`[${id}] 聊天缓存处理失败（已隔离）`, error); }
+    }
+  }
 
   // 本地修订号键：仅设备本地记账（Lamport 计数器），不属于 slot、不进聊天、不触发同步
   function revKey(id) { return `world_engine_${id}_syncrev`; }
@@ -269,6 +283,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   }
 
   function onStoreWrite(key, value) {
+    notifyExtraScopes('onStoreWrite', key, value);
     try { memoryScope.onStoreWrite(key); }
     catch (e) { console.warn('[记忆引擎] 酒馆缓存写入调度失败（已隔离）', e); }
     if (_suspend) return;
@@ -282,6 +297,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   // ========== 聊天加载：实时同步的恢复 / 收敛 ==========
 
   function onChatLoaded() {
+    notifyExtraScopes('onChatLoaded');
     try { memoryScope.onChatLoaded(); }
     catch (e) { console.warn('[记忆引擎] 酒馆缓存恢复失败（已隔离）', e); }
     // 丢弃上一个聊天遗留的 pending tick，避免它在 B 上下文意外写盘 / 生成自动备份
@@ -639,6 +655,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   }
 
   function forScope(scope) {
+    if (extraScopes.has(scope)) return extraScopes.get(scope);
     if (scope === 'memory') return memoryScope;
     if (scope == null || scope === '' || scope === 'world') return null;
     throw new Error(`未知聊天缓存 scope: ${scope}`);
@@ -648,6 +665,6 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     init, onChatLoaded, pushLiveNow, getStatus,
     listSnapshots, createSnapshot, restoreSnapshot, renameSnapshot, deleteSnapshot,
     exportSnapshot, importSnapshot,
-    forScope
+    forScope, registerScope
   };
 })();
