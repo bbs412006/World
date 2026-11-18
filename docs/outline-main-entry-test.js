@@ -190,19 +190,26 @@ function runMainEntrySuite() {
   assert.ok(panelBody.innerHTML.includes('id="we-sec-outline-entry"'), '展开模式主界面也必须展示剧情大纲入口卡片');
   assert.ok(panelBody.innerHTML.includes('data-switch-face="outline"'), '展开模式应提供直接打开剧情大纲按钮');
 
-  // 3. 剧情大纲首页与分页结构检查（统一视觉语言）
+  // 3. 剧情大纲瘦身首页与分页结构检查（统一视觉语言 + 职责一目了然）
   const outlineHtml = sandbox.OUTLINE_ENGINE_UI.render();
   assert.ok(outlineHtml.includes('we-outline-core-section') && outlineHtml.includes('剧情脉络'), '剧情大纲首页应包含核心环形仪表盘');
-  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="tracks"'), '剧情大纲首页应包含纵轴时间线导航');
-  assert.ok(outlineHtml.includes('we-outline-home-chapter') && outlineHtml.includes('章节与进度'), '剧情大纲首页应包含章节与进度区块');
+  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"') && outlineHtml.includes('data-outline-nav="transfer"'), '剧情大纲首页应包含瘦身后的 3 条清晰纵轴导航');
+  assert.ok(!outlineHtml.includes('data-outline-nav="tracks"') && !outlineHtml.includes('data-outline-nav="recovery"'), '首页纵轴导航应已去重合并为 3 项');
+  assert.ok(outlineHtml.includes('we-outline-home-chapter') && outlineHtml.includes('剧情看板'), '剧情大纲首页应包含统一剧情看板');
+  assert.ok(outlineHtml.includes('data-outline-action="board-mode-chapter"') && outlineHtml.includes('data-outline-action="board-mode-track"'), '首页剧情看板应支持按章节/按剧情线切换');
 
   // 4. 二级分页、设置选项卡与编辑器均使用统一的 we-sub-topbar 与 we-settings-tabs-shell
   return (async () => {
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
+    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('正文注入实时预览'), '首页应支持展开注入预览看作用内容');
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
+
     for (const view of ['tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
       await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-' + view);
       const subHtml = sandbox.OUTLINE_ENGINE_UI.render();
       assert.ok(subHtml.includes('we-sub-topbar') && subHtml.includes('data-outline-action="view-home"'), `${view} 分页必须使用统一返回顶栏`);
     }
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-home');
 
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
     const settingsHtml = sandbox.OUTLINE_ENGINE_UI.render();

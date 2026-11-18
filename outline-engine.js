@@ -340,6 +340,8 @@ window.OUTLINE_ENGINE = (function() {
     for (const clue of state.clues || []) {
       if (clue.validity !== 'valid') continue;
       const node = findNode(state, clue.nodeId), condition = node?.disclosure?.condition;
+      // 手动创建的独立线索不绑定节点揭露门槛时，保留作者手工设定的 available 开关。
+      if (!clue.nodeId && !condition && !clue.availabilityCondition) continue;
       // 模型返回的 clue.condition 只能补充限制，不能替换/放宽作者的揭露门槛。
       const authorGate = condition && scheduler()?.evaluateConditions(condition, { state, worldState });
       const additional = clue.availabilityCondition ? scheduler()?.evaluateConditions(clue.availabilityCondition, { state, worldState }) : { eligible: true };
