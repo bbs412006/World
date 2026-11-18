@@ -130,7 +130,8 @@ function runMainEntrySuite() {
     WORLD_ENGINE_EVOLUTION: { isRunning: () => false, abort() {} },
     WORLD_ENGINE_API: {
       getSettings: () => JSON.parse(storage.get('world_engine_settings') || '{}'),
-      fetchModelList: async () => ['gpt-4o-mini', 'claude-3-5-sonnet']
+      fetchModelList: async () => ['gpt-4o-mini', 'claude-3-5-sonnet'],
+      testConnection: async cfg => ({ ok: true, durationMs: 32, preview: `{"ok":true,"model":"${cfg.model}"}`, length: 24 })
     },
     MEMORY_ENGINE_SETTINGS: {
       VERSION: '1.1.2',
@@ -232,6 +233,15 @@ function runMainEntrySuite() {
       '设置页选项卡与可折叠分区应与世界/记忆模块保持一致（API 归入常用，联动与高级独立分栏）');
     assert.ok(settingsHtml.includes('we-settings-save-sticky'), '设置页底部保存栏应常驻');
     assert.ok(settingsHtml.includes('id="we-outline-fetch-models"')
+      && settingsHtml.includes('id="we-outline-test-api"')
+      && settingsHtml.includes('data-outline-action="copy-world-api"')
+      && settingsHtml.includes('id="we-outline-stream"')
+      && settingsHtml.includes('id="we-outline-streamIdleTimeoutSeconds"')
+      && settingsHtml.includes('id="we-outline-jsonMode"')
+      && settingsHtml.includes('id="we-outline-topP"')
+      && settingsHtml.includes('id="we-outline-reasoningEffort"')
+      && !settingsHtml.includes('id="we-outline-apiSource"')
+      && !settingsHtml.includes('API 来源')
       && settingsHtml.includes('id="we-outline-apiAutoRetries"')
       && settingsHtml.includes('id="we-outline-firstLayerIsAiOpening"')
       && settingsHtml.includes('id="we-outline-theme-select"')
@@ -239,20 +249,36 @@ function runMainEntrySuite() {
       && settingsHtml.includes('id="we-outline-useWorldReference"')
       && settingsHtml.includes('id="we-outline-injectIntoMemoryEngine"')
       && settingsHtml.includes('id="we-outline-useMemoryReference"'),
-      '设置页应包含独立 API 拉取模型、自动重试、首楼 AI 开场白、主题配色与完整三模块联动开关');
-    assert.ok(!/id="we-(?:api|model|fetch-models|save-settings)/.test(settingsHtml), '设置页不得使用世界/记忆冲突 ID');
+      '设置页应包含独立 API 拉取模型、测试连接、复制世界连接、流式及高级请求参数（无 API 来源）、自动重试、首楼 AI 开场白、主题配色与完整三模块联动开关');
+    assert.ok(!/id="we-(?:api|model|fetch-models|save-settings|stream|test-api|json-mode|top-p|reasoning-effort)/.test(settingsHtml), '设置页不得使用世界/记忆冲突 ID');
 
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'apiSource' }, value: 'custom', type: 'select-one' });
+    storage.set('world_engine_settings', JSON.stringify({ connectionMode: 'proxy', apiUrl: 'https://world.sync/v1', apiKey: 'w-secret' }));
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('copy-world-api');
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'stream' }, checked: true, type: 'checkbox' });
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'streamIdleTimeoutSeconds' }, value: '45', type: 'number' });
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'jsonMode' }, checked: true, type: 'checkbox' });
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'topP' }, value: '', type: 'number' });
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'reasoningEffort' }, value: 'low', type: 'select-one' });
     sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'apiAutoRetries' }, value: '2', type: 'number' });
     sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'firstLayerIsAiOpening' }, checked: false, type: 'checkbox' });
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('fetch-models');
     const afterFetchHtml = sandbox.OUTLINE_ENGINE_UI.render();
     assert.ok(afterFetchHtml.includes('id="we-outline-model-list"') && afterFetchHtml.includes('gpt-4o-mini'), '获取模型列表后应渲染模型下拉选框');
     sandbox.OUTLINE_ENGINE_UI._test.captureInput({ id: 'we-outline-model-list', dataset: {}, value: 'gpt-4o-mini', type: 'select-one' });
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('test-api');
+    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('连接成功（32ms）'), '连接测试应显示耗时与成功提示');
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('save-settings');
-    assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).model, 'gpt-4o-mini');
-    assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).apiAutoRetries, 2);
-    assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).firstLayerIsAiOpening, false);
+    const savedOutline = sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true);
+    assert.strictEqual(savedOutline.apiUrl, 'https://world.sync/v1');
+    assert.strictEqual(savedOutline.connectionMode, 'proxy');
+    assert.strictEqual(savedOutline.model, 'gpt-4o-mini');
+    assert.strictEqual(savedOutline.stream, true);
+    assert.strictEqual(savedOutline.streamIdleTimeoutMs, 45000);
+    assert.strictEqual(savedOutline.jsonMode, true);
+    assert.strictEqual(savedOutline.topP, null, '留空 topP 必须保留 null 而非转成 0');
+    assert.strictEqual(savedOutline.reasoningEffort, 'low');
+    assert.strictEqual(savedOutline.apiAutoRetries, 2);
+    assert.strictEqual(savedOutline.firstLayerIsAiOpening, false);
 
     // 验证绑定设置区块折叠与独立主题配色
     const mockToggle = { dataset: { section: 'set-outline-api' }, onclick: null };

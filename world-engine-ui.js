@@ -290,6 +290,127 @@ window.WORLD_ENGINE_UI = (function() {
     if (duration !== 0) setTimeout(() => el.remove(), duration || 3000);
   }
 
+  function renderSharedApiFieldsHtml(settings, options) {
+    const opts = options || {};
+    const isMemory = opts.scope === 'memory';
+    const defaultTemp = Number.isFinite(Number(opts.defaultTemp)) ? Number(opts.defaultTemp) : (isMemory ? 0.2 : 0.7);
+    const apiTemperature = Number.isFinite(Number(settings.temperature)) ? Math.max(0, Number(settings.temperature)) : defaultTemp;
+    const apiMaxTokens = Math.max(1, parseInt(settings.maxTokens) || 65000);
+    const apiTimeoutMs = Number.isFinite(Number(settings.apiTimeoutMs)) ? Number(settings.apiTimeoutMs) : 120000;
+    const apiTimeoutSec = Math.max(0, Math.round(apiTimeoutMs / 1000));
+    const idleTimeoutMs = Number.isFinite(Number(settings.streamIdleTimeoutMs)) ? Number(settings.streamIdleTimeoutMs) : 90000;
+    const idleTimeoutSec = Math.max(0, Math.round(idleTimeoutMs / 1000));
+    const topPVal = (settings.topP !== '' && settings.topP != null && Number.isFinite(Number(settings.topP)))
+      ? String(settings.topP) : '';
+    const effortVal = String(settings.reasoningEffort || '').trim().toLowerCase();
+    return `
+      ${opts.showCopyFromWorldBtn ? `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        <button class="we-btn" id="we-memory-copy-world-api" type="button">填入世界引擎地址/Key</button>
+      </div>` : ''}
+      <div class="we-input-group">
+        <label>连接方式</label>
+        <select id="we-connection-mode" style="width:100%;">
+          <option value="direct" ${settings.connectionMode !== 'proxy' ? 'selected' : ''}>直连（默认）</option>
+          <option value="proxy" ${settings.connectionMode === 'proxy' ? 'selected' : ''}>经酒馆代理（解决跨域 CORS）</option>
+        </select>
+        ${opts.connectionHint ? `<div style="font-size:11px;color:#888;margin-top:3px;">${opts.connectionHint}</div>` : ''}
+      </div>
+      <div class="we-input-group">
+        <label>${h(opts.urlLabel || 'API URL（OpenAI 兼容）')}</label>
+        <input type="text" id="we-api-url" value="${u(settings.apiUrl || '')}" placeholder="https://api.openai.com/v1">
+        ${opts.urlHint ? `<div style="font-size:11px;color:#888;margin-top:3px;">${opts.urlHint}</div>` : ''}
+      </div>
+      <div class="we-input-group">
+        <label>${h(opts.keyLabel || 'API Key')}</label>
+        <input type="password" id="we-api-key" value="${u(settings.apiKey || '')}">
+      </div>
+      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
+        <div style="flex:1;">
+          <label>模型</label>
+          <input type="text" id="we-model" value="${u(settings.model || 'gpt-3.5-turbo')}" placeholder="模型名称" style="width:100%;">
+        </div>
+        <button class="we-btn" id="we-fetch-models" type="button" style="white-space:nowrap;flex-shrink:0;">获取列表</button>
+        <button class="we-btn" id="we-test-api" type="button" style="white-space:nowrap;flex-shrink:0;">测试请求</button>
+      </div>
+      <div class="we-input-group">
+        <select id="we-model-list" style="display:none;width:100%;margin-top:4px;"><option value="">-- 选择模型 --</option></select>
+      </div>
+      <div class="we-hint" id="we-api-test-status" style="display:none;margin-bottom:6px;"></div>
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        <div style="flex:1;"><label>温度</label><input type="number" id="we-temperature" min="0" step="0.1" value="${apiTemperature}" style="width:100%;"></div>
+        <div style="flex:1;"><label>最大输出 token</label><input type="number" id="we-max-tokens" min="1" step="1" value="${apiMaxTokens}" style="width:100%;"></div>
+      </div>
+      <div class="we-input-group">
+        <label>请求超时（秒）</label>
+        <input type="number" id="we-api-timeout-sec" min="0" step="1" value="${apiTimeoutSec}" style="width:100%;">
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">${h(opts.timeoutHint || '')}</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-stream" ${settings.stream === true ? 'checked' : ''}>
+          流式传输（stream）
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">${h(opts.streamHint || '开启后按 SSE 流式增量接收响应，适合易等待超时或仅推荐流式的反代渠道。')}</div>
+      </div>
+      <details class="we-api-adv-fold">
+        <summary>高级请求参数（流式空闲超时 / JSON 模式 / top_p / 推理力度）</summary>
+        <div class="we-api-adv-body">
+          <div class="we-input-group">
+            <label>流式分片空闲超时（秒）</label>
+            <input type="number" id="we-stream-idle-timeout-sec" min="0" step="1" value="${idleTimeoutSec}" style="width:100%;">
+            <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开始收到流式数据后，超过该时间无新分片自动中止（不影响首字前的慢思考等待）；0 = 仅用上方总超时。</div>
+          </div>
+          <div class="we-input-group">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="we-json-mode" ${settings.jsonMode === true ? 'checked' : ''}>
+              强制 JSON 输出（response_format）
+            </label>
+            <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">向请求体附加 response_format: json_object 减少闲聊前缀导致的解析失败；不支持该字段的反代若报 400 请取消勾选。</div>
+          </div>
+          <div class="we-input-group" style="display:flex;gap:6px;">
+            <div style="flex:1;">
+              <label>top_p（0–1，留空=默认）</label>
+              <input type="number" id="we-top-p" min="0" max="1" step="0.05" value="${h(topPVal)}" placeholder="留空不传" style="width:100%;">
+            </div>
+            <div style="flex:1;">
+              <label>推理力度（reasoning_effort）</label>
+              <select id="we-reasoning-effort" style="width:100%;">
+                <option value=""${!effortVal ? ' selected' : ''}>默认（不传）</option>
+                <option value="low"${effortVal === 'low' ? ' selected' : ''}>低（low）</option>
+                <option value="medium"${effortVal === 'medium' ? ' selected' : ''}>中（medium）</option>
+                <option value="high"${effortVal === 'high' ? ' selected' : ''}>高（high）</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </details>`;
+  }
+
+  function collectSharedApiSettingsFromDom(defaultTemp) {
+    const gv = id => document.getElementById(id)?.value;
+    const temperatureRaw = parseFloat(gv('we-temperature'));
+    const timeoutSecRaw = parseFloat(gv('we-api-timeout-sec'));
+    const idleSecRaw = parseFloat(gv('we-stream-idle-timeout-sec'));
+    const topPRaw = String(gv('we-top-p') ?? '').trim();
+    const topPNum = topPRaw === '' ? null : Number(topPRaw);
+    const effortRaw = String(gv('we-reasoning-effort') || '').trim().toLowerCase();
+    return {
+      apiUrl: gv('we-api-url') || '',
+      apiKey: gv('we-api-key') || '',
+      model: gv('we-model') || 'gpt-3.5-turbo',
+      temperature: Number.isFinite(temperatureRaw) ? Math.max(0, temperatureRaw) : (defaultTemp ?? 0.7),
+      maxTokens: Math.max(1, parseInt(gv('we-max-tokens')) || 65000),
+      apiTimeoutMs: Number.isFinite(timeoutSecRaw) ? Math.max(0, Math.round(timeoutSecRaw * 1000)) : 120000,
+      connectionMode: document.getElementById('we-connection-mode')?.value === 'proxy' ? 'proxy' : 'direct',
+      stream: document.getElementById('we-stream')?.checked === true,
+      streamIdleTimeoutMs: Number.isFinite(idleSecRaw) ? Math.max(0, Math.round(idleSecRaw * 1000)) : 90000,
+      jsonMode: document.getElementById('we-json-mode')?.checked === true,
+      topP: (topPNum != null && Number.isFinite(topPNum)) ? Math.max(0, Math.min(1, topPNum)) : null,
+      reasoningEffort: ['low', 'medium', 'high', 'minimal', 'none'].includes(effortRaw) ? effortRaw : ''
+    };
+  }
+
   // 各分页小标题的随附古文（去 cp- 前缀后查表；设置页等不在表中则无）
   const SECTION_MOTTOS = {
     trends: '天下之势，以渐而成',
@@ -517,6 +638,8 @@ window.WORLD_ENGINE_UI = (function() {
       const metaParts = [
         item.model || '未指定模型',
         item.connectionMode === 'proxy' ? '酒馆代理' : '直连',
+        item.stream === true ? '流式' : (item.stream === false ? '非流式' : ''),
+        item.jsonMode ? 'JSON模式' : '',
         item.httpStatus != null ? `HTTP ${item.httpStatus}` : '',
         item.finishReason ? `finish: ${item.finishReason}` : '',
         dur ? `耗时 ${dur}` : '',
@@ -541,7 +664,7 @@ window.WORLD_ENGINE_UI = (function() {
           <summary>请求与返回详情</summary>
           <div class="we-reqlog-detail-body">
             ${item.target ? `<div class="we-reqlog-detail-line"><b>目标：</b><code>${h(item.target)}</code></div>` : ''}
-            ${item.temperature != null || item.maxTokens != null ? `<div class="we-reqlog-detail-line"><b>参数：</b>temperature=${h(item.temperature ?? '-')} · max_tokens=${h(item.maxTokens ?? '-')} · timeout=${h(item.timeoutSec ?? '-')}s</div>` : ''}
+            ${item.temperature != null || item.maxTokens != null ? `<div class="we-reqlog-detail-line"><b>参数：</b>temperature=${h(item.temperature ?? '-')} · max_tokens=${h(item.maxTokens ?? '-')} · timeout=${h(item.timeoutSec ?? '-')}s${item.stream != null ? ` · stream=${item.stream ? 'true' : 'false'}` : ''}${item.stream && item.streamIdleTimeoutSec != null ? ` · idle=${item.streamIdleTimeoutSec}s` : ''}${item.jsonMode ? ' · json_mode=true' : ''}${item.topP != null ? ` · top_p=${item.topP}` : ''}${item.reasoningEffort ? ` · reasoning=${h(item.reasoningEffort)}` : ''}</div>` : ''}
             <div class="we-reqlog-detail-label">返回内容 / 原始输出</div>
             <pre class="we-reqlog-pre">${h(item.responsePreview || (item.status === 'running' ? '正在等待响应…' : '（无返回正文）'))}</pre>
             ${item.promptPreview ? `<div class="we-reqlog-detail-label">请求正文预览</div><pre class="we-reqlog-pre">${h(item.promptPreview)}</pre>` : ''}
@@ -1585,12 +1708,28 @@ window.WORLD_ENGINE_UI = (function() {
   function renderMemoryRecallResultsHtml(recall) {
     if (!recall) return '<div class="we-empty">尚未运行语义召回；点击上方“测试本轮语义召回”或推进对话查看结果。</div>';
     const hits = Array.isArray(recall.hits) ? recall.hits : [];
-    if (!hits.length) return `<div class="we-hint">最近一次检索（${h(recall.method || 'embedding')}）未达到阈值，无命中项。</div>`;
-    return `<div class="we-hint" style="margin-bottom:6px;">方式：<b>${h(recall.method)}</b> · 命中 ${hits.length} 条</div>`
+    const diag = recall.diagnostics || null;
+    const distLine = (() => {
+      if (!diag) return '';
+      const cos = diag.similarity_distribution;
+      const rr = diag.rerankDistribution;
+      const parts = [
+        `候选 ${diag.candidateCount ?? hits.length}/${diag.totalIndexed ?? '-'}`,
+        cos?.count ? `余弦分布 min ${(cos.min * 100).toFixed(0)}% / 均 ${(cos.mean * 100).toFixed(0)}% / 中位 ${(cos.median * 100).toFixed(0)}% / max ${(cos.max * 100).toFixed(0)}%` : '',
+        rr?.count ? `Rerank 均 ${(rr.mean * 100).toFixed(0)}% / max ${(rr.max * 100).toFixed(0)}%` : '',
+        diag.lexicalGuardCount ? `词汇保底 ${diag.lexicalGuardCount} 条` : ''
+      ].filter(Boolean);
+      return parts.length ? `<div class="we-hint" style="margin-bottom:6px;">${h(parts.join(' · '))}</div>` : '';
+    })();
+    if (!hits.length) return `${distLine}<div class="we-hint">最近一次检索（${h(recall.method || 'embedding')}）未达到阈值，无命中项。</div>`;
+    return `<div class="we-hint" style="margin-bottom:4px;">方式：<b>${h(recall.method)}</b> · 命中 ${hits.length} 条</div>${distLine}`
       + hits.map(hit => {
-        const scoreTag = hit.rerankScore != null
-          ? `Rerank ${(hit.rerankScore * 100).toFixed(1)}% · 余弦 ${(hit.cosineScore * 100).toFixed(1)}%`
-          : `余弦 ${(hit.cosineScore * 100).toFixed(1)}%`;
+        const parts = [`综合 ${(hit.score * 100).toFixed(1)}%`];
+        if (hit.rerankScore != null) parts.push(`Rerank ${(hit.rerankScore * 100).toFixed(1)}%`);
+        if (hit.cosineScore != null) parts.push(`余弦 ${(hit.cosineScore * 100).toFixed(1)}%`);
+        if (Number(hit.lexicalScore) > 0) parts.push(`词法 ${(hit.lexicalScore * 100).toFixed(0)}%`);
+        if (hit.lexicalGuardKept) parts.push('词汇保底');
+        const scoreTag = parts.join(' · ');
         return `<div class="we-memory-recall-hit">
           <div class="we-memory-recall-hit-head"><span>${h(hit.label)}</span><span class="we-memory-kw-tag">${h(scoreTag)}</span></div>
           <div class="we-memory-recall-hit-text">${h(hit.text)}</div>
@@ -1630,45 +1769,15 @@ window.WORLD_ENGINE_UI = (function() {
     const backfillRetries = Math.max(0, parseInt(settings.backfillRetries) || 0);
     const summaryBackfillSmallEveryX = Math.max(1, parseInt(settings.summaryBackfillSmallEveryX) || 5);
     const summaryBackfillBigEveryX = Math.max(1, parseInt(settings.summaryBackfillBigEveryX) || 5);
-    const apiTemperature = Number.isFinite(Number(settings.temperature)) ? Math.max(0, Number(settings.temperature)) : 0.2;
-    const apiMaxTokens = Math.max(1, parseInt(settings.maxTokens) || 65000);
-    const apiTimeoutSec = Math.max(0, Math.round((Number(settings.apiTimeoutMs) || 120000) / 1000));
-
-    const apiBody = `
-      <div class="we-input-group">
-        <label>连接方式</label>
-        <select id="we-connection-mode" style="width:100%;">
-          <option value="direct" ${settings.connectionMode !== 'proxy' ? 'selected' : ''}>直连（默认）</option>
-          <option value="proxy" ${settings.connectionMode === 'proxy' ? 'selected' : ''}>经酒馆代理（解决跨域 CORS）</option>
-        </select>
-      </div>
-      <div class="we-input-group">
-        <label>记忆引擎 API URL（OpenAI 兼容）</label>
-        <input type="text" id="we-api-url" value="${u(settings.apiUrl || '')}" placeholder="https://api.openai.com/v1">
-      </div>
-      <div class="we-input-group">
-        <label>记忆引擎 API Key</label>
-        <input type="password" id="we-api-key" value="${u(settings.apiKey || '')}">
-      </div>
-      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
-        <div style="flex:1;">
-          <label>模型</label>
-          <input type="text" id="we-model" value="${u(settings.model || 'gpt-3.5-turbo')}" placeholder="模型名称" style="width:100%;">
-        </div>
-        <button class="we-btn" id="we-fetch-models" style="white-space:nowrap;flex-shrink:0;">获取列表</button>
-      </div>
-      <div class="we-input-group">
-        <select id="we-model-list" style="display:none;width:100%;margin-top:4px;"><option value="">-- 选择模型 --</option></select>
-      </div>
-      <div class="we-input-group" style="display:flex;gap:6px;">
-        <div style="flex:1;"><label>温度</label><input type="number" id="we-temperature" min="0" step="0.1" value="${apiTemperature}" style="width:100%;"></div>
-        <div style="flex:1;"><label>最大输出 token</label><input type="number" id="we-max-tokens" min="1" step="1" value="${apiMaxTokens}" style="width:100%;"></div>
-      </div>
-      <div class="we-input-group">
-        <label>请求超时（秒）</label>
-        <input type="number" id="we-api-timeout-sec" min="0" step="1" value="${apiTimeoutSec}" style="width:100%;">
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">此处只配置记忆引擎；请求实现与世界引擎共用，但配置值互不覆盖。</div>
-      </div>`;
+    const apiBody = renderSharedApiFieldsHtml(settings, {
+      scope: 'memory',
+      defaultTemp: 0.2,
+      showCopyFromWorldBtn: true,
+      urlLabel: '记忆引擎 API URL（OpenAI 兼容）',
+      keyLabel: '记忆引擎 API Key',
+      timeoutHint: '此处只配置记忆引擎；请求实现与世界引擎共用，但配置值互不覆盖。',
+      streamHint: '开启后按 SSE 流式增量接收响应，适合易等待超时或仅推荐流式的反代渠道；此处只配置记忆引擎，不覆盖世界与大纲。'
+    });
 
     const modeBody = `
       <div class="we-input-group">
@@ -2033,6 +2142,9 @@ window.WORLD_ENGINE_UI = (function() {
     const vectorThreshold = Number.isFinite(Number(settings.vectorThreshold)) ? Number(settings.vectorThreshold) : 0.3;
     const rerankTopK = Math.max(1, parseInt(settings.rerankTopK, 10) || 5);
     const rerankThreshold = Number.isFinite(Number(settings.rerankThreshold)) ? Number(settings.rerankThreshold) : 0.2;
+    const rerankHybridWeight = Number.isFinite(Number(settings.rerankHybridWeight)) ? Number(settings.rerankHybridWeight) : 0.75;
+    const embeddingTimeoutSec = Math.max(3, Math.round((Number(settings.embeddingTimeoutMs) || 60000) / 1000));
+    const rerankTimeoutSec = Math.max(3, Math.round((Number(settings.rerankTimeoutMs) || 60000) / 1000));
 
     const embeddingBody = `
       <div class="we-input-group">
@@ -2040,7 +2152,7 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="checkbox" id="we-memory-vector-enabled" ${vecEnabled ? 'checked' : ''}>
           启用 Embedding 语义记忆召回
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后可突破纯字面关键词匹配限制，凭语义相似度精准唤醒折叠历史纪要、持续事实、人物弧光与世界实体；未配置或网络异常时自动平滑退回本地关键词召回。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后可突破纯字面关键词匹配限制，结合向量余弦、词法共振与重排综合评分唤醒折叠历史纪要、持续事实、人物弧光与世界实体；异常时自动回退本地关键词召回。</div>
       </div>
       <div class="we-input-group">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -2056,13 +2168,20 @@ window.WORLD_ENGINE_UI = (function() {
         <label>Embedding API Key</label>
         <input type="password" id="we-memory-embedding-key" value="${u(settings.embeddingApiKey || '')}">
       </div>
+      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
+        <div style="flex:1;">
+          <label>Embedding 模型名</label>
+          <input type="text" id="we-memory-embedding-model" value="${u(settings.embeddingModel || 'BAAI/bge-m3')}" placeholder="例如：BAAI/bge-m3 或 text-embedding-3-small" style="width:100%;">
+        </div>
+        <button class="we-btn" id="we-memory-fetch-embedding-models" type="button" style="white-space:nowrap;flex-shrink:0;">获取列表</button>
+      </div>
       <div class="we-input-group">
-        <label>Embedding 模型名</label>
-        <input type="text" id="we-memory-embedding-model" value="${u(settings.embeddingModel || 'BAAI/bge-m3')}" placeholder="例如：BAAI/bge-m3 或 text-embedding-3-small">
+        <select id="we-memory-embedding-model-list" style="display:none;width:100%;margin-top:4px;"><option value="">-- 选择 Embedding 模型 --</option></select>
       </div>
       <div class="we-input-group" style="display:flex;gap:6px;">
         <div style="flex:1;"><label>初筛候选数（TopK）</label><input type="number" id="we-memory-vector-topk" min="1" max="50" step="1" value="${vectorTopK}" style="width:100%;"></div>
         <div style="flex:1;"><label>余弦相似度阈值（0–1）</label><input type="number" id="we-memory-vector-threshold" min="0" max="1" step="0.05" value="${vectorThreshold}" style="width:100%;"></div>
+        <div style="flex:1;"><label>Embedding 超时（秒）</label><input type="number" id="we-memory-embedding-timeout-sec" min="3" max="600" step="1" value="${embeddingTimeoutSec}" style="width:100%;"></div>
       </div>`;
 
     const rerankBody = `
@@ -2071,7 +2190,7 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="checkbox" id="we-memory-rerank-enabled" ${rerankEnabled ? 'checked' : ''}>
           启用 Rerank 重排模型二次精排
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">在 Embedding 粗召回的 TopK 候选中再经交叉编码重排打分，显著过滤伪相关。若 Rerank URL/Key 与 Embedding 同服务商（如硅基流动），可留空自动复用。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">在 Embedding+词法粗召回的 TopK 候选中再经交叉编码重排融合打分（并设强词汇命中保底）。若 Rerank URL/Key 与 Embedding 同服务商（如硅基流动），可留空自动复用。</div>
       </div>
       <div class="we-input-group">
         <label>Rerank API Base URL（留空则复用上方 Embedding URL）</label>
@@ -2081,13 +2200,23 @@ window.WORLD_ENGINE_UI = (function() {
         <label>Rerank API Key（留空则复用 Embedding Key）</label>
         <input type="password" id="we-memory-rerank-key" value="${u(settings.rerankApiKey || '')}">
       </div>
+      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
+        <div style="flex:1;">
+          <label>Rerank 模型名</label>
+          <input type="text" id="we-memory-rerank-model" value="${u(settings.rerankModel || 'BAAI/bge-reranker-v2-m3')}" placeholder="例如：BAAI/bge-reranker-v2-m3 或 bge-reranker-large" style="width:100%;">
+        </div>
+        <button class="we-btn" id="we-memory-fetch-rerank-models" type="button" style="white-space:nowrap;flex-shrink:0;">获取列表</button>
+      </div>
       <div class="we-input-group">
-        <label>Rerank 模型名</label>
-        <input type="text" id="we-memory-rerank-model" value="${u(settings.rerankModel || 'BAAI/bge-reranker-v2-m3')}" placeholder="例如：BAAI/bge-reranker-v2-m3 或 bge-reranker-large">
+        <select id="we-memory-rerank-model-list" style="display:none;width:100%;margin-top:4px;"><option value="">-- 选择 Rerank 模型 --</option></select>
       </div>
       <div class="we-input-group" style="display:flex;gap:6px;">
         <div style="flex:1;"><label>精排保留数（TopK）</label><input type="number" id="we-memory-rerank-topk" min="1" max="20" step="1" value="${rerankTopK}" style="width:100%;"></div>
         <div style="flex:1;"><label>重排相关性阈值（0–1）</label><input type="number" id="we-memory-rerank-threshold" min="0" max="1" step="0.05" value="${rerankThreshold}" style="width:100%;"></div>
+      </div>
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        <div style="flex:1;"><label>Rerank 融合权重（0–1）</label><input type="number" id="we-memory-rerank-weight" min="0" max="1" step="0.05" value="${rerankHybridWeight}" style="width:100%;"></div>
+        <div style="flex:1;"><label>Rerank 超时（秒）</label><input type="number" id="we-memory-rerank-timeout-sec" min="3" max="600" step="1" value="${rerankTimeoutSec}" style="width:100%;"></div>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;font-size:12px;">
         <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-vec-scope-small" ${settings.vectorIncludeArchivedSmall !== false ? 'checked' : ''}> 检索纪要</label>
@@ -4270,61 +4399,23 @@ window.WORLD_ENGINE_UI = (function() {
     const cpTimeVal = (_cpForTime && _cpForTime.time != null) ? _cpForTime.time : '';
     const lastDayVal = (core.getLastStoryDay && core.getLastStoryDay() != null) ? core.getLastStoryDay() : '';
     const tv = (k, d) => (settings[k] != null && settings[k] !== '') ? settings[k] : d;
-    const apiTemperature = Number.isFinite(Number(settings.temperature)) ? Math.max(0, Number(settings.temperature)) : 0.7;
-    const apiMaxTokens = Math.max(1, parseInt(settings.maxTokens) || 65000);
-    const apiTimeoutMs = Number.isFinite(Number(settings.apiTimeoutMs)) ? Number(settings.apiTimeoutMs) : 120000;
-    const apiTimeoutSec = Math.max(0, Math.round(apiTimeoutMs / 1000));
     const injectMaxChars = Number.isFinite(Number(settings.injectMaxChars)) ? Math.max(0, Math.floor(Number(settings.injectMaxChars))) : 5000;
 
     const sec = (id, title, body) =>
       '<div class="we-section"><div class="we-section-title">' + sectionHeader(title, id) + '</div>' +
       sectionBody(id, body) + '</div>';
 
-    const apiBody = `
-      <div class="we-input-group">
-        <label>连接方式</label>
-        <select id="we-connection-mode" style="width:100%;">
-          <option value="direct" ${settings.connectionMode !== 'proxy' ? 'selected' : ''}>直连（默认）</option>
-          <option value="proxy" ${settings.connectionMode === 'proxy' ? 'selected' : ''}>经酒馆代理（解决跨域 CORS）</option>
-        </select>
-        <div style="font-size:11px;color:#888;margin-top:3px;">连不上 / 控制台报 CORS 错误时，切到「经酒馆代理」由酒馆服务端转发。</div>
-      </div>
-      <div class="we-input-group">
-        <label>API URL（OpenAI 兼容）</label>
-        <input type="text" id="we-api-url" value="${u(settings.apiUrl||'')}" placeholder="https://api.openai.com/v1">
-        <div style="font-size:11px;color:#888;margin-top:3px;">填到「版本前缀」一级即可，/chat/completions 可加可不加（会自动补）。例：OpenAI <span style="color:#aaa;">https://api.openai.com/v1</span>；火山方舟 <span style="color:#aaa;">https://ark.cn-beijing.volces.com/api/v3</span>（或 <span style="color:#aaa;">.../api/coding/v3</span>）。务必带上自己的版本前缀。</div>
-      </div>
-      <div class="we-input-group">
-        <label>API Key</label>
-        <input type="password" id="we-api-key" value="${u(settings.apiKey||'')}">
-      </div>
-      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
-        <div style="flex:1;">
-          <label>模型</label>
-          <input type="text" id="we-model" value="${u(settings.model||'gpt-3.5-turbo')}" placeholder="模型名称" style="width:100%;">
-        </div>
-        <button class="we-btn" id="we-fetch-models" style="white-space:nowrap;flex-shrink:0;">获取列表</button>
-      </div>
-      <div class="we-input-group">
-        <select id="we-model-list" style="display:none;width:100%;margin-top:4px;">
-          <option value="">-- 选择模型 --</option>
-        </select>
-      </div>
-      <div class="we-input-group" style="display:flex;gap:6px;">
-        <div style="flex:1;">
-          <label>温度</label>
-          <input type="number" id="we-temperature" min="0" step="0.1" value="${apiTemperature}" style="width:100%;">
-        </div>
-        <div style="flex:1;">
-          <label>最大输出 token</label>
-          <input type="number" id="we-max-tokens" min="1" step="1" value="${apiMaxTokens}" style="width:100%;">
-        </div>
-      </div>
-      <div class="we-input-group">
-        <label>请求超时（秒）</label>
-        <input type="number" id="we-api-timeout-sec" min="0" step="1" value="${apiTimeoutSec}" style="width:100%;">
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">超过该时间仍未收到完整响应会自动中止并解除「推演中」状态。0 = 不超时。</div>
-      </div>`;
+    const apiBody = renderSharedApiFieldsHtml(settings, {
+      scope: 'world',
+      defaultTemp: 0.7,
+      showCopyFromWorldBtn: false,
+      urlLabel: 'API URL（OpenAI 兼容）',
+      keyLabel: 'API Key',
+      connectionHint: '连不上 / 控制台报 CORS 错误时，切到「经酒馆代理」由酒馆服务端转发。',
+      urlHint: '填到「版本前缀」一级即可，/chat/completions 可加可不加（会自动补）。例：OpenAI <span style="color:#aaa;">https://api.openai.com/v1</span>；火山方舟 <span style="color:#aaa;">https://ark.cn-beijing.volces.com/api/v3</span>（或 <span style="color:#aaa;">.../api/coding/v3</span>）。务必带上自己的版本前缀。',
+      timeoutHint: '超过该时间仍未收到完整响应会自动中止并解除「推演中」状态。0 = 不超时。',
+      streamHint: '开启后按 SSE 流式增量接收响应，适合易等待超时或仅推荐流式的反代渠道。'
+    });
 
     const evolveBody = `
       <div class="we-input-group">
@@ -4697,7 +4788,7 @@ window.WORLD_ENGINE_UI = (function() {
       </div>`;
 
     return {
-      api: sec('set-api', 'API 配置', apiBody),
+      api: sec('set-api', '世界引擎API', apiBody),
       evolve: sec('set-evolve', '推演模式', evolveBody),
       backfill: sec('set-backfill', '批量重填世界推演', backfillBody),
       retry: sec('set-api-retry', 'API 自动重试', retryBody),
@@ -5743,6 +5834,9 @@ window.WORLD_ENGINE_UI = (function() {
         vectorThreshold: Number.isFinite(parseFloat(gv('we-memory-vector-threshold'))) ? parseFloat(gv('we-memory-vector-threshold')) : 0.3,
         rerankTopK: Math.max(1, parseInt(gv('we-memory-rerank-topk'), 10) || 5),
         rerankThreshold: Number.isFinite(parseFloat(gv('we-memory-rerank-threshold'))) ? parseFloat(gv('we-memory-rerank-threshold')) : 0.2,
+        rerankHybridWeight: Number.isFinite(parseFloat(gv('we-memory-rerank-weight'))) ? Math.max(0, Math.min(1, parseFloat(gv('we-memory-rerank-weight')))) : 0.75,
+        embeddingTimeoutMs: Math.max(3, parseInt(gv('we-memory-embedding-timeout-sec'), 10) || 60) * 1000,
+        rerankTimeoutMs: Math.max(3, parseInt(gv('we-memory-rerank-timeout-sec'), 10) || 60) * 1000,
         vectorIncludeArchivedSmall: document.getElementById('we-memory-vec-scope-small')?.checked !== false,
         vectorIncludeFacts: document.getElementById('we-memory-vec-scope-facts')?.checked !== false,
         vectorIncludePersonalAndEntity: document.getElementById('we-memory-vec-scope-entities')?.checked !== false
@@ -5754,19 +5848,11 @@ window.WORLD_ENGINE_UI = (function() {
       memorySaveBtn.onclick = () => {
         const gv = id => document.getElementById(id)?.value;
         const memoryCurrent = window.MEMORY_ENGINE_SETTINGS?.getSettings(true) || {};
-        const temperatureRaw = parseFloat(gv('we-temperature'));
-        const timeoutSecRaw = parseFloat(gv('we-api-timeout-sec'));
         const memorySettings = {
           ...memoryCurrent,
+          ...collectSharedApiSettingsFromDom(0.2),
           engineEnabled: document.getElementById('we-memory-engine-enabled')?.checked !== false,
           firstLayerIsAiOpening: document.getElementById('we-memory-first-layer-ai-opening')?.checked !== false,
-          apiUrl: gv('we-api-url') || '',
-          apiKey: gv('we-api-key') || '',
-          model: gv('we-model') || 'gpt-3.5-turbo',
-          temperature: Number.isFinite(temperatureRaw) ? Math.max(0, temperatureRaw) : 0.2,
-          maxTokens: Math.max(1, parseInt(gv('we-max-tokens')) || 65000),
-          apiTimeoutMs: Number.isFinite(timeoutSecRaw) ? Math.max(0, Math.round(timeoutSecRaw * 1000)) : 120000,
-          connectionMode: document.getElementById('we-connection-mode')?.value === 'proxy' ? 'proxy' : 'direct',
           evolveMode: gv('we-memory-evolve-mode') === 'manual' ? 'manual' : 'auto',
           evolveEveryX: 1,
           evolveReadRounds: 1,
@@ -5825,6 +5911,75 @@ window.WORLD_ENGINE_UI = (function() {
       const patch = collectRecallSettingsFromDom();
       if (Object.keys(patch).length) window.MEMORY_ENGINE_SETTINGS?.patchSettings?.(patch);
     };
+    const bindVectorModelFetcher = (btnId, kind, urlId, keyId, modelId, selectId, fallbackUrlId, fallbackKeyId) => {
+      const btn = document.getElementById(btnId);
+      const select = document.getElementById(selectId);
+      const modelInput = document.getElementById(modelId);
+      if (!btn || !select || !modelInput) return;
+      const kindLabel = kind === 'rerank' ? 'Rerank' : 'Embedding';
+      btn.onclick = async () => {
+        const api = window.WORLD_ENGINE_API;
+        if (!api?.fetchTypedModelList && !api?.fetchModelList) {
+          showToast('模型列表接口尚未就绪', true);
+          return;
+        }
+        const apiUrl = String(document.getElementById(urlId)?.value || (fallbackUrlId ? document.getElementById(fallbackUrlId)?.value : '') || '').trim();
+        const apiKey = String(document.getElementById(keyId)?.value || (fallbackKeyId ? document.getElementById(fallbackKeyId)?.value : '') || '').trim();
+        if (!apiUrl) {
+          showToast(`请先填写 ${kindLabel} API URL${fallbackUrlId ? '（或上方 Embedding URL）' : ''}`, true);
+          return;
+        }
+        const timeoutEl = document.getElementById(kind === 'rerank' ? 'we-memory-rerank-timeout-sec' : 'we-memory-embedding-timeout-sec');
+        const timeoutMs = Math.max(3, parseInt(timeoutEl?.value, 10) || 60) * 1000;
+        syncRecallFromDom();
+        btn.disabled = true;
+        btn.textContent = '获取中...';
+        try {
+          api.setNextRequestMeta?.({ module: 'memory', purpose: `获取 ${kindLabel} 模型列表` });
+          const res = typeof api.fetchTypedModelList === 'function'
+            ? await api.fetchTypedModelList({ apiUrl, apiKey, connectionMode: 'direct', apiTimeoutMs: timeoutMs }, kind)
+            : { models: await api.fetchModelList({ apiUrl, apiKey, connectionMode: 'direct', apiTimeoutMs: timeoutMs }), matched: [], others: [] };
+          const matched = Array.isArray(res?.matched) ? res.matched : [];
+          const others = Array.isArray(res?.others) ? res.others : (matched.length ? [] : (res?.models || []));
+          const curVal = String(modelInput.value || '').trim();
+          const renderOpt = m => `<option value="${h(m)}"${curVal === m ? ' selected' : ''}>${h(m)}</option>`;
+          let optionsHtml = `<option value="">-- 选择 ${kindLabel} 模型（匹配 ${matched.length} / 总计 ${(matched.length + others.length)}）--</option>`;
+          if (matched.length) {
+            optionsHtml += `<optgroup label="推荐 ${kindLabel} 模型（${matched.length}）">${matched.map(renderOpt).join('')}</optgroup>`;
+          }
+          if (others.length) {
+            optionsHtml += matched.length
+              ? `<optgroup label="其余接口模型（${others.length}）">${others.map(renderOpt).join('')}</optgroup>`
+              : others.map(renderOpt).join('');
+          }
+          select.innerHTML = optionsHtml;
+          select.style.display = 'block';
+          select.onchange = () => {
+            if (select.value) {
+              modelInput.value = select.value;
+              syncRecallFromDom();
+            }
+          };
+          showToast(`获取到 ${matched.length ? `${matched.length} 个推荐 ` : ''}${kindLabel} 模型（共 ${matched.length + others.length} 个）`);
+        } catch (err) {
+          showToast(`获取 ${kindLabel} 模型失败：` + (err?.message || err), true);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '获取列表';
+        }
+      };
+    };
+    bindVectorModelFetcher(
+      'we-memory-fetch-embedding-models', 'embedding',
+      'we-memory-embedding-url', 'we-memory-embedding-key',
+      'we-memory-embedding-model', 'we-memory-embedding-model-list'
+    );
+    bindVectorModelFetcher(
+      'we-memory-fetch-rerank-models', 'rerank',
+      'we-memory-rerank-url', 'we-memory-rerank-key',
+      'we-memory-rerank-model', 'we-memory-rerank-model-list',
+      'we-memory-embedding-url', 'we-memory-embedding-key'
+    );
     const updateVecUi = message => {
       const statsEl = document.getElementById('we-memory-vector-stats');
       const statusEl = document.getElementById('we-memory-vector-status');
@@ -6110,20 +6265,12 @@ window.WORLD_ENGINE_UI = (function() {
       saveBtn.onclick = () => {
         const _modeRaw = document.getElementById('we-evolve-mode')?.value;
         const gv = id => document.getElementById(id)?.value;
-        const temperatureRaw = parseFloat(gv('we-temperature'));
-        const timeoutSecRaw = parseFloat(gv('we-api-timeout-sec'));
         const ns = {
           ...(window.WORLD_ENGINE_API ? window.WORLD_ENGINE_API.getSettings(true) : {}),
+          ...collectSharedApiSettingsFromDom(0.7),
           engineEnabled: document.getElementById('we-world-engine-enabled')?.checked !== false,
           firstLayerIsAiOpening: document.getElementById('we-first-layer-ai-opening')?.checked !== false,
-          apiUrl: document.getElementById('we-api-url')?.value || '',
-          apiKey: document.getElementById('we-api-key')?.value || '',
-          model: document.getElementById('we-model')?.value || 'gpt-3.5-turbo',
-          temperature: Number.isFinite(temperatureRaw) ? Math.max(0, temperatureRaw) : 0.7,
-          maxTokens: Math.max(1, parseInt(gv('we-max-tokens')) || 65000),
           apiAutoRetries: Math.max(0, parseInt(gv('we-api-auto-retries')) || 0),
-          apiTimeoutMs: Number.isFinite(timeoutSecRaw) ? Math.max(0, Math.round(timeoutSecRaw * 1000)) : 120000,
-          connectionMode: document.getElementById('we-connection-mode')?.value === 'proxy' ? 'proxy' : 'direct',
           injectIntoPrompt: document.getElementById('we-inject-into-prompt')?.checked !== false,
           injectMaxChars: Math.max(0, parseInt(gv('we-inject-max-chars')) || 0),
           injectAllLevels: document.getElementById('we-inject-all-levels')?.checked === true,
@@ -6510,6 +6657,40 @@ window.WORLD_ENGINE_UI = (function() {
       };
     }
 
+    const buildDomApiRequestSettings = () => {
+      const api = window.WORLD_ENGINE_API;
+      const requestScope = _engineFace;
+      const apiPatch = collectSharedApiSettingsFromDom(requestScope === 'memory' ? 0.2 : 0.7);
+      if (requestScope === 'memory') {
+        return window.MEMORY_ENGINE_SETTINGS?.patchSettings(apiPatch) || apiPatch;
+      }
+      const worldSettings = {
+        ...(api?.getSettings ? api.getSettings(true) : {}),
+        ...apiPatch,
+        injectIntoPrompt: document.getElementById('we-inject-into-prompt')?.checked !== false,
+        injectMaxChars: Math.max(0, parseInt(document.getElementById('we-inject-max-chars')?.value) || 0),
+        injectAllLevels: document.getElementById('we-inject-all-levels')?.checked === true
+      };
+      window.WORLD_ENGINE_STORE.setItem('world_engine_settings', JSON.stringify(worldSettings));
+      if (api?.getSettings) api.getSettings(true);
+      return worldSettings;
+    };
+
+    const copyWorldApiBtn = document.getElementById('we-memory-copy-world-api');
+    if (copyWorldApiBtn) {
+      copyWorldApiBtn.onclick = () => {
+        const worldCfg = window.WORLD_ENGINE_API?.getSettings?.(true);
+        if (!worldCfg) { showToast('世界引擎设置尚未就绪', true); return; }
+        const modeEl = document.getElementById('we-connection-mode');
+        const urlEl = document.getElementById('we-api-url');
+        const keyEl = document.getElementById('we-api-key');
+        if (modeEl) modeEl.value = worldCfg.connectionMode === 'proxy' ? 'proxy' : 'direct';
+        if (urlEl) urlEl.value = String(worldCfg.apiUrl || '');
+        if (keyEl) keyEl.value = String(worldCfg.apiKey || '');
+        showToast('已填入世界引擎连接信息（仅预填，点击底部保存生效）');
+      };
+    }
+
     const fetchBtn = document.getElementById('we-fetch-models');
     if (fetchBtn) {
       fetchBtn.onclick = async () => {
@@ -6517,32 +6698,7 @@ window.WORLD_ENGINE_UI = (function() {
         if (!api) { showToast('API 模块未加载', true); return; }
         const requestScope = _engineFace;
         const modelListElement = document.getElementById('we-model-list');
-        const apiPatch = {
-          apiUrl: document.getElementById('we-api-url')?.value || '',
-          apiKey: document.getElementById('we-api-key')?.value || '',
-          model: document.getElementById('we-model')?.value || '',
-          temperature: Number.isFinite(parseFloat(document.getElementById('we-temperature')?.value))
-            ? Math.max(0, parseFloat(document.getElementById('we-temperature')?.value))
-            : (requestScope === 'memory' ? 0.2 : 0.7),
-          maxTokens: Math.max(1, parseInt(document.getElementById('we-max-tokens')?.value) || 65000),
-          apiTimeoutMs: Number.isFinite(parseFloat(document.getElementById('we-api-timeout-sec')?.value)) ? Math.max(0, Math.round(parseFloat(document.getElementById('we-api-timeout-sec')?.value) * 1000)) : 120000,
-          connectionMode: document.getElementById('we-connection-mode')?.value === 'proxy' ? 'proxy' : 'direct'
-        };
-        let requestSettings;
-        if (requestScope === 'memory') {
-          requestSettings = window.MEMORY_ENGINE_SETTINGS?.patchSettings(apiPatch) || apiPatch;
-        } else {
-          const worldSettings = {
-            ...(api.getSettings ? api.getSettings(true) : {}),
-            ...apiPatch,
-            injectIntoPrompt: document.getElementById('we-inject-into-prompt')?.checked !== false,
-            injectMaxChars: Math.max(0, parseInt(document.getElementById('we-inject-max-chars')?.value) || 0),
-            injectAllLevels: document.getElementById('we-inject-all-levels')?.checked === true
-          };
-          window.WORLD_ENGINE_STORE.setItem('world_engine_settings', JSON.stringify(worldSettings));
-          if (api.getSettings) api.getSettings(true);
-          requestSettings = worldSettings;
-        }
+        const requestSettings = buildDomApiRequestSettings();
         fetchBtn.disabled = true;
         fetchBtn.textContent = '获取中...';
         try {
@@ -6567,6 +6723,45 @@ window.WORLD_ENGINE_UI = (function() {
         }
         fetchBtn.disabled = false;
         fetchBtn.innerHTML = '获取列表';
+      };
+    }
+
+    const testApiBtn = document.getElementById('we-test-api');
+    if (testApiBtn) {
+      testApiBtn.onclick = async () => {
+        const api = window.WORLD_ENGINE_API;
+        if (!api?.testConnection) { showToast('连接测试接口未加载', true); return; }
+        const requestScope = _engineFace;
+        const statusEl = document.getElementById('we-api-test-status');
+        const requestSettings = buildDomApiRequestSettings();
+        testApiBtn.disabled = true;
+        testApiBtn.textContent = '测试中...';
+        if (statusEl) {
+          statusEl.style.display = 'block';
+          statusEl.style.color = 'var(--we-text3)';
+          statusEl.textContent = '正在向当前配置的 API 发送轻量测试请求...';
+        }
+        try {
+          const res = await api.testConnection(requestSettings, {
+            module: requestScope === 'memory' ? 'memory' : 'world'
+          });
+          const msg = `连接成功（${res.durationMs}ms）：${res.preview || '已收到响应'}`;
+          if (statusEl) {
+            statusEl.style.color = 'var(--we-accent)';
+            statusEl.textContent = msg;
+          }
+          showToast(`连接测试成功（${res.durationMs}ms）`);
+        } catch (err) {
+          const msg = `测试失败：${err?.message || err}`;
+          if (statusEl) {
+            statusEl.style.color = 'var(--we-danger, #e06c75)';
+            statusEl.textContent = msg;
+          }
+          showToast(msg, true);
+        } finally {
+          testApiBtn.disabled = false;
+          testApiBtn.textContent = '测试请求';
+        }
       };
     }
 

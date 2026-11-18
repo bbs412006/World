@@ -34,7 +34,7 @@ function makeHarness() {
       { id: 'h1', trackId: 'hidden', chapterIds: ['c1'], title: '暗中发信', intent: '绝密幕后计划', completionCriteria: '信已送出', completionSource: 'world', actorKind: 'npc', visibility: 'private',
         disclosure: { condition: { type: 'authorFlag', flagId: 'allow-clue', value: true }, clueText: '地上有信封纸屑' } }] };
   box.OUTLINE_ENGINE_DATA.commitPlan(plan, 0);
-  box.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: true, autoCheck: false });
+  box.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: true, autoCheck: false, apiUrl: 'https://mock.invalid/v1', model: 'mock' });
   box.OUTLINE_ENGINE.init();
   async function world(text, result) {
     context.chat.push({ is_user: true, mes: '继续调查' }, { is_user: false, mes: text });

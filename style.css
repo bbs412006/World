@@ -4511,3 +4511,19 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+.we-api-adv-fold {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px dashed var(--we-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.we-api-adv-fold > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--we-text2);
+  font-weight: 500;
+}
+.we-api-adv-body {
+  margin-top: 8px;
+}

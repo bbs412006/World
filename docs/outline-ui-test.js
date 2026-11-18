@@ -118,7 +118,9 @@ async function main() {
 
   const originalWorld = storage.get('world_engine_settings'), originalMemory = storage.get('memory_engine_settings');
   await ui._test.handleAction('toggle-settings');
-  ui._test.captureInput({ dataset: { outlineSetting: 'apiSource' }, value: 'custom', type: 'select-one' });
+  const settingsPanelHtml = ui.render();
+  assert.ok(settingsPanelHtml.includes('we-outline-stream') && !settingsPanelHtml.includes('API 来源'), '剧情大纲 API 应提供流式勾选框并移除 API 来源');
+  ui._test.captureInput({ dataset: { outlineSetting: 'stream' }, checked: true, type: 'checkbox' });
   ui._test.captureInput({ dataset: { outlineSetting: 'apiKey' }, value: 'outline-secret', type: 'password' });
   ui._test.captureInput({ dataset: { outlineSetting: 'checkEveryX' }, value: '7', type: 'number' });
   ui._test.captureInput({ dataset: { outlineSetting: 'apiTimeoutSeconds' }, value: '45', type: 'number' });
@@ -126,6 +128,7 @@ async function main() {
   await ui._test.handleAction('save-settings');
   assert.ok(abortCalls > beforeApiAbort, 'API设置变化时必须中止旧请求');
   assert.strictEqual(settings.getSettings(true).apiKey, 'outline-secret');
+  assert.strictEqual(settings.getSettings().stream, true);
   assert.strictEqual(settings.getSettings().checkEveryX, 7);
   assert.strictEqual(settings.getSettings().apiTimeoutMs, 45000);
   assert.strictEqual(storage.get('world_engine_settings'), originalWorld, '保存剧情API不改写世界配置');

@@ -54,7 +54,14 @@ function harness(options = {}) {
     vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), sandbox, { filename: name });
   }
   const config = sandbox.OUTLINE_ENGINE_SETTINGS, data = sandbox.OUTLINE_ENGINE_DATA, engine = sandbox.OUTLINE_ENGINE;
-  config.patchSettings({ engineEnabled: options.enabled !== false, checkEveryX: 3, ...options.settings });
+  config.patchSettings({
+    engineEnabled: options.enabled !== false,
+    checkEveryX: 3,
+    apiUrl: 'https://outline.example/v1',
+    apiKey: 'OUTLINE-KEY',
+    model: 'outline-model',
+    ...options.settings
+  });
   if (options.plan !== false) data.commitPlan(options.plan || plan(), 0);
   function emit(name, ...args) { for (const callback of listeners.get(types[name] || name) || []) callback(...args); }
   function proof(index, quote) {
@@ -188,7 +195,7 @@ async function testLateResults() {
   assert.strictEqual((await manualRun).reason, 'stale-result', 'manual state changes invalidate the check basis');
 
   pending = deferred(); h.setHandler(() => pending.promise); const settingsRun = h.engine.checkNow();
-  h.worldConfig.apiKey = 'changed-during-request';
+  h.config.patchSettings({ apiKey: 'changed-during-request' });
   pending.resolve(JSON.stringify({ nodeUpdates: [], proposals: [] }));
   assert.strictEqual((await settingsRun).reason, 'stale-result', 'effective API configuration changes reject an old request without storing credentials');
 
@@ -212,14 +219,13 @@ async function testApiAndPreviewIsolation() {
   const h = harness({ settings: { autoCheck: false } }); await h.reply('可检查的正文。');
   const initialWorld = copy(h.worldConfig), initialFacts = copy(h.worldState), initialMemory = copy(h.memoryState);
   await h.engine.checkNow();
-  assert.strictEqual(h.calls[0].settingsOverride.apiKey, 'WORLD-KEY');
-  h.worldConfig.apiKey = 'WORLD-NEW-KEY'; h.worldConfig.model = 'new-world-model'; await h.engine.checkNow();
-  assert.strictEqual(h.calls[1].settingsOverride.apiKey, 'WORLD-NEW-KEY', 'world-source API configuration is read dynamically');
-  assert.strictEqual(h.calls[1].settingsOverride.model, 'new-world-model');
-  h.config.patchSettings({ apiSource: 'custom', apiUrl: 'https://outline.example/v1', apiKey: '', model: 'outline-only' });
+  assert.strictEqual(h.calls[0].settingsOverride.apiKey, 'OUTLINE-KEY');
+  assert.strictEqual(h.calls[0].settingsOverride.stream, false);
+  h.config.patchSettings({ apiUrl: 'https://outline.example/v1', apiKey: '', model: 'outline-only', stream: true });
   await h.engine.checkNow();
-  assert.strictEqual(h.calls[2].settingsOverride.apiKey, '', 'empty custom key never falls back to the world key');
-  assert.strictEqual(h.calls[2].settingsOverride.model, 'outline-only');
+  assert.strictEqual(h.calls[1].settingsOverride.apiKey, '', 'empty outline key never falls back to the world key');
+  assert.strictEqual(h.calls[1].settingsOverride.model, 'outline-only');
+  assert.strictEqual(h.calls[1].settingsOverride.stream, true);
   assert.strictEqual(h.worldConfig.temperature, initialWorld.temperature);
   assert.deepStrictEqual(h.worldState, initialFacts); assert.deepStrictEqual(h.memoryState, initialMemory);
   const before = copy(h.data.loadState()); h.setHandler(() => JSON.stringify(plan()));
@@ -234,9 +240,9 @@ async function testApiAndPreviewIsolation() {
   h.config.patchSettings({ injectIntoPrompt: false, injectIntoWorldEngine: true }); h.engine.applyInjection();
   assert.strictEqual(h.injections.get('outline-engine-outline'), '');
   assert.ok(h.engine.buildWorldGuidance(h.worldState).includes('不是事实'));
-  h.config.patchSettings({ apiSource: 'custom', apiUrl: '' });
+  h.config.patchSettings({ apiUrl: '' });
   const count = h.calls.length, result = await h.engine.checkNow();
-  assert.strictEqual(result.ok, false); assert.strictEqual(h.calls.length, count, 'incomplete custom configuration fails locally');
+  assert.strictEqual(result.ok, false); assert.strictEqual(h.calls.length, count, 'incomplete outline configuration fails locally');
 }
 
 async function testProposalReview() {

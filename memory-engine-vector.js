@@ -55,6 +55,49 @@ window.MEMORY_ENGINE_VECTOR = (function() {
     return sum;
   }
 
+  function tokenizeHybridText(text) {
+    const raw = clean(text).toLocaleLowerCase();
+    const tokens = new Set();
+    if (!raw) return tokens;
+    for (const word of raw.match(/[a-z0-9_]{2,}/g) || []) tokens.add(word);
+    for (const seg of raw.match(/[\u4e00-\u9fff]+/g) || []) {
+      if (seg.length === 1) { tokens.add(seg); continue; }
+      for (let i = 0; i < seg.length - 1; i++) tokens.add(seg.slice(i, i + 2));
+    }
+    return tokens;
+  }
+
+  function computeLexicalOverlap(queryTokens, docText) {
+    if (!queryTokens || !queryTokens.size) return 0;
+    const docTokens = tokenizeHybridText(docText);
+    if (!docTokens.size) return 0;
+    let hits = 0;
+    for (const tok of docTokens) {
+      if (queryTokens.has(tok)) hits++;
+    }
+    if (!hits) return 0;
+    // 以文档核心词被查询命中的覆盖率为主、并兼顾绝对命中次数，抑制长短文本偏差
+    const coverage = hits / Math.min(docTokens.size, Math.max(4, queryTokens.size));
+    const bonus = Math.min(0.25, hits * 0.04);
+    return Number(Math.min(1, coverage * 0.8 + bonus).toFixed(4));
+  }
+
+  function computeScoreDistribution(scores) {
+    const valid = (Array.isArray(scores) ? scores : []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    const count = valid.length;
+    if (!count) return { count: 0, min: 0, max: 0, mean: 0, median: 0 };
+    const sum = valid.reduce((acc, v) => acc + v, 0);
+    const mid = Math.floor(count / 2);
+    const median = count % 2 === 1 ? valid[mid] : (valid[mid - 1] + valid[mid]) / 2;
+    return {
+      count,
+      min: Number(valid[0].toFixed(4)),
+      max: Number(valid[count - 1].toFixed(4)),
+      mean: Number((sum / count).toFixed(4)),
+      median: Number(median.toFixed(4))
+    };
+  }
+
   function emptyStore(chatId) {
     return {
       version: 1,
@@ -223,6 +266,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
         method: lastRecallCache.method,
         hitCount: lastRecallCache.hits.length,
         hits: clone(lastRecallCache.hits),
+        diagnostics: clone(lastRecallCache.diagnostics || null),
         timestamp: lastRecallCache.timestamp
       } : null
     };
@@ -233,7 +277,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
       apiUrl: clean(st.embeddingApiUrl),
       apiKey: clean(st.embeddingApiKey),
       model: clean(st.embeddingModel),
-      apiTimeoutMs: Number(st.apiTimeoutMs) || 60000
+      apiTimeoutMs: Number(st.embeddingTimeoutMs) || 60000
     };
   }
 
@@ -243,7 +287,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
       apiKey: clean(st.rerankApiKey || st.embeddingApiKey),
       model: clean(st.rerankModel),
       topN: Math.max(1, parseInt(st.rerankTopK, 10) || 5),
-      apiTimeoutMs: Number(st.apiTimeoutMs) || 60000
+      apiTimeoutMs: Number(st.rerankTimeoutMs) || 60000
     };
   }
 
@@ -380,11 +424,27 @@ window.MEMORY_ENGINE_VECTOR = (function() {
 
       const minCosine = Number.isFinite(Number(st.vectorThreshold)) ? Number(st.vectorThreshold) : 0.3;
       const topK = Math.max(1, parseInt(st.vectorTopK, 10) || 12);
-      const vectorCandidates = entries
+      const queryTokens = tokenizeHybridText(query);
+      const rerankWeight = Number.isFinite(Number(st.rerankHybridWeight))
+        ? Math.max(0, Math.min(1, Number(st.rerankHybridWeight))) : 0.75;
+      const scoredEntries = entries
         .filter(entry => entry.vector.length === queryVec.length)
-        .map(entry => ({ entry, cosineScore: dotProduct(queryVec, entry.vector) }))
-        .filter(item => item.cosineScore >= minCosine)
-        .sort((a, b) => b.cosineScore - a.cosineScore)
+        .map(entry => {
+          const cosineScore = Math.max(0, dotProduct(queryVec, entry.vector));
+          const lexicalScore = computeLexicalOverlap(queryTokens, entry.text);
+          const denseLexicalScore = Math.min(1, cosineScore + lexicalScore * 0.15);
+          return {
+            entry,
+            cosineScore,
+            lexicalScore,
+            denseLexicalScore,
+            coarseScore: cosineScore + lexicalScore * 0.18
+          };
+        });
+      const cosineDistribution = computeScoreDistribution(scoredEntries.map(item => item.cosineScore));
+      const vectorCandidates = scoredEntries
+        .filter(item => item.cosineScore >= minCosine || item.lexicalScore >= 0.35)
+        .sort((a, b) => b.coarseScore - a.coarseScore)
         .slice(0, topK);
 
       if (!vectorCandidates.length) {
@@ -394,6 +454,16 @@ window.MEMORY_ENGINE_VECTOR = (function() {
           method: 'embedding',
           timestamp: Date.now(),
           hits: [],
+          diagnostics: {
+            totalIndexed: scoredEntries.length,
+            candidateCount: 0,
+            lexicalGuardCount: 0,
+            rerankWeight,
+            similarity_distribution: cosineDistribution,
+            candidateCosineDistribution: computeScoreDistribution([]),
+            rerankDistribution: null,
+            finalDistribution: computeScoreDistribution([])
+          },
           smallScores: {},
           factScores: {},
           personScores: {},
@@ -404,6 +474,8 @@ window.MEMORY_ENGINE_VECTOR = (function() {
       }
 
       let method = 'embedding';
+      let lexicalGuardCount = 0;
+      let rerankDistribution = null;
       let finalHits = vectorCandidates.map(item => ({
         key: item.entry.key,
         kind: item.entry.kind,
@@ -412,9 +484,11 @@ window.MEMORY_ENGINE_VECTOR = (function() {
         label: item.entry.label,
         text: item.entry.text,
         cosineScore: Number(item.cosineScore.toFixed(4)),
+        lexicalScore: Number(item.lexicalScore.toFixed(4)),
         rerankScore: null,
-        score: Number(item.cosineScore.toFixed(4))
-      }));
+        lexicalGuardKept: false,
+        score: Number(item.denseLexicalScore.toFixed(4))
+      })).sort((a, b) => b.score - a.score);
 
       const rCfg = rerankConfig(st);
       if (st.rerankEnabled === true && rCfg.apiUrl && rCfg.model && typeof window.WORLD_ENGINE_API?.callRerankApi === 'function') {
@@ -426,12 +500,17 @@ window.MEMORY_ENGINE_VECTOR = (function() {
             activeAbort.signal
           );
           if (getChatId() !== chatId) return null;
+          rerankDistribution = computeScoreDistribution(reranked.map(item => item.score));
           const minRerank = Number.isFinite(Number(st.rerankThreshold)) ? Number(st.rerankThreshold) : 0.2;
           const filtered = reranked
-            .filter(item => item.score >= minRerank)
-            .slice(0, rCfg.topN)
             .map(item => {
               const cand = vectorCandidates[item.index];
+              if (!cand) return null;
+              const passThreshold = item.score >= minRerank;
+              const guardKept = !passThreshold && cand.lexicalScore >= 0.55 && item.score >= minRerank * 0.5;
+              if (!passThreshold && !guardKept) return null;
+              if (guardKept) lexicalGuardCount++;
+              const blended = rerankWeight * item.score + (1 - rerankWeight) * cand.denseLexicalScore;
               return {
                 key: cand.entry.key,
                 kind: cand.entry.kind,
@@ -440,16 +519,21 @@ window.MEMORY_ENGINE_VECTOR = (function() {
                 label: cand.entry.label,
                 text: cand.entry.text,
                 cosineScore: Number(cand.cosineScore.toFixed(4)),
+                lexicalScore: Number(cand.lexicalScore.toFixed(4)),
                 rerankScore: Number(item.score.toFixed(4)),
-                score: Number(item.score.toFixed(4))
+                lexicalGuardKept: guardKept,
+                score: Number(Math.min(1, Math.max(0, blended)).toFixed(4))
               };
-            });
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, rCfg.topN);
           if (filtered.length) {
             finalHits = filtered;
             method = 'embedding+rerank';
           }
         } catch (rerankErr) {
-          console.warn('[记忆检索] Rerank 重排失败，优雅降级为 Embedding 余弦排序', rerankErr);
+          console.warn('[记忆检索] Rerank 重排失败，优雅降级为 Embedding 余弦+词法混合排序', rerankErr);
         }
       }
 
@@ -467,6 +551,16 @@ window.MEMORY_ENGINE_VECTOR = (function() {
         method,
         timestamp: Date.now(),
         hits: finalHits,
+        diagnostics: {
+          totalIndexed: scoredEntries.length,
+          candidateCount: vectorCandidates.length,
+          lexicalGuardCount,
+          rerankWeight,
+          similarity_distribution: cosineDistribution,
+          candidateCosineDistribution: computeScoreDistribution(vectorCandidates.map(c => c.cosineScore)),
+          rerankDistribution,
+          finalDistribution: computeScoreDistribution(finalHits.map(h => h.score))
+        },
         smallScores,
         factScores,
         personScores,
@@ -546,6 +640,6 @@ window.MEMORY_ENGINE_VECTOR = (function() {
     abort,
     isRunning: () => maintainRunning || recallRunning,
     getStatus: () => ({ ...maintainStatus, maintainRunning, recallRunning }),
-    _test: { normalizeVector, dotProduct, hashText }
+    _test: { normalizeVector, dotProduct, hashText, tokenizeHybridText, computeLexicalOverlap, computeScoreDistribution }
   };
 })();

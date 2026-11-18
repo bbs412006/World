@@ -1005,30 +1005,57 @@ window.OUTLINE_ENGINE_UI = (function() {
     const activeTab = OUTLINE_SETTINGS_TABS.some(t => t.key === draft.settingsTab) ? draft.settingsTab : 'common';
     draft.settingsTab = activeTab;
     const outlineVersion = window.OUTLINE_ENGINE_SETTINGS?.VERSION || '2.0.0';
-    const isCustomApi = value.apiSource === 'custom';
     const runningLabel = engine()?.getRunningLabel?.() || (isRebuilding() ? '联合历史重建中' : draft.busy ? '剧情任务中' : '');
+    const apiTimeoutMs = Number.isFinite(Number(value.apiTimeoutMs)) ? Number(value.apiTimeoutMs) : 120000;
+    const idleTimeoutMs = Number.isFinite(Number(value.streamIdleTimeoutMs)) ? Number(value.streamIdleTimeoutMs) : 90000;
+    const effortVal = String(value.reasoningEffort || '').trim().toLowerCase();
     const apiBody = `
-      ${settingSelect('API 来源', 'apiSource', value.apiSource || 'world', [['world', '复用世界引擎 API（默认）'], ['custom', '剧情模块独立 API']], '复用模式读取世界引擎已配置的连接；此处保存不会改写世界或记忆的设置。')}
-      <fieldset class="we-outline-custom-api we-outline-custom-api-flat"${isCustomApi ? '' : ' disabled'}>
-        ${settingSelect('连接方式', 'connectionMode', value.connectionMode || 'direct', [['direct', '直连（默认）'], ['proxy', '经酒馆代理（解决跨域 CORS）']], '连不上或控制台报 CORS 错误时，切到「经酒馆代理」由酒馆服务端转发。')}
-        ${settingInput('剧情大纲 API URL（OpenAI 兼容）', 'apiUrl', value.apiUrl || '', { placeholder: 'https://api.openai.com/v1', hint: '填到「版本前缀」一级即可，/chat/completions 可加可不加。' })}
-        ${settingInput('剧情大纲 API Key', 'apiKey', value.apiKey || '', { type: 'password' })}
-        <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
-          <div style="flex:1;">
-            <label>模型</label>
-            <input id="we-outline-model" data-outline-setting="model" type="text" value="${h(value.model || '')}" placeholder="模型名称" style="width:100%;">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        ${button('copy-world-api', '填入世界引擎地址/Key', '', '')}
+      </div>
+      ${settingSelect('连接方式', 'connectionMode', value.connectionMode || 'direct', [['direct', '直连（默认）'], ['proxy', '经酒馆代理（解决跨域 CORS）']], '连不上或控制台报 CORS 错误时，切到「经酒馆代理」由酒馆服务端转发。')}
+      ${settingInput('剧情大纲 API URL（OpenAI 兼容）', 'apiUrl', value.apiUrl || '', { placeholder: 'https://api.openai.com/v1', hint: '填到「版本前缀」一级即可，/chat/completions 可加可不加。' })}
+      ${settingInput('剧情大纲 API Key', 'apiKey', value.apiKey || '', { type: 'password' })}
+      <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
+        <div style="flex:1;">
+          <label>模型</label>
+          <input id="we-outline-model" data-outline-setting="model" type="text" value="${h(value.model || '')}" placeholder="模型名称" style="width:100%;">
+        </div>
+        ${button('fetch-models', draft.fetchingModels ? '获取中…' : '获取列表', ` id="we-outline-fetch-models"${draft.fetchingModels ? ' disabled' : ''} style="white-space:nowrap;flex-shrink:0;"`)}
+        ${button('test-api', draft.testingApi ? '测试中…' : '测试请求', ` id="we-outline-test-api"${draft.testingApi ? ' disabled' : ''} style="white-space:nowrap;flex-shrink:0;"`)}
+      </div>
+      <div class="we-input-group">
+        <select id="we-outline-model-list" style="${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? '' : 'display:none;'}width:100%;margin-top:4px;"><option value="">-- 选择模型${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? `（共 ${draft.fetchedModels.length} 个）` : ''} --</option>${(draft.fetchedModels || []).map(m => `<option value="${h(m)}"${String(value.model || '') === String(m) ? ' selected' : ''}>${h(m)}</option>`).join('')}</select>
+      </div>
+      ${draft.apiTestStatus ? `<div class="we-outline-field-hint" id="we-outline-api-test-status" style="margin-bottom:6px;${draft.apiTestError ? 'color:#f66;' : ''}">${h(draft.apiTestStatus)}</div>` : ''}
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        ${settingCompactField('温度', 'temperature', value.temperature ?? 0.2, { type: 'number', min: 0, step: 0.1 })}
+        ${settingCompactField('最大输出 token', 'maxTokens', value.maxTokens ?? 8192, { type: 'number', min: 1, step: 1 })}
+      </div>
+      ${settingInput('请求超时（秒）', 'apiTimeoutSeconds', Math.max(0, Math.round(apiTimeoutMs / 1000)), { type: 'number', min: 0, step: 1, hint: '超过该时间仍未收到完整响应会自动中止。0 = 不超时。' })}
+      ${settingCheck('流式传输（stream）', 'stream', value.stream === true, '开启后按 SSE 流式增量接收响应，适合易等待超时或仅推荐流式的反代渠道。')}
+      <details class="we-api-adv-fold">
+        <summary>高级请求参数（流式空闲超时 / JSON 模式 / top_p / 推理力度）</summary>
+        <div class="we-api-adv-body">
+          ${settingInput('流式分片空闲超时（秒）', 'streamIdleTimeoutSeconds', Math.max(0, Math.round(idleTimeoutMs / 1000)), { type: 'number', min: 0, step: 1, hint: '开始收到流式数据后，超过该时间无新分片自动中止（不影响首字前的慢思考等待）；0 = 仅用总超时。' })}
+          ${settingCheck('强制 JSON 输出（response_format）', 'jsonMode', value.jsonMode === true, '在支持 OpenAI JSON 模式的渠道附带 response_format: json_object；部分不支持该字段的反代若报 400 请关闭。')}
+          <div class="we-input-group" style="display:flex;gap:6px;">
+            <div style="flex:1;">
+              <label>top_p（0–1，留空=默认）</label>
+              <input id="we-outline-topP" data-outline-setting="topP" type="number" min="0" max="1" step="0.05" value="${value.topP == null ? '' : h(value.topP)}" placeholder="留空不传" style="width:100%;">
+            </div>
+            <div style="flex:1;">
+              <label>推理力度（reasoning_effort）</label>
+              <select id="we-outline-reasoningEffort" data-outline-setting="reasoningEffort" style="width:100%;">
+                <option value=""${!effortVal ? ' selected' : ''}>默认（不传）</option>
+                <option value="low"${effortVal === 'low' ? ' selected' : ''}>低（low）</option>
+                <option value="medium"${effortVal === 'medium' ? ' selected' : ''}>中（medium）</option>
+                <option value="high"${effortVal === 'high' ? ' selected' : ''}>高（high）</option>
+              </select>
+            </div>
           </div>
-          ${button('fetch-models', draft.fetchingModels ? '获取中…' : '获取列表', ` id="we-outline-fetch-models"${draft.fetchingModels ? ' disabled' : ''} style="white-space:nowrap;flex-shrink:0;"`)}
         </div>
-        <div class="we-input-group">
-          <select id="we-outline-model-list" style="${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? '' : 'display:none;'}width:100%;margin-top:4px;"><option value="">-- 选择模型${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? `（共 ${draft.fetchedModels.length} 个）` : ''} --</option>${(draft.fetchedModels || []).map(m => `<option value="${h(m)}"${String(value.model || '') === String(m) ? ' selected' : ''}>${h(m)}</option>`).join('')}</select>
-        </div>
-        <div class="we-input-group" style="display:flex;gap:6px;">
-          ${settingCompactField('温度', 'temperature', value.temperature ?? 0.2, { type: 'number', min: 0, step: 0.1 })}
-          ${settingCompactField('最大输出 token', 'maxTokens', value.maxTokens ?? 8192, { type: 'number', min: 1, step: 1 })}
-        </div>
-        ${settingInput('请求超时（秒）', 'apiTimeoutSeconds', (value.apiTimeoutMs ?? 120000) / 1000, { type: 'number', min: 0, step: 1, hint: '超过该时间仍未收到完整响应会自动中止。0 = 不超时。' })}
-      </fieldset>`;
+      </details>`;
 
     const evolveBody = `
       ${settingCheck('启用剧情模块', 'engineEnabled', value.engineEnabled, '关闭后仅停用自动检查与正文注入，仍可随时新建、编辑或删除大纲，不影响世界引擎与记忆引擎。')}
@@ -1417,12 +1444,18 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (ds.outlineSetting) {
       if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
       const name = ds.outlineSetting;
+      if (name === 'topP') {
+        const raw = String(element.value ?? '').trim();
+        draft.settingsDraft.topP = raw === '' ? null : (Number.isFinite(Number(raw)) ? Math.max(0, Math.min(1, Number(raw))) : null);
+        return;
+      }
       let value = element.type === 'checkbox' ? element.checked : element.value;
       if (element.type === 'number') {
         value = Number(element.value);
         if (!Number.isFinite(value)) return;
       }
-      if (name === 'apiTimeoutSeconds') draft.settingsDraft.apiTimeoutMs = Math.max(0, value) * 1000;
+      if (name === 'apiTimeoutSeconds') draft.settingsDraft.apiTimeoutMs = Math.max(0, Math.round(value * 1000));
+      else if (name === 'streamIdleTimeoutSeconds') draft.settingsDraft.streamIdleTimeoutMs = Math.max(0, Math.round(value * 1000));
       else draft.settingsDraft[name] = value;
     } else if (ds.outlineInlineField && draft.inlineEdit?.data) {
       const name = ds.outlineInlineField;
@@ -1855,11 +1888,40 @@ window.OUTLINE_ENGINE_UI = (function() {
       commitReviewedPlan(draft.plan, draft.expectedRevision, draft.expectedPlanSnapshot);
       draft.plan = null; draft.editorOpen = false; draft.confirmBatchDeleteTrackId = null; draft.message = '大纲已保存。'; draft.error = false;
       engine()?.applyInjection?.();
+    } else if (action === 'copy-world-api') {
+      const worldCfg = window.WORLD_ENGINE_API?.getSettings?.(true);
+      if (!worldCfg) throw new Error('世界引擎设置尚未就绪。');
+      if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
+      draft.settingsDraft.connectionMode = worldCfg.connectionMode === 'proxy' ? 'proxy' : 'direct';
+      draft.settingsDraft.apiUrl = String(worldCfg.apiUrl || '');
+      draft.settingsDraft.apiKey = String(worldCfg.apiKey || '');
+      draft.message = '已填入世界引擎连接信息（仅一次性复制，需点「保存设置」生效）。';
+      draft.error = false;
+    } else if (action === 'test-api') {
+      const api = window.WORLD_ENGINE_API;
+      if (!api?.testConnection) throw new Error('连接测试接口尚未就绪。');
+      const cfg = clone(draft.settingsDraft || settings());
+      draft.testingApi = true;
+      draft.apiTestStatus = '正在发送测试请求…';
+      draft.apiTestError = false;
+      refresh();
+      try {
+        const res = await api.testConnection(cfg, { module: 'outline' });
+        draft.apiTestStatus = `连接成功（${res.durationMs}ms）：${res.preview || '已收到响应'}`;
+        draft.apiTestError = false;
+        draft.message = '剧情大纲 API 连接测试成功。';
+        draft.error = false;
+      } catch (err) {
+        draft.apiTestStatus = `连接失败：${err?.message || err}`;
+        draft.apiTestError = true;
+        throw err;
+      } finally {
+        draft.testingApi = false;
+      }
     } else if (action === 'fetch-models') {
       const api = window.WORLD_ENGINE_API;
       if (!api?.fetchModelList) throw new Error('模型列表接口尚未就绪。');
       const cfg = clone(draft.settingsDraft || settings());
-      if (cfg.apiSource !== 'custom') throw new Error('请先将 API 来源切换为“剧情模块独立 API”。');
       draft.fetchingModels = true;
       draft.message = '正在获取模型列表…';
       draft.error = false;
@@ -1879,9 +1941,16 @@ window.OUTLINE_ENGINE_UI = (function() {
       next.injectMaxChars = Math.max(200, Math.floor(Number(next.injectMaxChars) || 2500));
       next.maxTokens = Math.max(1, Math.floor(Number(next.maxTokens) || 65000));
       next.apiTimeoutMs = Math.max(0, Number(next.apiTimeoutMs) || 0);
+      next.streamIdleTimeoutMs = Math.max(0, Number(next.streamIdleTimeoutMs) || 0);
+      next.jsonMode = next.jsonMode === true;
+      next.topP = (next.topP !== '' && next.topP != null && Number.isFinite(Number(next.topP)))
+        ? Math.max(0, Math.min(1, Number(next.topP)))
+        : null;
+      const eff = String(next.reasoningEffort || '').trim().toLowerCase();
+      next.reasoningEffort = ['low', 'medium', 'high', 'minimal', 'none'].includes(eff) ? eff : '';
       next.apiAutoRetries = Math.max(0, Math.min(10, Math.floor(Number(next.apiAutoRetries) || 0)));
       const previous = settings();
-      const requestKeys = ['engineEnabled', 'firstLayerIsAiOpening', 'autoCheck', 'checkEveryX', 'allowProposals', 'injectIntoWorldEngine', 'useWorldReference', 'injectIntoMemoryEngine', 'useMemoryReference', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'apiAutoRetries'];
+      const requestKeys = ['engineEnabled', 'firstLayerIsAiOpening', 'autoCheck', 'checkEveryX', 'allowProposals', 'injectIntoWorldEngine', 'useWorldReference', 'injectIntoMemoryEngine', 'useMemoryReference', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'stream', 'streamIdleTimeoutMs', 'jsonMode', 'topP', 'reasoningEffort', 'apiAutoRetries'];
       if (requestKeys.some(key => previous[key] !== next[key])) engine()?.abort?.();
       window.OUTLINE_ENGINE_SETTINGS.patchSettings(next);
       if (draft.coordinationMode === 'independent' || draft.coordinationMode === 'stagger-serial') {
@@ -2030,7 +2099,7 @@ window.OUTLINE_ENGINE_UI = (function() {
         } else if (['we-outline-text-file', 'we-outline-json-file', 'we-outline-snapshot-file', 'we-outline-history-file'].includes(element.id)) {
           await importFile(element.files?.[0], element.id === 'we-outline-text-file' ? 'text' : element.id === 'we-outline-snapshot-file' ? 'snapshot' : 'json');
           element.value = '';
-        } else if (element?.dataset?.outlineSetting === 'apiSource' || element?.dataset?.outlineConditionType || element?.dataset?.outlineConditionValueType || ['collection', 'entityId', 'basis'].includes(element?.dataset?.outlineConditionField) || element?.dataset?.outlineNodeList === 'dependencies' || element?.dataset?.outlineTrackField === 'kind' || element?.dataset?.outlineNodeField === 'trackId') refresh();
+        } else if (element?.dataset?.outlineConditionType || element?.dataset?.outlineConditionValueType || ['collection', 'entityId', 'basis'].includes(element?.dataset?.outlineConditionField) || element?.dataset?.outlineNodeList === 'dependencies' || element?.dataset?.outlineTrackField === 'kind' || element?.dataset?.outlineNodeField === 'trackId') refresh();
       } catch (error) { notify(error?.message || error, true); }
     };
     root.onclick = async event => {

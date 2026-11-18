@@ -18,9 +18,11 @@ for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'out
 const data = OUTLINE_ENGINE_DATA, prompts = OUTLINE_ENGINE_PROMPT;
 assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().engineEnabled, false);
 assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().checkEveryX, 3);
-OUTLINE_ENGINE_SETTINGS.patchSettings({ checkEveryX: -1, apiSource: 'unexpected', injectMaxChars: 0 });
+assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().stream, false);
+OUTLINE_ENGINE_SETTINGS.patchSettings({ checkEveryX: -1, apiSource: 'world', injectMaxChars: 0, stream: true });
 assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().checkEveryX, 1);
-assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().apiSource, 'world');
+assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().apiSource, undefined);
+assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().stream, true);
 assert.strictEqual(OUTLINE_ENGINE_SETTINGS.getSettings().injectMaxChars, 200);
 
 const sourcePlan = {

@@ -10,6 +10,11 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     temperature: 0.2,
     maxTokens: 65000,
     apiTimeoutMs: 120000,
+    stream: false,
+    streamIdleTimeoutMs: 90000,
+    jsonMode: false,
+    topP: null,
+    reasoningEffort: '',
     engineEnabled: true,
     firstLayerIsAiOpening: true,
     evolveMode: 'auto',
@@ -53,6 +58,9 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     vectorThreshold: 0.3,
     rerankTopK: 5,
     rerankThreshold: 0.2,
+    rerankHybridWeight: 0.75,
+    embeddingTimeoutMs: 60000,
+    rerankTimeoutMs: 60000,
     vectorIncludeArchivedSmall: true,
     vectorIncludeFacts: true,
     vectorIncludePersonalAndEntity: true,
@@ -94,6 +102,15 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       ...merged,
       // 旧版部分预设把输出上限保存成 4096；升级后自动迁移，避免继续截断 API 返回。
       maxTokens: savedMaxTokens === 4096 ? 65000 : savedMaxTokens,
+      stream: merged.stream === true,
+      streamIdleTimeoutMs: clampInt(merged.streamIdleTimeoutMs, 90000, 0, 3600000),
+      jsonMode: merged.jsonMode === true,
+      topP: (merged.topP !== '' && merged.topP != null && Number.isFinite(Number(merged.topP)))
+        ? clampFloat(merged.topP, 1, 0, 1)
+        : null,
+      reasoningEffort: ['low', 'medium', 'high', 'minimal', 'none'].includes(String(merged.reasoningEffort || '').trim().toLowerCase())
+        ? String(merged.reasoningEffort).trim().toLowerCase()
+        : '',
       evolveEveryX: 1,
       evolveReadRounds: 1,
       manualReadRounds: 1,
@@ -128,6 +145,9 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       vectorThreshold: clampFloat(merged.vectorThreshold, 0.3, 0, 1),
       rerankTopK: clampInt(merged.rerankTopK, 5, 1, 20),
       rerankThreshold: clampFloat(merged.rerankThreshold, 0.2, 0, 1),
+      rerankHybridWeight: clampFloat(merged.rerankHybridWeight, 0.75, 0, 1),
+      embeddingTimeoutMs: clampInt(merged.embeddingTimeoutMs, 60000, 3000, 600000),
+      rerankTimeoutMs: clampInt(merged.rerankTimeoutMs, 60000, 3000, 600000),
       vectorIncludeArchivedSmall: merged.vectorIncludeArchivedSmall !== false,
       vectorIncludeFacts: merged.vectorIncludeFacts !== false,
       vectorIncludePersonalAndEntity: merged.vectorIncludePersonalAndEntity !== false

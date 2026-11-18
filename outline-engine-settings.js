@@ -4,7 +4,6 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
   const VERSION = '2.1.1';
   const DEFAULTS = Object.freeze({
     engineEnabled: false,
-    apiSource: 'world',
     autoCheck: true,
     checkEveryX: 3,
     allowProposals: true,
@@ -27,6 +26,11 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     temperature: 0.2,
     maxTokens: 8192,
     apiTimeoutMs: 120000,
+    stream: false,
+    streamIdleTimeoutMs: 90000,
+    jsonMode: false,
+    topP: null,
+    reasoningEffort: '',
     apiAutoRetries: 0
   });
   let cached = null;
@@ -37,8 +41,8 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
   function normalize(value) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const next = { ...DEFAULTS, ...source };
+    delete next.apiSource;
     next.engineEnabled = next.engineEnabled === true;
-    next.apiSource = next.apiSource === 'custom' ? 'custom' : 'world';
     for (const key of ['autoCheck', 'allowProposals', 'firstLayerIsAiOpening', 'injectIntoPrompt', 'injectIntoWorldEngine', 'useWorldReference', 'injectIntoMemoryEngine', 'useMemoryReference']) next[key] = next[key] !== false;
     next.syncToChat = next.syncToChat === true;
     next.autoBackup = next.autoBackup === true;
@@ -52,6 +56,14 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     next.apiAutoRetries = integer(next.apiAutoRetries, 0, 0, 10);
     next.temperature = Number.isFinite(Number(next.temperature)) ? Math.max(0, Math.min(2, Number(next.temperature))) : 0.2;
     next.connectionMode = next.connectionMode === 'proxy' ? 'proxy' : 'direct';
+    next.stream = next.stream === true;
+    next.streamIdleTimeoutMs = integer(next.streamIdleTimeoutMs, 90000, 0, 3600000);
+    next.jsonMode = next.jsonMode === true;
+    next.topP = (next.topP !== '' && next.topP != null && Number.isFinite(Number(next.topP)))
+      ? Math.max(0, Math.min(1, Number(next.topP)))
+      : null;
+    const rawEffort = String(next.reasoningEffort || '').trim().toLowerCase();
+    next.reasoningEffort = ['low', 'medium', 'high', 'minimal', 'none'].includes(rawEffort) ? rawEffort : '';
     for (const key of ['apiUrl', 'apiKey', 'model']) next[key] = String(next[key] == null ? '' : next[key]).trim();
     return next;
   }

@@ -9,7 +9,12 @@ window.WORLD_ENGINE_API = (function() {
     connectionMode: 'direct',
     temperature: 0.7,
     maxTokens: 65000,
-    apiTimeoutMs: 120000
+    apiTimeoutMs: 120000,
+    stream: false,
+    streamIdleTimeoutMs: 90000,
+    jsonMode: false,
+    topP: null,
+    reasoningEffort: ''
   });
   let cachedSettings = null;
 
@@ -23,6 +28,11 @@ window.WORLD_ENGINE_API = (function() {
       temperature: 0.7,
       maxTokens: 65000,
       apiAutoRetries: 0,
+      stream: false,
+      streamIdleTimeoutMs: 90000,
+      jsonMode: false,
+      topP: null,
+      reasoningEffort: '',
       engineEnabled: true,
       firstLayerIsAiOpening: true,
       // [FIX] 连接方式：'direct'=浏览器直连（默认，原有行为）；'proxy'=经酒馆服务端转发，绕过第三方 API 的 CORS 限制
@@ -156,8 +166,12 @@ window.WORLD_ENGINE_API = (function() {
     throw new Error('经酒馆代理需要在酒馆环境中运行（未取到酒馆请求头）');
   }
 
-  function timeoutError(timeoutMs) {
-    return new Error('API 请求超时（' + Math.max(1, Math.ceil(timeoutMs / 1000)) + 's 无响应），已中止本次请求');
+  function timeoutError(timeoutMs, kind) {
+    const sec = Math.max(1, Math.ceil(timeoutMs / 1000));
+    if (kind === 'idle') {
+      return new Error('流式接收空闲超时（' + sec + 's 无新数据），已中止本次请求');
+    }
+    return new Error('API 请求超时（' + sec + 's 无响应），已中止本次请求');
   }
 
   function timeoutSeconds(timeoutMs) {
@@ -179,8 +193,7 @@ window.WORLD_ENGINE_API = (function() {
     return str.length > maxChars ? `${str.slice(0, maxChars)}\n...（共 ${str.length} 字符，已截断显示）` : str;
   }
 
-  function extractChoiceContent(choice) {
-    const raw = choice?.message?.content ?? choice?.text ?? '';
+  function extractPartText(raw) {
     if (Array.isArray(raw)) {
       return raw.map(part => {
         if (typeof part === 'string') return part;
@@ -189,6 +202,10 @@ window.WORLD_ENGINE_API = (function() {
       }).join('');
     }
     return raw == null ? '' : String(raw);
+  }
+
+  function extractChoiceContent(choice) {
+    return extractPartText(choice?.message?.content ?? choice?.text ?? '');
   }
 
   const MAX_REQUEST_LOGS = 120;
@@ -237,6 +254,11 @@ window.WORLD_ENGINE_API = (function() {
       temperature: info?.temperature ?? null,
       maxTokens: info?.maxTokens ?? null,
       timeoutSec: info?.timeoutSec ?? null,
+      streamIdleTimeoutSec: info?.streamIdleTimeoutSec ?? null,
+      stream: info?.stream === true ? true : (info?.stream === false ? false : null),
+      jsonMode: Boolean(info?.jsonMode),
+      topP: info?.topP ?? null,
+      reasoningEffort: info?.reasoningEffort ? String(info.reasoningEffort) : '',
       attempt: Math.max(1, Number(info?.attempt) || 1),
       maxAttempts: Math.max(1, Number(info?.maxAttempts) || 1),
       httpStatus: info?.httpStatus ?? null,
@@ -302,16 +324,261 @@ window.WORLD_ENGINE_API = (function() {
       target,
       model: body.model,
       temperature: body.temperature,
+      ...(body.top_p !== undefined ? { top_p: body.top_p } : {}),
+      ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}),
+      ...(body.response_format ? { response_format: body.response_format } : {}),
       max_tokens: body.max_tokens,
       timeout_sec: timeoutSeconds(settings.apiTimeoutMs),
+      ...(body.stream ? { stream_idle_timeout_sec: timeoutSeconds(settings.streamIdleTimeoutMs) } : {}),
       message_count: Array.isArray(body.messages) ? body.messages.length : 0,
       prompt_chars: messageChars(body.messages),
-      stream: false
+      stream: Boolean(body.stream)
     });
   }
 
-  async function readResponseBody(resp) {
+  function decodeUtf8Bytes(bytes) {
+    if (!bytes || !bytes.length) return '';
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('utf8');
+    let out = '';
+    for (let i = 0; i < bytes.length;) {
+      const b0 = bytes[i];
+      if (b0 < 0x80) {
+        out += String.fromCharCode(b0);
+        i++;
+      } else if (b0 >= 0xC2 && b0 <= 0xDF && i + 1 < bytes.length) {
+        out += String.fromCharCode(((b0 & 0x1F) << 6) | (bytes[i + 1] & 0x3F));
+        i += 2;
+      } else if (b0 >= 0xE0 && b0 <= 0xEF && i + 2 < bytes.length) {
+        out += String.fromCharCode(((b0 & 0x0F) << 12) | ((bytes[i + 1] & 0x3F) << 6) | (bytes[i + 2] & 0x3F));
+        i += 3;
+      } else if (b0 >= 0xF0 && b0 <= 0xF4 && i + 3 < bytes.length) {
+        const cp = ((b0 & 0x07) << 18) | ((bytes[i + 1] & 0x3F) << 12) | ((bytes[i + 2] & 0x3F) << 6) | (bytes[i + 3] & 0x3F);
+        out += String.fromCodePoint(cp);
+        i += 4;
+      } else {
+        out += '\uFFFD';
+        i++;
+      }
+    }
+    return out;
+  }
+
+  function createStreamDecoder() {
+    if (typeof TextDecoder === 'function') {
+      const decoder = new TextDecoder('utf-8');
+      return (chunk, streaming) => {
+        if (chunk == null) return decoder.decode();
+        if (typeof chunk === 'string') return chunk;
+        return decoder.decode(chunk, { stream: Boolean(streaming) });
+      };
+    }
+    let pending = new Uint8Array(0);
+    return (chunk, streaming) => {
+      if (chunk == null) {
+        if (!pending.length) return '';
+        const out = decodeUtf8Bytes(pending);
+        pending = new Uint8Array(0);
+        return out;
+      }
+      if (typeof chunk === 'string') return chunk;
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      const merged = pending.length ? new Uint8Array(pending.length + bytes.length) : bytes;
+      if (pending.length) {
+        merged.set(pending, 0);
+        merged.set(bytes, pending.length);
+      }
+      let cut = merged.length;
+      if (streaming && merged.length > 0) {
+        const minScan = Math.max(0, merged.length - 4);
+        for (let i = merged.length - 1; i >= minScan; i--) {
+          const b = merged[i];
+          if ((b & 0xC0) !== 0x80) {
+            const need = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 1));
+            if (merged.length - i < need) cut = i;
+            break;
+          }
+        }
+      }
+      pending = cut < merged.length ? merged.slice(cut) : new Uint8Array(0);
+      return cut > 0 ? decodeUtf8Bytes(merged.subarray(0, cut)) : '';
+    };
+  }
+
+  function createSseAccumulator() {
+    let content = '';
+    let finishReason = '';
+    let lastError = null;
+    let chunkCount = 0;
+    let model = '';
+    let id = '';
+
+    function consumeLine(rawLine) {
+      const line = String(rawLine == null ? '' : rawLine).replace(/\r$/, '');
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith(':') || trimmed.startsWith('event:') || trimmed.startsWith('id:') || trimmed.startsWith('retry:')) {
+        return false;
+      }
+      let payload = '';
+      if (trimmed.startsWith('data:')) payload = trimmed.slice(5).trim();
+      else if (trimmed.startsWith('{')) payload = trimmed;
+      else return false;
+      if (!payload || payload === '[DONE]') return false;
+      let obj;
+      try { obj = JSON.parse(payload); } catch (_) { return false; }
+      if (!obj || typeof obj !== 'object') return false;
+      chunkCount++;
+      if (obj.error) lastError = obj.error;
+      if (obj.id) id = String(obj.id);
+      if (obj.model) model = String(obj.model);
+      const ch = Array.isArray(obj.choices) ? obj.choices[0] : null;
+      if (!ch) return false;
+      if (ch.finish_reason) finishReason = String(ch.finish_reason);
+      if (ch.delta && typeof ch.delta === 'object') {
+        const piece = extractPartText(ch.delta.content);
+        if (piece) {
+          content += piece;
+          return true;
+        }
+        return false;
+      }
+      if (!content && ch.message && typeof ch.message === 'object') {
+        const full = extractPartText(ch.message.content);
+        if (full) {
+          content = full;
+          return true;
+        }
+      } else if (ch.text !== undefined) {
+        const piece = extractPartText(ch.text);
+        if (piece) {
+          content += piece;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function finalize(rawText) {
+      const text = String(rawText || '');
+      const trimmed = text.trim();
+      // 若服务端忽略 stream=true 直接返回完整 JSON，则优先按标准 JSON 解析
+      if (trimmed && !trimmed.startsWith('data:') && !text.includes('\ndata:')) {
+        try {
+          const direct = JSON.parse(text);
+          if (direct && typeof direct === 'object') {
+            return { data: direct, text, parseError: null };
+          }
+        } catch (e) {
+          return { data: null, text, parseError: e };
+        }
+      }
+      if (chunkCount > 0) {
+        if (lastError && !content) {
+          return { data: { error: lastError, choices: [] }, text, parseError: null };
+        }
+        return {
+          data: {
+            id,
+            model,
+            choices: [{ index: 0, finish_reason: finishReason, message: { role: 'assistant', content } }],
+            ...(lastError ? { error: lastError } : {})
+          },
+          text,
+          parseError: null
+        };
+      }
+      let data = null;
+      let parseError = null;
+      if (text) {
+        try { data = JSON.parse(text); } catch (e) { parseError = e; }
+      }
+      return { data, text, parseError };
+    }
+
+    return {
+      consumeLine,
+      finalize,
+      getContentLength: () => content.length
+    };
+  }
+
+  function parseStreamOrJsonText(rawText) {
+    const text = String(rawText || '');
+    const trimmed = text.trim();
+    if (!trimmed) return { data: null, text: '', parseError: null };
+    if (!trimmed.startsWith('data:') && !text.includes('\ndata:')) {
+      try {
+        return { data: JSON.parse(text), text, parseError: null };
+      } catch (_) {}
+    }
+    const acc = createSseAccumulator();
+    for (const line of text.split('\n')) {
+      acc.consumeLine(line);
+    }
+    return acc.finalize(text);
+  }
+
+  async function readResponseBody(resp, expectStream, onProgress, onActivity) {
+    const contentType = String(resp?.headers?.get?.('content-type') || '').toLowerCase();
+    const useStreamReader = Boolean(
+      resp?.ok &&
+      (expectStream || contentType.includes('text/event-stream')) &&
+      resp?.body &&
+      typeof resp.body.getReader === 'function' &&
+      !contentType.includes('application/json')
+    );
+    if (useStreamReader) {
+      const reader = resp.body.getReader();
+      const decode = createStreamDecoder();
+      const acc = createSseAccumulator();
+      let rawText = '';
+      let lineBuf = '';
+      let completed = false;
+      try {
+        while (true) {
+          const step = await reader.read();
+          if (step?.done) {
+            completed = true;
+            break;
+          }
+          const hasBytes = step?.value != null && (typeof step.value === 'string'
+            ? step.value.length > 0
+            : ((step.value.byteLength ?? step.value.length ?? 0) > 0));
+          if (hasBytes && typeof onActivity === 'function') onActivity();
+          const chunkStr = decode(step?.value, true);
+          if (!chunkStr) continue;
+          rawText += chunkStr;
+          lineBuf += chunkStr;
+          const parts = lineBuf.split('\n');
+          lineBuf = parts.pop() || '';
+          let added = false;
+          for (const part of parts) {
+            if (acc.consumeLine(part)) added = true;
+          }
+          if (added && typeof onProgress === 'function') {
+            onProgress(acc.getContentLength());
+          }
+        }
+        const tail = decode(null, false);
+        if (tail) {
+          rawText += tail;
+          lineBuf += tail;
+        }
+        if (lineBuf) acc.consumeLine(lineBuf);
+      } finally {
+        if (!completed) {
+          try { Promise.resolve(reader.cancel?.()).catch(() => {}); } catch (_) {}
+        }
+        try { reader.releaseLock?.(); } catch (_) {}
+      }
+      const parsed = acc.finalize(rawText);
+      return { resp, ...parsed };
+    }
+
     const text = await resp.text();
+    if (resp?.ok && (expectStream || contentType.includes('text/event-stream'))) {
+      const parsed = parseStreamOrJsonText(text);
+      return { resp, ...parsed };
+    }
     let data = null;
     let parseError = null;
     if (text) {
@@ -335,16 +602,32 @@ window.WORLD_ENGINE_API = (function() {
     return result.data || {};
   }
 
-  // 超时覆盖完整请求生命周期：fetch resolve 只代表响应头到达，正文读取仍可能卡住。
-  async function fetchResponseWithTimeout(url, options, signal, timeoutMs) {
-    timeoutMs = Number(timeoutMs) || 0;
-    if (!(timeoutMs > 0)) {
+  // 超时覆盖完整请求生命周期：总超时兜底连接与慢思考，流式空闲超时拦截分片中断挂死。
+  async function fetchResponseWithTimeout(url, options, signal, timeoutMs, expectStream, onProgress, streamIdleTimeoutMs) {
+    const totalMs = Number(timeoutMs) || 0;
+    const idleMs = expectStream ? Math.max(0, Number(streamIdleTimeoutMs) || 0) : 0;
+    if (!(totalMs > 0) && !(idleMs > 0)) {
       const resp = await fetch(url, { ...options, signal: signal || null });
-      return readResponseBody(resp);
+      return readResponseBody(resp, expectStream, onProgress);
     }
     const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let timeoutKind = '';
+    const totalTimer = totalMs > 0
+      ? setTimeout(() => {
+          timeoutKind = 'total';
+          controller.abort();
+        }, totalMs)
+      : null;
+    let idleTimer = null;
+    const touchIdle = idleMs > 0
+      ? () => {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            timeoutKind = 'idle';
+            controller.abort();
+          }, idleMs);
+        }
+      : null;
     const onExternalAbort = () => controller.abort();
     if (signal) {
       if (signal.aborted) controller.abort();
@@ -352,12 +635,14 @@ window.WORLD_ENGINE_API = (function() {
     }
     try {
       const resp = await fetch(url, { ...options, signal: controller.signal });
-      return await readResponseBody(resp);
+      return await readResponseBody(resp, expectStream, onProgress, touchIdle);
     } catch (e) {
-      if (timedOut) throw timeoutError(timeoutMs);
+      if (timeoutKind === 'idle') throw timeoutError(idleMs, 'idle');
+      if (timeoutKind === 'total') throw timeoutError(totalMs, 'total');
       throw e;
     } finally {
-      clearTimeout(timer);
+      if (totalTimer) clearTimeout(totalTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       if (signal) signal.removeEventListener('abort', onExternalAbort);
     }
   }
@@ -366,17 +651,23 @@ window.WORLD_ENGINE_API = (function() {
   // 走 OpenAI source + reverse_proxy 路线，这样可把我们自己的 URL/KEY 透传给上游。
   async function executeLoggedChatCall(transportLabel, targetDisplay, doFetch, settings, body, signal, meta) {
     const startedAt = Date.now();
+    const isStream = Boolean(body.stream);
     const logId = beginRequestLog({
       module: meta?.module || 'world',
       purpose: meta?.purpose || 'API 请求',
       status: 'running',
-      phase: '请求中',
+      phase: isStream ? '流式连接中' : '请求中',
       connectionMode: settings.connectionMode === 'proxy' ? 'proxy' : 'direct',
       target: targetDisplay,
       model: body.model,
       temperature: body.temperature,
       maxTokens: body.max_tokens,
       timeoutSec: timeoutSeconds(settings.apiTimeoutMs),
+      streamIdleTimeoutSec: isStream ? timeoutSeconds(settings.streamIdleTimeoutMs) : null,
+      stream: isStream,
+      jsonMode: Boolean(body.response_format),
+      topP: body.top_p ?? null,
+      reasoningEffort: body.reasoning_effort || '',
       attempt: meta?.attempt,
       maxAttempts: meta?.maxAttempts,
       promptChars: messageChars(body.messages),
@@ -384,8 +675,20 @@ window.WORLD_ENGINE_API = (function() {
       onLogId: meta?.onLogId
     });
     logRequestParams(transportLabel, targetDisplay, settings, body);
+    let lastProgressAt = 0;
+    const onStreamProgress = isStream
+      ? streamedChars => {
+          const now = Date.now();
+          if (now - lastProgressAt < 400) return;
+          lastProgressAt = now;
+          updateRequestLog(logId, {
+            phase: '流式接收中',
+            responseChars: streamedChars
+          });
+        }
+      : null;
     try {
-      const result = await doFetch();
+      const result = await doFetch(onStreamProgress);
       const resp = result.resp;
       const rawText = String(result.text || '');
       const durationMs = Math.max(0, Date.now() - startedAt);
@@ -477,6 +780,23 @@ window.WORLD_ENGINE_API = (function() {
     }
   }
 
+  function applyOptionalChatParams(body, settings) {
+    if (settings.jsonMode === true) {
+      body.response_format = { type: 'json_object' };
+    }
+    if (settings.topP !== '' && settings.topP != null) {
+      const tp = Number(settings.topP);
+      if (Number.isFinite(tp)) {
+        body.top_p = Math.max(0, Math.min(1, tp));
+      }
+    }
+    const effort = String(settings.reasoningEffort || '').trim().toLowerCase();
+    if (['low', 'medium', 'high', 'minimal', 'none'].includes(effort)) {
+      body.reasoning_effort = effort;
+    }
+    return body;
+  }
+
   async function callApiViaProxy(settings, body, signal, meta) {
     const base = getProxyBase(settings);
     if (!base) {
@@ -489,6 +809,10 @@ window.WORLD_ENGINE_API = (function() {
         connectionMode: 'proxy',
         target: '',
         model: body.model,
+        stream: Boolean(body.stream),
+        jsonMode: Boolean(body.response_format),
+        topP: body.top_p ?? null,
+        reasoningEffort: body.reasoning_effort || '',
         attempt: meta?.attempt,
         maxAttempts: meta?.maxAttempts,
         promptChars: messageChars(body.messages),
@@ -505,13 +829,16 @@ window.WORLD_ENGINE_API = (function() {
       messages: body.messages,
       temperature: body.temperature,
       max_tokens: body.max_tokens,
-      stream: false
+      stream: Boolean(body.stream),
+      ...(body.response_format ? { response_format: body.response_format } : {}),
+      ...(body.top_p !== undefined ? { top_p: body.top_p } : {}),
+      ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {})
     };
-    return executeLoggedChatCall('tavern-proxy', base, () => fetchResponseWithTimeout('/api/backends/chat-completions/generate', {
+    return executeLoggedChatCall('tavern-proxy', base, onProgress => fetchResponseWithTimeout('/api/backends/chat-completions/generate', {
       method: 'POST',
       headers: tavernHeaders(),
       body: JSON.stringify(payload)
-    }, signal, settings.apiTimeoutMs), settings, payload, signal, meta);
+    }, signal, settings.apiTimeoutMs, payload.stream, onProgress, settings.streamIdleTimeoutMs), settings, payload, signal, meta);
   }
 
   /**
@@ -531,13 +858,15 @@ window.WORLD_ENGINE_API = (function() {
     const configuredMaxTokens = Math.max(1, parseInt(maxTokens ?? settings.maxTokens) || 65000);
     // 兼容旧设置：曾保存为 4096 的输出上限自动提升到 65000。
     const selectedMaxTokens = configuredMaxTokens === 4096 ? 65000 : configuredMaxTokens;
+    const useStream = settings.stream === true;
 
-    const body = {
+    const body = applyOptionalChatParams({
       model: settings.model || 'gpt-3.5-turbo',
       messages: [{ role: 'user', content: prompt }],
       temperature: Number.isFinite(Number(selectedTemperature)) ? Math.max(0, Number(selectedTemperature)) : 0.7,
-      max_tokens: selectedMaxTokens
-    };
+      max_tokens: selectedMaxTokens,
+      ...(useStream ? { stream: true } : {})
+    }, settings);
 
     // [FIX] 经酒馆代理：绕过第三方 API 的 CORS 限制，由酒馆 Node 服务端转发
     if (settings.connectionMode === 'proxy') {
@@ -555,6 +884,10 @@ window.WORLD_ENGINE_API = (function() {
         connectionMode: 'direct',
         target: '',
         model: body.model,
+        stream: useStream,
+        jsonMode: Boolean(body.response_format),
+        topP: body.top_p ?? null,
+        reasoningEffort: body.reasoning_effort || '',
         attempt: meta?.attempt,
         maxAttempts: meta?.maxAttempts,
         promptChars: messageChars(body.messages),
@@ -571,11 +904,11 @@ window.WORLD_ENGINE_API = (function() {
       headers['Authorization'] = 'Bearer ' + settings.apiKey;
     }
 
-    return executeLoggedChatCall('direct', url, () => fetchResponseWithTimeout(url, {
+    return executeLoggedChatCall('direct', url, onProgress => fetchResponseWithTimeout(url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body)
-    }, signal, settings.apiTimeoutMs), settings, body, signal, meta);
+    }, signal, settings.apiTimeoutMs, useStream, onProgress, settings.streamIdleTimeoutMs), settings, body, signal, meta);
   }
 
   function repairTruncatedJSON(content) {
@@ -661,10 +994,37 @@ window.WORLD_ENGINE_API = (function() {
     return result || repairTruncatedJSON(content);
   }
 
-  /**
-   * 获取模型列表（OpenAI 兼容格式）
-   */
-  async function fetchModelList(settingsOverride) {
+  function normalizeBaseApiUrl(url) {
+    return String(url || '').trim().replace(/\/+$/, '').replace(/\/(?:chat\/completions|embeddings|rerank|models)$/i, '');
+  }
+
+  function classifyModelsByKind(models, kind) {
+    const list = Array.isArray(models) ? models : [];
+    const matched = [];
+    const others = [];
+    const isEmbedId = id => /(?:embed|bge-m3|bge-large|bge-small|bge-base|text-embedding|gte[-_]|e5[-_]|nomic|m3e)/i.test(id) && !/rerank/i.test(id);
+    const isRerankId = id => /(?:rerank|bge-rerank|bce-rerank)/i.test(id);
+    for (const item of list) {
+      const id = typeof item === 'string' ? item : String(item?.id || '');
+      if (!id) continue;
+      const subType = String(item?.sub_type || item?.type || '').toLowerCase();
+      let isMatch = false;
+      if (kind === 'embedding') {
+        isMatch = subType === 'embedding' || subType === 'embeddings' || isEmbedId(id);
+      } else if (kind === 'rerank') {
+        isMatch = subType === 'rerank' || subType === 'reranker' || isRerankId(id);
+      }
+      if (isMatch) matched.push(id);
+      else others.push(id);
+    }
+    return {
+      models: [...matched, ...others],
+      matched,
+      others
+    };
+  }
+
+  async function fetchModelObjects(settingsOverride) {
     const meta = consumeRequestMeta(settingsOverride);
     let cleanOverride = settingsOverride;
     if (cleanOverride && Object.prototype.hasOwnProperty.call(cleanOverride, '__requestMeta')) {
@@ -674,7 +1034,7 @@ window.WORLD_ENGINE_API = (function() {
     const settings = cleanOverride
       ? { ...REQUEST_DEFAULTS, ...cleanOverride }
       : getSettings();
-    const baseUrl = normalizeUrl(settings.apiUrl).replace(/\/chat\/completions$/, '');
+    const baseUrl = normalizeBaseApiUrl(settings.apiUrl);
     const startedAt = Date.now();
     const isProxy = settings.connectionMode === 'proxy';
     const targetUrl = isProxy ? baseUrl : (baseUrl ? baseUrl + '/models' : '');
@@ -707,13 +1067,13 @@ window.WORLD_ENGINE_API = (function() {
         const data = requireJson(result, '酒馆代理');
         if (data && data.error) throw new Error('酒馆代理拉取模型失败（请检查 URL/密钥是否正确）');
         if (data.data && Array.isArray(data.data)) {
-          const list = data.data.map(m => m.id);
-          updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${list.length} 个模型` });
-          return list;
+          updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${data.data.length} 个模型` });
+          return data.data;
         }
         throw new Error('无法解析模型列表');
       }
 
+      if (!baseUrl) throw new Error('未配置 API URL，请在设置中填写');
       const url = baseUrl + '/models';
       const headers = { 'Content-Type': 'application/json' };
       if (settings.apiKey) headers['Authorization'] = 'Bearer ' + settings.apiKey;
@@ -722,9 +1082,8 @@ window.WORLD_ENGINE_API = (function() {
       if (!result.resp.ok) throw new Error(`HTTP ${result.resp.status}: ${responseDetail(result)}`);
       const data = requireJson(result, 'API');
       if (data.data && Array.isArray(data.data)) {
-        const list = data.data.map(m => m.id);
-        updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${list.length} 个模型` });
-        return list;
+        updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${data.data.length} 个模型` });
+        return data.data;
       }
       throw new Error('无法解析模型列表');
     } catch (error) {
@@ -736,6 +1095,19 @@ window.WORLD_ENGINE_API = (function() {
       });
       throw error;
     }
+  }
+
+  /**
+   * 获取模型列表（OpenAI 兼容格式）
+   */
+  async function fetchModelList(settingsOverride) {
+    const items = await fetchModelObjects(settingsOverride);
+    return items.map(m => typeof m === 'string' ? m : String(m?.id || '')).filter(Boolean);
+  }
+
+  async function fetchTypedModelList(settingsOverride, kind) {
+    const items = await fetchModelObjects(settingsOverride);
+    return classifyModelsByKind(items, kind);
   }
 
   async function postJsonEndpoint(url, apiKey, payload, signal, timeoutMs, label, meta) {
@@ -866,8 +1238,106 @@ window.WORLD_ENGINE_API = (function() {
       .sort((a, b) => b.score - a.score);
   }
 
+  function isRetryableError(error, signal) {
+    if (signal?.aborted || error?.name === 'AbortError' || error?.nonRetryable === true) return false;
+    const msg = String(error?.message || error || '');
+    if (/(?:未配置|请完整配置|尚未配置|请在设置中填写|请在酒馆环境中运行|缺少模型|API 地址或模型)/.test(msg)) {
+      return false;
+    }
+    if (/\bHTTP\s*(?:400|401|403|404|405|410|413|414|415|422)\b/i.test(msg)) {
+      return false;
+    }
+    if (/finish_reason:\s*(?:SAFETY|RECITATION|PROHIBITED_CONTENT|BLOCKLIST|SPII|content_filter)/i.test(msg)) {
+      return false;
+    }
+    return true;
+  }
+
+  function waitRetryBackoff(delayMs, signal) {
+    const ms = Math.max(0, Number(delayMs) || 0);
+    if (!(ms > 0)) return Promise.resolve();
+    if (signal?.aborted) {
+      const err = new Error('请求已中止');
+      err.name = 'AbortError';
+      return Promise.reject(err);
+    }
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const onAbort = () => {
+        if (timer) clearTimeout(timer);
+        const err = new Error('请求已中止');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      timer = setTimeout(() => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+    });
+  }
+
+  async function executeWithRetry(fn, opts) {
+    const retries = Math.max(0, parseInt(opts?.retries, 10) || 0);
+    const baseDelayMs = Math.max(0, Number(opts?.baseDelayMs ?? 1500));
+    const maxDelayMs = Math.max(baseDelayMs, Number(opts?.maxDelayMs ?? 15000));
+    const signal = opts?.signal || null;
+    const shouldContinue = typeof opts?.shouldContinue === 'function' ? opts.shouldContinue : () => true;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await fn({ attempt, maxAttempts: retries + 1 });
+      } catch (error) {
+        const canRetry = attempt < retries && shouldContinue() && isRetryableError(error, signal);
+        if (!canRetry) {
+          if (attempt > 0 && error && typeof error.message === 'string' && !error.message.includes('已自动重试')) {
+            error.message += `（已自动重试 ${attempt} 次）`;
+          }
+          throw error;
+        }
+        const delayMs = baseDelayMs > 0 ? Math.min(maxDelayMs, Math.round(baseDelayMs * Math.pow(2, attempt))) : 0;
+        try {
+          opts?.onRetry?.({ attempt: attempt + 1, maxRetries: retries, delayMs, error });
+        } catch (_) {}
+        if (delayMs > 0) {
+          await waitRetryBackoff(delayMs, signal);
+          if (!shouldContinue()) throw error;
+        }
+      }
+    }
+  }
+
+  async function testConnection(settingsOverride, meta) {
+    const base = settingsOverride && typeof settingsOverride === 'object' ? { ...settingsOverride } : getSettings(true);
+    if (!String(base.apiUrl || '').trim()) throw new Error('请先填写 API URL');
+    if (!String(base.model || '').trim()) throw new Error('请先填写模型名称');
+    const startedAt = Date.now();
+    const testMaxTokens = Math.max(256, Math.min(2048, parseInt(base.maxTokens, 10) || 1024));
+    const raw = await callApi(
+      '请仅回复 JSON：{"ok":true}',
+      testMaxTokens,
+      0,
+      meta?.signal || null,
+      {
+        ...base,
+        __requestMeta: {
+          module: meta?.module || 'world',
+          purpose: meta?.purpose || '连接测试'
+        }
+      }
+    );
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    return {
+      ok: true,
+      durationMs,
+      length: String(raw || '').length,
+      preview: String(raw || '').trim().slice(0, 120)
+    };
+  }
+
   return {
-    callApi, callEmbeddingApi, callRerankApi, parseJSON, getSettings, fetchModelList,
+    callApi, callEmbeddingApi, callRerankApi, parseJSON, getSettings, fetchModelList, fetchTypedModelList, classifyModelsByKind,
+    testConnection, executeWithRetry, isRetryableError,
     setNextRequestMeta, getRequestLogs, clearRequestLogs, updateRequestLog, recordRequestLog, onRequestLogChange
   };
 })();

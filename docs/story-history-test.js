@@ -35,7 +35,7 @@ function harness(options = {}) {
         disclosure: { condition: { type: 'authorFlag', flagId: 'reveal', value: true }, clueText: '有纸屑' } },
       { id: 'side', trackId: 's', chapterIds: ['c1'], title: '访问工人', intent: '与工人交谈', completionCriteria: '工人明确给出信息' }] };
   box.OUTLINE_ENGINE_DATA.commitPlan(plan, 0);
-  box.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: true, autoCheck: false, cooldownTicks: 0, ...options.settings });
+  box.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: true, autoCheck: false, cooldownTicks: 0, apiUrl: 'https://mock.invalid/v1', apiKey: 'OUTLINE_KEY_NOT_SAVED', model: 'mock', ...options.settings });
   if (options.legacy) {
     const world = box.WORLD_ENGINE_CORE.getDefaultState(); world.blackbox.secretActions.push({ action: 'LEGACY_PRIVATE_ACTION' });
     box.WORLD_ENGINE_STORE.setItem('world_engine_' + ctx.chatId, JSON.stringify(world));

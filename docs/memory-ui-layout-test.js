@@ -23,6 +23,35 @@ assert.ok(ui.includes('we-memory-delay-floors') && ui.includes('we-memory-coordi
 assert.ok(ui.includes('we-world-coordination-mode') && ui.includes('we-world-accept-outline') && ui.includes('we-world-sync-outline') && ui.includes('we-world-accept-memory'), '世界设置联动页应支持三模块协同策略及与记忆、大纲的双向配置');
 assert.ok(ui.includes('we-memory-inject-outline') && ui.includes('we-memory-accept-outline') && ui.includes('we-memory-accept-world-hint'), '记忆设置联动页应支持与世界、大纲的双向配置');
 assert.ok(ui.includes("key: 'recall'") && ui.includes('we-memory-embedding-url') && ui.includes('we-memory-rerank-model'), '记忆设置应提供 Embedding/Rerank 记忆检索选项卡');
+assert.ok(
+  ui.includes('we-memory-fetch-embedding-models') &&
+  ui.includes('we-memory-embedding-model-list') &&
+  ui.includes('we-memory-fetch-rerank-models') &&
+  ui.includes('we-memory-rerank-model-list'),
+  '记忆检索设置应提供 Embedding 与 Rerank 模型列表拉取及下拉选择控件'
+);
+assert.ok(
+  ui.includes('we-memory-embedding-timeout-sec') &&
+  ui.includes('we-memory-rerank-timeout-sec') &&
+  ui.includes('we-memory-rerank-weight'),
+  '记忆检索设置应提供独立 Embedding/Rerank 超时与混合权重调节控件'
+);
+assert.ok(
+  ui.includes("sec('set-api', '世界引擎API'") &&
+  !ui.includes("sec('set-api', 'API 配置'"),
+  '世界引擎 API 分区标题应改为「世界引擎API」'
+);
+assert.ok(
+  ui.includes('id="we-stream"') &&
+  ui.includes('id="we-test-api"') &&
+  ui.includes('id="we-memory-copy-world-api"') &&
+  ui.includes('id="we-stream-idle-timeout-sec"') &&
+  ui.includes('id="we-json-mode"') &&
+  ui.includes('id="we-top-p"') &&
+  ui.includes('id="we-reasoning-effort"'),
+  '世界与记忆引擎 API 设置应包含流式、连接测试、预填世界连接、流式空闲超时、JSON 模式、top_p 与推理力度控件'
+);
+assert.match(css, /\.we-api-adv-fold/, 'CSS 应包含高级 API 参数折叠面板样式');
 assert.match(css, /\.we-memory-arc-card/, 'CSS 应包含角色弧光卡片样式');
 assert.match(css, /\.we-memory-kw-tag/, 'CSS 应包含记忆关键词标签样式');
 assert.match(css, /\.we-memory-recall-hit/, 'CSS 应包含向量/Rerank 召回预览样式');

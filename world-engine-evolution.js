@@ -1022,45 +1022,61 @@ ${JSON.stringify(sample || [], null, 2)}
     const worldPurpose = extraInstruction && extraInstruction.includes('远方') ? '远方事件推演'
       : (extraInstruction && extraInstruction.includes('近端') ? '近端事件推演' : '世界推演');
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const runAttempt = async ({ attempt, maxAttempts }) => {
       let logId = null;
+      api.setNextRequestMeta?.({
+        module: 'world',
+        purpose: worldPurpose,
+        attempt: attempt + 1,
+        maxAttempts,
+        onLogId: id => { logId = id; }
+      });
+      const rawResult = await api.callApi(prompt, undefined, undefined, _abortController.signal);
+      _lastRawResult = rawResult;
       try {
-        api.setNextRequestMeta?.({
-          module: 'world',
-          purpose: worldPurpose,
-          attempt: attempt + 1,
-          maxAttempts: maxRetries + 1,
-          onLogId: id => { logId = id; }
+        update = api.parseJSON(rawResult);
+        if (!update || typeof update !== 'object' || Array.isArray(update)) {
+          throw new Error('API 返回无法解析为有效 JSON，已保留重 roll 前的当前状态');
+        }
+        if (linked) { storyResult = projection.splitWorldResponse(update); update = storyResult.publicUpdate; }
+        if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field)) &&
+            !(linked && (storyResult.privateEvents.length || storyResult.observations.length))) {
+          throw new Error('API 返回不包含任何世界状态字段，已保留重 roll 前的当前状态');
+        }
+      } catch (parseErr) {
+        api.updateRequestLog?.(logId, {
+          status: 'error',
+          phase: '解析失败',
+          error: String(parseErr?.message || parseErr)
         });
-        const rawResult = await api.callApi(prompt, undefined, undefined, _abortController.signal);
-        _lastRawResult = rawResult;
+        throw parseErr;
+      }
+    };
+
+    if (typeof api.executeWithRetry === 'function') {
+      await api.executeWithRetry(runAttempt, {
+        retries: maxRetries,
+        signal: _abortController.signal,
+        shouldContinue: () => !(_abortController && _abortController.signal.aborted),
+        onRetry: ({ attempt, maxRetries: total, delayMs, error }) => {
+          const waitSec = delayMs ? `（等待 ${(delayMs / 1000).toFixed(1)}s）` : '';
+          console.warn(`[世界引擎] API fault，自动重试 ${attempt}/${total}${waitSec}:`, error?.message || error);
+          window.__WE_SetExternalStatus?.(`API fault，自动重试 ${attempt}/${total}`);
+        }
+      });
+    } else {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          update = api.parseJSON(rawResult);
-          if (!update || typeof update !== 'object' || Array.isArray(update)) {
-            throw new Error('API 返回无法解析为有效 JSON，已保留重 roll 前的当前状态');
+          await runAttempt({ attempt, maxAttempts: maxRetries + 1 });
+          break;
+        } catch (error) {
+          if (_abortController && _abortController.signal.aborted) throw error;
+          if (attempt >= maxRetries) {
+            if (maxRetries > 0 && error && error.message) error.message += `（已自动重试 ${maxRetries} 次）`;
+            throw error;
           }
-          if (linked) { storyResult = projection.splitWorldResponse(update); update = storyResult.publicUpdate; }
-          if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field)) &&
-              !(linked && (storyResult.privateEvents.length || storyResult.observations.length))) {
-            throw new Error('API 返回不包含任何世界状态字段，已保留重 roll 前的当前状态');
-          }
-        } catch (parseErr) {
-          api.updateRequestLog?.(logId, {
-            status: 'error',
-            phase: '解析失败',
-            error: String(parseErr?.message || parseErr)
-          });
-          throw parseErr;
+          window.__WE_SetExternalStatus?.(`API fault，自动重试 ${attempt + 1}/${maxRetries}`);
         }
-        break;
-      } catch (error) {
-        if (_abortController && _abortController.signal.aborted) throw error;
-        if (attempt >= maxRetries) {
-          if (maxRetries > 0 && error && error.message) error.message += `（已自动重试 ${maxRetries} 次）`;
-          throw error;
-        }
-        console.warn(`[世界引擎] API fault，自动重试 ${attempt + 1}/${maxRetries}:`, error && error.message ? error.message : error);
-        if (window.__WE_SetExternalStatus) window.__WE_SetExternalStatus(`API fault，自动重试 ${attempt + 1}/${maxRetries}`);
       }
     }
     console.log('[世界引擎] API JSON 解析成功，世界摘要:', update.world_digest || '[未返回]');

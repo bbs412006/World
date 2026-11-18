@@ -36,7 +36,8 @@ function makeSandbox(fetchImpl) {
         chatId: 'reqlog-chat',
         chat,
         setExtensionPrompt() {},
-        extensionPrompts: {}
+        extensionPrompts: {},
+        getRequestHeaders: () => ({ 'X-CSRF-Token': 'test-csrf' })
       })
     },
     WORLD_ENGINE_STORE: {
@@ -75,7 +76,124 @@ function makeSandbox(fetchImpl) {
 
 (async () => {
   let mode = 'thought-json';
-  const sandbox = makeSandbox(async (url) => {
+  const capturedBodies = [];
+  const sandbox = makeSandbox(async (url, init) => {
+    capturedBodies.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (mode === 'stream-sse-reader') {
+      const sseBytes = Buffer.from([
+        ': keepalive',
+        'data: {"id":"chatcmpl-1","model":"gpt-stream","choices":[{"index":0,"delta":{"role":"assistant"}}]}',
+        '',
+        'data: {"choices":[{"index":0,"delta":{"content":"{\\"events\\":[],"}}]}',
+        '',
+        'data: {"choices":[{"index":0,"delta":{"content":"\\"world_digest\\":\\"夜雨流式推演完成\\"}"}}]}',
+        '',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        '',
+        'data: {"usage":{"total_tokens":42},"choices":[]}',
+        '',
+        'data: [DONE]',
+        ''
+      ].join('\n'), 'utf8');
+      // 故意在多字节中文 UTF-8 字符中间劈开字节流，校验 TextDecoder({ stream: true })
+      const splitAt = sseBytes.indexOf(Buffer.from('夜雨流式', 'utf8')) + 4;
+      const parts = [sseBytes.subarray(0, splitAt), sseBytes.subarray(splitAt)];
+      let idx = 0;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: k => String(k).toLowerCase() === 'content-type' ? 'text/event-stream; charset=utf-8' : null },
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (idx >= parts.length) return { done: true, value: undefined };
+                return { done: false, value: parts[idx++] };
+              },
+              releaseLock() {}
+            };
+          }
+        }
+      };
+    }
+    if (mode === 'stream-proxy-text') {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: k => String(k).toLowerCase() === 'content-type' ? 'text/event-stream' : null },
+        async text() {
+          return 'data: {"choices":[{"delta":{"content":"{\\"nodeUpdates\\":[],"}}]}\n\ndata: {"choices":[{"delta":{"content":"\\"proposals\\":[]}"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n';
+        }
+      };
+    }
+    if (mode === 'stream-json-fallback') {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: k => String(k).toLowerCase() === 'content-type' ? 'application/json' : null },
+        async text() {
+          return JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '{"ok":"fallback-json"}' } }] });
+        }
+      };
+    }
+    if (mode === 'stream-sse-error') {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: k => String(k).toLowerCase() === 'content-type' ? 'text/event-stream' : null },
+        async text() {
+          return 'data: {"error":{"message":"upstream stream broken"}}\n\n';
+        }
+      };
+    }
+    if (mode === 'stream-idle-stall') {
+      let chunkIdx = 0;
+      const firstChunk = Buffer.from('data: {"choices":[{"delta":{"content":"hello "}}]}\n\n', 'utf8');
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: k => String(k).toLowerCase() === 'content-type' ? 'text/event-stream' : null },
+        body: {
+          getReader() {
+            return {
+              read() {
+                if (chunkIdx++ === 0) {
+                  return Promise.resolve({ done: false, value: firstChunk });
+                }
+                return new Promise((_, reject) => {
+                  if (init?.signal?.aborted) {
+                    const e = new Error('aborted'); e.name = 'AbortError'; reject(e); return;
+                  }
+                  init?.signal?.addEventListener('abort', () => {
+                    const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+                  }, { once: true });
+                });
+              },
+              cancel() { return Promise.resolve(); },
+              releaseLock() {}
+            };
+          }
+        }
+      };
+    }
+    if (mode === 'json-ok') {
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '{"ok":true}' } }] });
+        }
+      };
+    }
+    if (mode === 'http-401') {
+      return {
+        ok: false,
+        status: 401,
+        async text() {
+          return JSON.stringify({ error: { message: 'invalid api key' } });
+        }
+      };
+    }
     if (mode === 'thought-json') {
       return {
         ok: true,
@@ -211,6 +329,130 @@ function makeSandbox(fetchImpl) {
 
   api.clearRequestLogs();
   assert.strictEqual(api.getRequestLogs().length, 0, '清空日志后应归零');
+
+  // 7. 流式传输（stream: true）：直连分块 SSE、酒馆代理流式、JSON 回退及流式错误捕获
+  mode = 'stream-sse-reader';
+  api.setNextRequestMeta({ module: 'world', purpose: '流式世界推演' });
+  const streamDirectRaw = await api.callApi('流式测试', 1000, 0.7, null, {
+    apiUrl: 'https://proxy.example.com/v1',
+    model: 'gpt-stream',
+    stream: true
+  });
+  assert.strictEqual(JSON.parse(streamDirectRaw).world_digest, '夜雨流式推演完成', 'SSE 分片流式与多字节 UTF-8 拼装应完整还原');
+  assert.strictEqual(capturedBodies[capturedBodies.length - 1].body.stream, true, '勾选流式后直连请求体应携带 stream: true');
+
+  mode = 'stream-proxy-text';
+  api.setNextRequestMeta({ module: 'outline', purpose: '流式大纲核对' });
+  const streamProxyRaw = await api.callApi('代理流式测试', 1000, 0.2, null, {
+    apiUrl: 'https://proxy.example.com/v1',
+    model: 'gemini-stream',
+    connectionMode: 'proxy',
+    stream: true
+  });
+  assert.deepStrictEqual(JSON.parse(streamProxyRaw), { nodeUpdates: [], proposals: [] }, '酒馆代理流式 SSE 应完整拼装');
+  assert.strictEqual(capturedBodies[capturedBodies.length - 1].body.stream, true, '经酒馆代理在勾选流式后应转发 stream: true');
+
+  mode = 'stream-json-fallback';
+  api.setNextRequestMeta({ module: 'memory', purpose: '流式兼容回退' });
+  const streamFallbackRaw = await api.callApi('兼容非流回退', 1000, 0.2, null, {
+    apiUrl: 'https://proxy.example.com/v1',
+    model: 'gpt-4o',
+    stream: true
+  });
+  assert.strictEqual(JSON.parse(streamFallbackRaw).ok, 'fallback-json', '上游忽略 stream=true 返回普通 JSON 时应自动兼容解析');
+
+  mode = 'stream-sse-error';
+  api.setNextRequestMeta({ module: 'world', purpose: '流式错误信息' });
+  await assert.rejects(
+    api.callApi('流式报错测试', 1000, 0.7, null, { apiUrl: 'https://proxy.example.com/v1', model: 'gpt-stream', stream: true }),
+    /upstream stream broken/
+  );
+
+  const streamLogs = api.getRequestLogs();
+  assert.strictEqual(streamLogs.length, 4, '4 次流式调用应均写入请求日志');
+  assert.ok(streamLogs.every(l => l.stream === true), '流式请求日志应准确标记 stream=true');
+  assert.ok(streamLogs.some(l => l.module === 'world' && l.status === 'success' && l.finishReason === 'stop'));
+  assert.ok(streamLogs.some(l => l.module === 'outline' && l.connectionMode === 'proxy' && l.status === 'success'));
+  assert.ok(streamLogs.some(l => l.module === 'world' && l.status === 'error' && l.error.includes('upstream stream broken')));
+
+  // 8. 高级 API 优化：jsonMode / topP / reasoningEffort、流式空闲超时、连接测试与智能重试
+  mode = 'json-ok';
+  const beforeAdvLen = capturedBodies.length;
+  await api.callApi('测试默认不传可选参数', 1000, 0.7, null, {
+    apiUrl: 'https://proxy.example.com/v1',
+    model: 'claude-sonnet',
+    jsonMode: false,
+    topP: null,
+    reasoningEffort: ''
+  });
+  const defaultBody = capturedBodies[beforeAdvLen].body;
+  assert.strictEqual('response_format' in defaultBody, false, '未勾选 jsonMode 时不得发送 response_format');
+  assert.strictEqual('top_p' in defaultBody, false, 'topP 为空时不得发送 top_p（避免与部分渠道冲突）');
+  assert.strictEqual('reasoning_effort' in defaultBody, false, 'reasoningEffort 为空时不得发送 reasoning_effort');
+
+  await api.callApi('测试高级参数透传 JSON', 1000, 0.5, null, {
+    apiUrl: 'https://proxy.example.com/v1',
+    model: 'gpt-5',
+    jsonMode: true,
+    topP: 0.85,
+    reasoningEffort: 'low'
+  });
+  const advBody = capturedBodies[beforeAdvLen + 1].body;
+  assert.deepStrictEqual(advBody.response_format, { type: 'json_object' }, '启用 jsonMode 应传 response_format');
+  assert.strictEqual(advBody.top_p, 0.85, '指定 topP 应传 top_p');
+  assert.strictEqual(advBody.reasoning_effort, 'low', '指定 reasoningEffort 应传 reasoning_effort');
+
+  // 流式分片空闲超时应独立于长总超时快速中止卡死流
+  mode = 'stream-idle-stall';
+  await assert.rejects(
+    api.callApi('卡死流测试', 1000, 0.7, null, {
+      apiUrl: 'https://proxy.example.com/v1',
+      model: 'gpt-stream',
+      stream: true,
+      apiTimeoutMs: 5000,
+      streamIdleTimeoutMs: 60
+    }),
+    /流式接收空闲超时/
+  );
+
+  // 连接测试
+  mode = 'json-ok';
+  const testRes = await api.testConnection({
+    apiUrl: 'https://proxy.example.com/v1',
+    apiKey: 'k',
+    model: 'gpt-4o',
+    jsonMode: true
+  }, { module: 'memory' });
+  assert.strictEqual(testRes.ok, true);
+  assert.ok(testRes.preview.includes('"ok":true'));
+  assert.ok(api.getRequestLogs().some(l => l.module === 'memory' && l.purpose === '连接测试' && l.jsonMode === true));
+
+  // 智能重试：401 永久错误与 SAFETY 过滤立即失败不重发；429 瞬时限流经退避重试恢复成功
+  mode = 'http-401';
+  let authAttempts = 0;
+  await assert.rejects(
+    api.executeWithRetry(async () => {
+      authAttempts++;
+      return api.callApi('鉴权失败', 500, 0.2, null, { apiUrl: 'https://proxy.example.com/v1', model: 'gpt-4o' });
+    }, { retries: 3, baseDelayMs: 5 }),
+    /HTTP 401/
+  );
+  assert.strictEqual(authAttempts, 1, 'HTTP 401 等不可恢复错误不应浪费重试次数');
+
+  let transientAttempts = 0;
+  const retryEvents = [];
+  const recovered = await api.executeWithRetry(async () => {
+    transientAttempts++;
+    mode = transientAttempts < 2 ? 'http-429' : 'json-ok';
+    return api.callApi('限流恢复', 500, 0.2, null, { apiUrl: 'https://proxy.example.com/v1', model: 'gpt-4o' });
+  }, {
+    retries: 2,
+    baseDelayMs: 10,
+    onRetry: info => retryEvents.push(info)
+  });
+  assert.strictEqual(transientAttempts, 2, 'HTTP 429 限流应在重试后恢复成功');
+  assert.strictEqual(retryEvents.length, 1);
+  assert.ok(recovered.includes('"ok":true'));
 
   const uiSrc = fs.readFileSync(path.join(root, 'world-engine-ui.js'), 'utf8');
   assert.ok(uiSrc.includes('id="we-reqlog-dock"') && uiSrc.includes('id="we-reqlog-drawer"') && uiSrc.includes('data-reqlog-filter="error"'), '面板顶部应集成统一请求日志栏与可展开抽屉');

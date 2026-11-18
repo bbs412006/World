@@ -253,11 +253,9 @@ window.OUTLINE_ENGINE = (function() {
 
   function requestSettings() {
     const own = settings();
-    if (!['world', 'custom'].includes(own.apiSource)) throw new Error('请选择大纲 API 来源');
-    const source = own.apiSource === 'world' ? window.WORLD_ENGINE_API.getSettings(true) : own;
     const result = {};
-    for (const key of ['apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs']) result[key] = source[key];
-    if (!clean(result.apiUrl) || !clean(result.model)) throw new Error(own.apiSource === 'custom' ? '请完整配置大纲自定义 API 地址和模型' : '世界 API 地址或模型尚未配置');
+    for (const key of ['apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'stream', 'streamIdleTimeoutMs', 'jsonMode', 'topP', 'reasoningEffort']) result[key] = own[key];
+    if (!clean(result.apiUrl) || !clean(result.model)) throw new Error('请完整配置剧情大纲 API 地址和模型');
     return result;
   }
   function beginRequest(label, state, refs) {
@@ -266,7 +264,7 @@ window.OUTLINE_ENGINE = (function() {
     const options = requestSettings();
     const task = { controller: new AbortController(), token: sessionToken, chatId: chatId(),
       revision: state.revision, basis: basisDigest(state), refs: clone(refs || []),
-      sourceDigest: timeline().digestRefs(refs || []), historyHead: history()?.getStatus?.().currentCommitId || '', apiSource: settings().apiSource, options, label };
+      sourceDigest: timeline().digestRefs(refs || []), historyHead: history()?.getStatus?.().currentCommitId || '', options, label };
     request = task; lastError = '';
     setExternalStatus(`剧情大纲：正在${label || '处理'}…`);
     refresh();
@@ -277,7 +275,7 @@ window.OUTLINE_ENGINE = (function() {
     const state = data().loadState();
     if (Number(state.revision) !== Number(task.revision) || basisDigest(state) !== task.basis) return false;
     if ((history()?.getStatus?.().currentCommitId || '') !== task.historyHead) return false;
-    try { if (settings().apiSource !== task.apiSource || hash(requestSettings()) !== hash(task.options)) return false; }
+    try { if (hash(requestSettings()) !== hash(task.options)) return false; }
     catch (_) { return false; }
     if (checkSources && (!timeline().auditRefs(task.refs).valid || timeline().digestRefs(timeline().auditRefs(task.refs).refs) !== task.sourceDigest ||
         timeline().digestRefs(selectSources(state).refs) !== task.sourceDigest)) return false;
@@ -286,18 +284,31 @@ window.OUTLINE_ENGINE = (function() {
   async function invoke(task, prompt) {
     lastDebug = { kind: task.label, prompt, rawResult: '', sourceDigest: task.sourceDigest, chatId: task.chatId, revision: task.revision };
     const retries = Math.max(0, Number(settings().apiAutoRetries) || 0);
+    const runAttempt = async ({ attempt, maxAttempts }) => {
+      window.WORLD_ENGINE_API?.setNextRequestMeta?.({
+        module: 'outline',
+        purpose: task.label || '剧情大纲检查',
+        attempt: attempt + 1,
+        maxAttempts,
+        onLogId: id => { task.lastLogId = id; }
+      });
+      const raw = await window.WORLD_ENGINE_API.callApi(prompt, task.options.maxTokens, task.options.temperature, task.controller.signal, { ...task.options });
+      if (request === task) lastDebug.rawResult = raw;
+      return raw;
+    };
+    if (typeof window.WORLD_ENGINE_API?.executeWithRetry === 'function') {
+      return window.WORLD_ENGINE_API.executeWithRetry(runAttempt, {
+        retries,
+        signal: task.controller.signal,
+        shouldContinue: () => isCurrent(task, task.refs.length > 0),
+        onRetry: ({ attempt, maxRetries }) => {
+          setExternalStatus(`剧情大纲：重试 ${attempt}/${maxRetries}…`);
+        }
+      });
+    }
     for (let attempt = 0; ; attempt++) {
       try {
-        window.WORLD_ENGINE_API?.setNextRequestMeta?.({
-          module: 'outline',
-          purpose: task.label || '剧情大纲检查',
-          attempt: attempt + 1,
-          maxAttempts: retries + 1,
-          onLogId: id => { task.lastLogId = id; }
-        });
-        const raw = await window.WORLD_ENGINE_API.callApi(prompt, task.options.maxTokens, task.options.temperature, task.controller.signal, { ...task.options });
-        if (request === task) lastDebug.rawResult = raw;
-        return raw;
+        return await runAttempt({ attempt, maxAttempts: retries + 1 });
       } catch (error) {
         if (task.controller.signal.aborted || attempt >= retries || !isCurrent(task, task.refs.length > 0)) throw error;
       }

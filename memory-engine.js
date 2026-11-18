@@ -1143,14 +1143,14 @@ window.MEMORY_ENGINE = (function() {
     const purpose = tasks.memory && tasks.small
       ? '人物、实体与纪要'
       : (tasks.memory ? '人物与实体提取' : (tasks.small ? '阶段纪要' : '总述'));
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    const runAttempt = async ({ attempt, maxAttempts }) => {
       let logId = null;
       try {
         window.WORLD_ENGINE_API?.setNextRequestMeta?.({
           module: 'memory',
           purpose,
           attempt: attempt + 1,
-          maxAttempts: retries + 1,
+          maxAttempts,
           onLogId: id => { logId = id; }
         });
         const raw = await window.WORLD_ENGINE_API.callApi(
@@ -1172,6 +1172,24 @@ window.MEMORY_ENGINE = (function() {
         return parsed;
       } catch (error) {
         lastDebug.error = String(error?.message || error);
+        throw error;
+      }
+    };
+
+    if (typeof window.WORLD_ENGINE_API?.executeWithRetry === 'function') {
+      return window.WORLD_ENGINE_API.executeWithRetry(runAttempt, {
+        retries,
+        signal: abortController?.signal,
+        shouldContinue: () => !abortController?.signal?.aborted,
+        onRetry: ({ attempt, maxRetries }) => {
+          ui()?.setMemoryEvolvingUI?.(true, `重试提取 ${attempt}/${maxRetries}`);
+        }
+      });
+    }
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await runAttempt({ attempt, maxAttempts: retries + 1 });
+      } catch (error) {
         if (abortController?.signal?.aborted || attempt >= retries) throw error;
       }
     }
@@ -2178,11 +2196,23 @@ window.MEMORY_ENGINE = (function() {
     };
     const matched = (state.personal_memory || []).filter(character =>
       (character.names || []).some(appearsInScan) || Number(vectorRecall?.personScores?.[character.id]) > 0
-    );
+    ).sort((a, b) => {
+      const aAppear = (a.names || []).some(appearsInScan) ? 1 : 0;
+      const bAppear = (b.names || []).some(appearsInScan) ? 1 : 0;
+      const aScore = aAppear * 0.5 + (Number(vectorRecall?.personScores?.[a.id]) || 0);
+      const bScore = bAppear * 0.5 + (Number(vectorRecall?.personScores?.[b.id]) || 0);
+      return bScore - aScore;
+    });
     const matchedEntities = ENTITY_TYPES.flatMap(type => state.entity_memory[type]
       .filter(entity => unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan)
         || Number(vectorRecall?.entityScores?.[`${type}:${entity.id}`]) > 0)
-      .map(entity => ({ type, entity })));
+      .map(entity => ({
+        type,
+        entity,
+        rankScore: (unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan) ? 0.5 : 0)
+          + (Number(vectorRecall?.entityScores?.[`${type}:${entity.id}`]) || 0)
+      })))
+      .sort((a, b) => b.rankScore - a.rankScore);
     const blocks = [], globalSeen = new Set(), limit = Math.max(1, parseInt(st.maxPerCharacter) || 20);
 
     // P0: 持续生效事实（与当前场景人物/扫描词元/语义向量命中者优先排前）

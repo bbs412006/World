@@ -35,7 +35,24 @@ const sandbox = {
   AbortController,
   document: { getElementById: () => null },
   fetch: async (url, init) => {
-    fetchCalls.push({ url, body: JSON.parse(init.body) });
+    fetchCalls.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (String(url).endsWith('/models')) {
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            data: [
+              { id: 'gpt-4o', sub_type: 'chat' },
+              { id: 'BAAI/bge-m3', sub_type: 'embedding' },
+              { id: 'Qwen/Qwen3-Embedding-8B' },
+              { id: 'BAAI/bge-reranker-v2-m3', sub_type: 'rerank' },
+              { id: 'Qwen/Qwen3-Reranker-4B' }
+            ]
+          });
+        }
+      };
+    }
     if (String(url).endsWith('/embeddings')) {
       embeddingRequests++;
       const inputs = JSON.parse(init.body).input;
@@ -219,6 +236,65 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
 
   const importedVec = vec.importVectorData(exportedVec, { expectedChatId: 'vec-chat-2' });
   assert.strictEqual(Object.keys(importedVec.records).length, 3, '独立的向量 JSON 应可准确导入绑定到目标聊天');
+
+  // 5. 校验相似度分布诊断 (similarity_distribution)、词法保底阈值与独立超时设置
+  assert.ok(recallRes.diagnostics && recallRes.diagnostics.similarity_distribution, '应输出 similarity_distribution 诊断统计');
+  const dist = recallRes.diagnostics.similarity_distribution;
+  assert.strictEqual(dist.count, 3, '全库相似度分布样本数应等于已索引条目数');
+  assert.ok(dist.max >= dist.median && dist.median >= dist.min, '相似度分布 min/median/max 单调关系应成立');
+  assert.ok(recallRes.diagnostics.rerankDistribution && recallRes.diagnostics.finalDistribution, '应记录 Rerank 与最终融合分布');
+  assert.ok(typeof recallRes.hits[0].cosineScore === 'number' && typeof recallRes.hits[0].lexicalScore === 'number' && typeof recallRes.hits[0].rerankScore === 'number', '命中条目应保留各阶段分项得分');
+
+  // 词法保底：当精准关键词高重叠但 Rerank 略低于严格阈值时，不应被误杀，且 Embedding/Rerank 独立超时生效
+  currentChatId = 'vec-chat-guard';
+  const guardState = sandbox.MEMORY_ENGINE_DATA.defaultState();
+  guardState.ongoing_facts = [
+    { id: 'fact_000001', category: '秘方', subject: '金疮散', fact: '药草 甘草 秘方配伍', keywords: ['药草', '甘草', '金疮散'], status: 'active', importance: 4 }
+  ];
+  sandbox.MEMORY_ENGINE_DATA.saveState(guardState);
+  sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+    embeddingTimeoutMs: 15000,
+    rerankTimeoutMs: 25000,
+    rerankThreshold: 0.7,
+    rerankHybridWeight: 0.75
+  });
+  await vec.maintainVectors({ state: guardState });
+  const guardRecall = await vec.recallForQuery('药草 甘草 金疮散', { autoMaintain: false, state: guardState });
+  assert.strictEqual(guardRecall.diagnostics.lexicalGuardCount, 1, '强词法重叠命中应触发词法保底机制避免被高 Rerank 阈值误杀');
+  assert.strictEqual(guardRecall.hits[0].lexicalGuardKept, true);
+  assert.ok(guardRecall.factScores.fact_000001 > 0, '触发词法保底的持续事实应保留在最终召回分数中');
+  const logsAfterGuard = sandbox.WORLD_ENGINE_API.getRequestLogs();
+  const lastRerankLog = logsAfterGuard.find(l => String(l.target || '').endsWith('/rerank'));
+  const lastEmbLog = logsAfterGuard.find(l => String(l.target || '').endsWith('/embeddings'));
+  assert.strictEqual(lastEmbLog.timeoutSec, 15, 'Embedding 请求应使用独立的 embeddingTimeoutMs');
+  assert.strictEqual(lastRerankLog.timeoutSec, 25, 'Rerank 请求应使用独立的 rerankTimeoutMs');
+
+  // 6. Embedding / Rerank 模型列表分类拉取校验（自动归拢到 /models 并优先归类）
+  sandbox.WORLD_ENGINE_API.setNextRequestMeta({ module: 'memory', purpose: '获取 Embedding 模型列表' });
+  const embModels = await sandbox.WORLD_ENGINE_API.fetchTypedModelList({
+    apiUrl: 'https://vec.mock/v1/embeddings',
+    apiKey: 'vec-key',
+    connectionMode: 'direct',
+    apiTimeoutMs: 12000
+  }, 'embedding');
+  assert.deepStrictEqual(Array.from(embModels.matched), ['BAAI/bge-m3', 'Qwen/Qwen3-Embedding-8B'], 'Embedding 模型列表应优先归类推荐 Embedding 模型');
+  assert.ok(embModels.others.includes('gpt-4o') && embModels.others.includes('BAAI/bge-reranker-v2-m3'), '非 Embedding 模型应归入 others 以供兜底选择');
+  assert.ok(fetchCalls.some(c => c.url === 'https://vec.mock/v1/models'), '传入 /embeddings 路径时应自动规整为 /models 拉取');
+
+  sandbox.WORLD_ENGINE_API.setNextRequestMeta({ module: 'memory', purpose: '获取 Rerank 模型列表' });
+  const rerankModels = await sandbox.WORLD_ENGINE_API.fetchTypedModelList({
+    apiUrl: 'https://vec.mock/v1/rerank',
+    apiKey: 'vec-key',
+    connectionMode: 'direct',
+    apiTimeoutMs: 12000
+  }, 'rerank');
+  assert.deepStrictEqual(Array.from(rerankModels.matched), ['BAAI/bge-reranker-v2-m3', 'Qwen/Qwen3-Reranker-4B'], 'Rerank 模型列表应优先归类推荐 Rerank 模型');
+  const modelLogs = sandbox.WORLD_ENGINE_API.getRequestLogs();
+  assert.ok(
+    modelLogs.some(l => l.module === 'memory' && l.purpose === '获取 Embedding 模型列表' && l.status === 'success') &&
+    modelLogs.some(l => l.module === 'memory' && l.purpose === '获取 Rerank 模型列表' && l.status === 'success'),
+    'Embedding / Rerank 模型拉取请求应记入统一请求日志'
+  );
 
   console.log('memory vector embedding & rerank tests passed');
 })().catch(error => {
