@@ -1326,7 +1326,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       <p class="we-outline-message${status.phase === 'blocked' ? ' is-error' : ''}">${h(phases[status.phase] || status.phase || '状态待确认')}${status.reason ? ` · ${h(status.reason)}` : ''}</p>
       <dl><dt>初始基线</dt><dd>${h(status.baselineLayer ?? '未建立')}</dd><dt>可恢复起始边界</dt><dd>${h(status.recoverableFromLayer ?? '未建立')}</dd><dt>最后有效楼层</dt><dd>${h(status.lastValidLayer ?? '未记录')}</dd><dt>待重建范围起点</dt><dd>${h(status.pendingFromLayer ?? '无')}</dd><dt>当前提交</dt><dd>${h(status.currentCommitId || '无')} · 分支 ${h(status.branchId || '无')}</dd><dt>完整 journal</dt><dd>${h(status.journalCount ?? commits.length)} 个提交 · ${h(status.snapshotCount ?? 0)} 份历史快照</dd></dl>
       <p class="we-outline-hint">联合 journal 保存世界与剧情自动状态，并撤下失效的来源记忆；普通滚动备份是保存点，两者用途不同。作者大纲与手动标记在回退时保留。</p>
-      <div class="we-outline-actions">${button('history-audit', '审计当前原文')}${button('history-export', '导出联合历史备份')}${button('history-rebuild', '从待重建边界批量重建', '', 'primary')}</div>
+      <div class="we-outline-actions">${button('history-audit', '审计当前原文')}${button('history-export', '导出联合历史备份')}${button('history-reset-baseline', '保留当前世界重设基线', '', status.phase === 'blocked' ? 'primary' : '')}${button('history-rebuild', '从待重建边界批量重建', '', status.phase === 'blocked' ? '' : 'primary')}</div>
+      ${status.phase === 'blocked' ? '<p class="we-outline-hint">提示：若旧消息曾被删改或消息 ID 未及时保存导致受阻，可直接点击「保留当前世界重设基线」解锁继续推演（保留现有世界与大纲、不重跑旧楼）；若想按现有原文从头推翻重演，请点「从待重建边界批量重建」。</p>' : ''}
       <label class="we-outline-field"><span>导入联合历史备份（先预览再确认）</span><input id="we-outline-history-file" type="file" accept=".json,application/json"></label>
       <div class="we-outline-table-scroll"><table><thead><tr><th>提交／分支</th><th>位置</th><th>类型与状态</th><th>恢复</th></tr></thead><tbody>${commits.map(commit => `<tr><td>${h(commit.id)}<small>${h(commit.branchId || '')}</small></td><td>${h(commit.layer ?? '—')}</td><td>${h(commit.kind || '')} · ${h(commit.status || '')}</td><td>${button('history-restore', '恢复此提交', ` data-outline-commit="${h(commit.id)}"`)}</td></tr>`).join('') || '<tr><td colspan="4">尚无联合提交记录</td></tr>'}</tbody></table></div>
     </section>`;
@@ -2004,6 +2005,21 @@ window.OUTLINE_ENGINE_UI = (function() {
     } else if (action === 'history-restore') {
       if (!history()?.restoreCommit) throw new Error('联合历史恢复接口尚未就绪。');
       if (!window.confirm || window.confirm('恢复到此联合提交？后续自动状态将撤回并标记待重建，作者大纲与手动标记会保留。')) await run(async (origin, id) => { ensureCurrentChat(id); await history().restoreCommit(ds.outlineCommit); await window.WORLD_ENGINE_STORE?.flush?.(); origin.message = '已恢复联合提交，后续原文需显式批量重建。'; }, '正在恢复联合历史…');
+    } else if (action === 'history-reset-baseline') {
+      if (!history()?.resetBaseline) throw new Error('联合历史重设基线接口尚未就绪。');
+      if (!window.confirm || window.confirm('保留当前世界状态、作者大纲与手动标记，并以当前聊天正文重设联合基线？\n（将清空已失效的自动推进/提案记录，并立即固化保存每层消息身份与存档）')) {
+        await run(async (origin, id) => {
+          ensureCurrentChat(id);
+          history().resetBaseline();
+          await window.MEMORY_ENGINE_TIMELINE?.flushSave?.();
+          await window.WORLD_ENGINE_STORE?.flush?.();
+          if (settings().syncToChat) cache()?.pushLiveNow?.();
+          if (window.WORLD_ENGINE_API?.getSettings?.().syncToChat) window.WORLD_ENGINE_CHATCACHE?.forScope?.('world')?.pushLiveNow?.();
+          engine()?.applyInjection?.();
+          window.WORLD_ENGINE?.applyInjection?.();
+          origin.message = '已保留当前世界并重设联合历史基线（消息身份与存档已固化保存）。';
+        }, '正在重设联合历史基线…');
+      }
     } else if (action === 'history-rebuild') {
       if (!history()?.rebuild) throw new Error('联合批量重建接口尚未就绪。');
       const status = history().getStatus();

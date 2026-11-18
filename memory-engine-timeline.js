@@ -4,6 +4,7 @@ window.MEMORY_ENGINE_TIMELINE = (function() {
   const HIDDEN_KEY = 'world_engine_memory_hidden';
   let idCounter = 0;
   let saveTimer = null;
+  let pendingSave = false;
 
   const clean = value => String(value == null ? '' : value).trim();
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -35,16 +36,35 @@ window.MEMORY_ENGINE_TIMELINE = (function() {
     }));
   }
 
+  async function saveChatNow() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    pendingSave = false;
+    const ctx = context();
+    try {
+      if (typeof ctx?.saveChatConditional === 'function') await ctx.saveChatConditional();
+      else if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
+      return true;
+    } catch (_) {
+      /* 来源 ID 已在内存中生效；保存失败不阻断记忆流程。 */
+      return false;
+    }
+  }
+
   function scheduleSave() {
+    pendingSave = true;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      const ctx = context();
-      try {
-        if (typeof ctx?.saveChatConditional === 'function') ctx.saveChatConditional();
-        else if (typeof ctx?.saveChat === 'function') ctx.saveChat();
-      } catch (_) { /* 来源 ID 已在内存中生效；保存失败不阻断记忆流程。 */ }
+      void saveChatNow();
     }, 250);
+  }
+
+  async function flushSave() {
+    if (!pendingSave && !saveTimer) return true;
+    return saveChatNow();
   }
 
   function ensureMessageId(message) {
@@ -217,6 +237,6 @@ window.MEMORY_ENGINE_TIMELINE = (function() {
   return {
     SOURCE_ID_KEY, HIDDEN_KEY,
     hashText, messageHash, ensureMessageId, sourceRef, captureRange, digestRefs,
-    auditRefs, refsToConversation, unionRefs, syncHidden, chatId
+    auditRefs, refsToConversation, unionRefs, syncHidden, flushSave, chatId
   };
 })();

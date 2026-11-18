@@ -177,7 +177,9 @@ window.STORY_ENGINE_HISTORY = (function() {
     bundle = { schemaVersion: 2, chatId: id(), epoch: uid('epoch'), revision: 0, branchId: uid('branch'), headId: rootId,
       baseline: { id: rootId, prefixLength: source.length, prefixHash: prefixHashes(source)[source.length], sourceRefs: source, frame, hash: hash(frame) },
       snapshots: [{ atCommitId: rootId, frame: clone(frame), hash: hash(frame) }], journal: [], recovery: { status: 'ready', reason: '' }, preview: null };
-    write(bundle, frame); return bundle;
+    write(bundle, frame);
+    try { void timeline()?.flushSave?.(); } catch (_) {}
+    return bundle;
   }
   function getStatus() {
     const persistenceFailure = persistenceFailures.get(id());
@@ -346,6 +348,7 @@ window.STORY_ENGINE_HISTORY = (function() {
       const count = pathTo(bundle, commitId).filter(item => item.kind === 'world').length;
       if (count % 10 === 0 || before.outline.currentChapterId !== after.outline.currentChapterId) bundle.snapshots.push({ atCommitId: commitId, frame: clone(after), hash: hash(after) });
       write(bundle, after); pending.delete(token.id);
+      try { void timeline()?.flushSave?.(); } catch (_) {}
       return { ...clone(commit), worldState: clone(world), outlineState: data().loadState() };
     } finally { pending.delete(commitId); }
   }
@@ -362,7 +365,9 @@ window.STORY_ENGINE_HISTORY = (function() {
       delta: delta(before, after), facts: [], status: 'active' };
     bundle.journal.push(commit); bundle.headId = commit.id; bundle.branchId = commit.branchId; bundle.preview = null; bundle.recovery = { status: 'ready', reason: '' };
     if (before.outline.currentChapterId !== after.outline.currentChapterId) bundle.snapshots.push({ atCommitId: commit.id, frame: clone(after), hash: hash(after) });
-    write(bundle, after, false); return clone(commit);
+    write(bundle, after, false);
+    try { void timeline()?.flushSave?.(); } catch (_) {}
+    return clone(commit);
   }
   function validateWorldEvidence(proof, suppliedCommit) {
     const bundle = load(); if (!bundle || !proof) return null;
@@ -480,14 +485,23 @@ window.STORY_ENGINE_HISTORY = (function() {
     write(bundle, materialize(bundle, bundle.headId)); return getStatus();
   }
   function resetBaseline(worldState) {
-    window.OUTLINE_ENGINE?.abort?.(); session++; pending.clear(); generation = null;
-    const previous = load();
-    if (previous) store().setItem(PREFIX + id() + '_before_rebuild', JSON.stringify(previous));
-    store().removeItem(PREFIX + id());
-    const state = data().loadState();
-    for (const key of ['progressEvents', 'proposals', 'privateFacts', 'clues', 'contacts', 'knowledge']) state[key] = [];
-    state.scheduler = {}; state.recovery = { status: 'ready' };
-    data().saveState(state); return ensureBaseline(worldState);
+    window.OUTLINE_ENGINE?.abort?.(); session++; pending.clear(); generation = null; persistenceFailures.delete(id());
+    return transaction(() => {
+      let previous = null;
+      try { previous = load(); } catch (_) { previous = null; }
+      if (previous) store().setItem(PREFIX + id() + '_before_rebuild', JSON.stringify(previous));
+      store().removeItem(PREFIX + id());
+      const state = data().loadState();
+      for (const key of ['progressEvents', 'proposals', 'privateFacts', 'clues', 'contacts', 'knowledge']) state[key] = [];
+      state.tracking = {
+        anchorLayer: null, checkedLayer: null, anchorMessageId: '', lastProcessedMessageKey: '',
+        seenAssistantIds: [], roundsSinceCheck: 0, lastDigest: '', pendingRecheck: false,
+        recheckStartLayer: null, temporalNotice: null
+      };
+      state.scheduler = {}; state.recovery = { status: 'ready', reason: '' };
+      data().saveState(state);
+      return ensureBaseline(worldState);
+    });
   }
   function rebuild(options) {
     if (typeof window.WORLD_ENGINE?.rebuildLinkedHistory !== 'function') throw new Error('世界引擎尚未提供显式批量重建入口');

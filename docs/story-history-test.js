@@ -273,8 +273,40 @@ async function independentRecordsAndTemporalNotice() {
   assert.strictEqual(temporal.core.loadState().round, round); assert.strictEqual(temporal.history.getStatus().branchId, branch, 'semantic rewind only raises a notice; it never rewinds the actual branch');
 }
 
+async function resetBaselineAndPersistenceHardening() {
+  const h = harness();
+  let chatSaveCount = 0;
+  h.ctx.saveChatConditional = () => { chatSaveCount++; };
+  h.step('第一轮探索古城。');
+  h.step('第二轮取得密匙。');
+  const roundBeforeReset = h.core.loadState().round;
+  assert.strictEqual(roundBeforeReset, 2);
+  assert.ok(chatSaveCount > 0, '建立基线与提交步骤时必须立即持久化稳定消息身份 ID');
+
+  // 模拟基线楼层（layer 0）因外部原因丢失 world_engine_memory_source_id，触发基线受阻
+  delete h.ctx.chat[0].extra.world_engine_memory_source_id;
+  h.history.reconcile();
+  const blocked = h.history.getStatus();
+  assert.strictEqual(blocked.blocked, true);
+  assert.strictEqual(blocked.reason, '正文早于启用基底或稳定消息身份已丢失');
+  assert.throws(() => h.history.captureWorldStep({ mode: 'forward', sourceRefs: [], beforeWorld: h.core.loadState() }), /正文早于启用基底/);
+
+  const savesBeforeReset = chatSaveCount;
+  h.history.resetBaseline();
+  assert.ok(chatSaveCount > savesBeforeReset, '重设基线后必须立即强制保存已补充的新消息身份 ID');
+  assert.strictEqual(h.history.getStatus().blocked, false, '重设基线后联合历史应恢复 ready');
+  assert.strictEqual(h.history.getStatus().phase, 'ready');
+  assert.strictEqual(h.core.loadState().round, roundBeforeReset, '保留当前世界重设基线不得回退或清零世界轮次');
+
+  // 解锁后可以继续正常 capture + commit
+  const nextEnd = h.addRound('第三轮开启秘境大门。');
+  const token = h.history.captureWorldStep({ mode: 'forward', sourceRefs: h.timeline.captureRange(nextEnd - 1, nextEnd), beforeWorld: h.core.loadState() });
+  const committed = h.history.commitWorldStep(token, { worldState: { ...token.beforeWorld, round: 3, worldDigest: '秘境大门开启' }, privateEvents: [], observations: [] });
+  assert.strictEqual(committed.worldState.round, 3);
+}
+
 (async () => {
-  for (const test of [bulkTailAndFullJournal, middleAndPartialBatch, replaceCancelAndLateToken, limitsCorruptionAndExternalEdit, importAndExplicitRebuild, privateFactsCluesAndKnowledge, independentRecordsAndTemporalNotice]) {
+  for (const test of [bulkTailAndFullJournal, middleAndPartialBatch, replaceCancelAndLateToken, limitsCorruptionAndExternalEdit, importAndExplicitRebuild, privateFactsCluesAndKnowledge, independentRecordsAndTemporalNotice, resetBaselineAndPersistenceHardening]) {
     await test(); console.log(test.name + ': passed');
   }
   console.log('story-history-test: all passed');

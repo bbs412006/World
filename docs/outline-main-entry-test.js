@@ -302,6 +302,25 @@ function runMainEntrySuite() {
     assert.strictEqual(panelBody.scrollTop, 180, '同视图刷新应保留面板滚动位置');
 
     const faces = sandbox.WORLD_ENGINE_UI.listEngineFaces();
+    assert.deepStrictEqual(Array.from(faces.map(f => f.id)), ['world', 'memory', 'outline'], '顶部标签顺序必须固定为 世界引擎 · 记忆引擎 · 剧情大纲');
+    // 复现 world-engine.js 真实启动顺序：OUTLINE_ENGINE_UI 先注册 outline，再渲染面板
+    const bootBox = {
+      window: null,
+      console: { log() {}, warn() {}, error() {} },
+      setTimeout,
+      clearTimeout,
+      document: { documentElement: { setAttribute() {}, removeAttribute() {} }, head: makeElement('head'), body: makeElement('body'), getElementById: () => null, querySelector: () => null, createElement: tag => makeElement(tag), addEventListener() {} },
+      WORLD_ENGINE_STORE: { getItem: () => null, setItem() {} },
+      WORLD_ENGINE_CORE: { renderUserName: t => String(t || ''), getChatId: () => 'boot', getChatLayer: () => 0 }
+    };
+    bootBox.window = bootBox;
+    vm.runInNewContext(fs.readFileSync(path.join(rootPath, 'world-engine-ui.js'), 'utf8'), bootBox, { filename: 'world-engine-ui.js' });
+    bootBox.WORLD_ENGINE_UI.registerEngineFace({ id: 'outline', label: '剧情大纲', render: () => '' });
+    assert.deepStrictEqual(
+      Array.from(bootBox.WORLD_ENGINE_UI.listEngineFaces().map(f => f.id)),
+      ['world', 'memory', 'outline'],
+      '即便先注册剧情大纲，内置世界与记忆也必须排在大纲之前'
+    );
     const outlineFace = faces.find(f => f.id === 'outline');
     assert.ok(outlineFace && typeof outlineFace.getHeaderMood === 'function', 'outline face 应提供 getHeaderMood');
     assert.strictEqual(outlineFace.getTheme(), 'deepsea', 'outline face 应独立保存并返回自身主题配色');

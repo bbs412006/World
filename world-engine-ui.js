@@ -56,6 +56,7 @@ window.WORLD_ENGINE_UI = (function() {
     const face = definition && typeof definition === 'object' ? definition : {};
     const id = String(face.id || '').trim();
     if (!id) throw new Error('引擎界面必须提供 id');
+    if (id !== 'world') ensureBuiltinEngineFaces();
     const existed = _engineFaceRegistry.has(id);
     _engineFaceRegistry.set(id, { id, label: id, ...face });
     if (!existed) _engineFaceOrder.push(id);

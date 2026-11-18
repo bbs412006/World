@@ -70,13 +70,18 @@ window.OUTLINE_ENGINE = (function() {
     });
   }
   function activate(state) {
-    if (state.tracking?.anchorLayer != null) { history()?.ensureBaseline?.(); return data().loadState(); }
+    if (state.tracking?.anchorLayer != null) {
+      history()?.ensureBaseline?.();
+      try { void timeline()?.flushSave?.(); } catch (_) {}
+      return data().loadState();
+    }
     const refs = assistantRefs();
     state.tracking = { ...(state.tracking || {}), anchorLayer: currentLayer(), checkedLayer: currentLayer(),
       anchorMessageId: refs[refs.length - 1]?.messageId || '', seenAssistantIds: refs.map(ref => ref.messageId),
       roundsSinceCheck: 0, lastDigest: '', pendingRecheck: false };
     data().saveState(state);
     history()?.ensureBaseline?.();
+    try { void timeline()?.flushSave?.(); } catch (_) {}
     return data().loadState();
   }
   function clearInjection() {
