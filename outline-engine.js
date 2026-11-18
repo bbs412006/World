@@ -288,6 +288,13 @@ window.OUTLINE_ENGINE = (function() {
     const retries = Math.max(0, Number(settings().apiAutoRetries) || 0);
     for (let attempt = 0; ; attempt++) {
       try {
+        window.WORLD_ENGINE_API?.setNextRequestMeta?.({
+          module: 'outline',
+          purpose: task.label || '剧情大纲检查',
+          attempt: attempt + 1,
+          maxAttempts: retries + 1,
+          onLogId: id => { task.lastLogId = id; }
+        });
         const raw = await window.WORLD_ENGINE_API.callApi(prompt, task.options.maxTokens, task.options.temperature, task.controller.signal, { ...task.options });
         if (request === task) lastDebug.rawResult = raw;
         return raw;
@@ -306,7 +313,17 @@ window.OUTLINE_ENGINE = (function() {
     try {
       const raw = await invoke(task, prompts().buildOrganizePrompt({ text: clean(text), includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() }));
       if (!isCurrent(task, false)) throw new Error('聊天或大纲已变化，整理结果已丢弃');
-      const parsed = prompts().parseOrganizeResponse(raw);
+      let parsed;
+      try {
+        parsed = prompts().parseOrganizeResponse(raw);
+      } catch (parseErr) {
+        window.WORLD_ENGINE_API?.updateRequestLog?.(task.lastLogId, {
+          status: 'error',
+          phase: '解析失败',
+          error: String(parseErr?.message || parseErr)
+        });
+        throw parseErr;
+      }
       setExternalStatus('剧情大纲整理完成');
       return parsed;
     } catch (error) {
@@ -513,7 +530,17 @@ window.OUTLINE_ENGINE = (function() {
         includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() });
       const raw = await invoke(task, prompt);
       if (!isCurrent(task, true)) return { ok: false, reason: 'stale-result' };
-      const assessment = prompts().parseCheckResponse(raw, { state, nodes, messages: selection.messages, allowProposals: settings().allowProposals !== false });
+      let assessment;
+      try {
+        assessment = prompts().parseCheckResponse(raw, { state, nodes, messages: selection.messages, allowProposals: settings().allowProposals !== false });
+      } catch (parseErr) {
+        window.WORLD_ENGINE_API?.updateRequestLog?.(task.lastLogId, {
+          status: 'error',
+          phase: '解析失败',
+          error: String(parseErr?.message || parseErr)
+        });
+        throw parseErr;
+      }
       if (!isCurrent(task, true)) return { ok: false, reason: 'stale-result' };
       state = data().loadState();
       const beforeAutomatic = clone(state);

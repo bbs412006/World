@@ -1019,19 +1019,38 @@ ${JSON.stringify(sample || [], null, 2)}
     const maxRetries = Math.max(0, parseInt(retrySettings.apiAutoRetries) || 0);
     let update = null;
     let storyResult = null;
+    const worldPurpose = extraInstruction && extraInstruction.includes('远方') ? '远方事件推演'
+      : (extraInstruction && extraInstruction.includes('近端') ? '近端事件推演' : '世界推演');
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      let logId = null;
       try {
+        api.setNextRequestMeta?.({
+          module: 'world',
+          purpose: worldPurpose,
+          attempt: attempt + 1,
+          maxAttempts: maxRetries + 1,
+          onLogId: id => { logId = id; }
+        });
         const rawResult = await api.callApi(prompt, undefined, undefined, _abortController.signal);
         _lastRawResult = rawResult;
-        update = api.parseJSON(rawResult);
-        if (!update || typeof update !== 'object' || Array.isArray(update)) {
-          throw new Error('API 返回无法解析为有效 JSON，已保留重 roll 前的当前状态');
-        }
-        if (linked) { storyResult = projection.splitWorldResponse(update); update = storyResult.publicUpdate; }
-        if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field)) &&
-            !(linked && (storyResult.privateEvents.length || storyResult.observations.length))) {
-          throw new Error('API 返回不包含任何世界状态字段，已保留重 roll 前的当前状态');
+        try {
+          update = api.parseJSON(rawResult);
+          if (!update || typeof update !== 'object' || Array.isArray(update)) {
+            throw new Error('API 返回无法解析为有效 JSON，已保留重 roll 前的当前状态');
+          }
+          if (linked) { storyResult = projection.splitWorldResponse(update); update = storyResult.publicUpdate; }
+          if (!knownFields.some(field => Object.prototype.hasOwnProperty.call(update, field)) &&
+              !(linked && (storyResult.privateEvents.length || storyResult.observations.length))) {
+            throw new Error('API 返回不包含任何世界状态字段，已保留重 roll 前的当前状态');
+          }
+        } catch (parseErr) {
+          api.updateRequestLog?.(logId, {
+            status: 'error',
+            phase: '解析失败',
+            error: String(parseErr?.message || parseErr)
+          });
+          throw parseErr;
         }
         break;
       } catch (error) {

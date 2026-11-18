@@ -169,6 +169,132 @@ window.WORLD_ENGINE_API = (function() {
     return (messages || []).reduce((total, msg) => total + String(msg && msg.content || '').length, 0);
   }
 
+  function sanitizeLogUrl(rawUrl) {
+    return String(rawUrl || '').trim().replace(/([?&](?:key|api_key|token|access_token)=)[^&]+/gi, '$1***');
+  }
+
+  function previewLogText(value, maxChars) {
+    const str = String(value == null ? '' : value);
+    if (!str) return '';
+    return str.length > maxChars ? `${str.slice(0, maxChars)}\n...（共 ${str.length} 字符，已截断显示）` : str;
+  }
+
+  function extractChoiceContent(choice) {
+    const raw = choice?.message?.content ?? choice?.text ?? '';
+    if (Array.isArray(raw)) {
+      return raw.map(part => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object') return String(part.text ?? part.content ?? '');
+        return '';
+      }).join('');
+    }
+    return raw == null ? '' : String(raw);
+  }
+
+  const MAX_REQUEST_LOGS = 120;
+  let requestLogSeq = 0;
+  const requestLogs = [];
+  const requestLogListeners = new Set();
+  let pendingRequestMeta = null;
+
+  function setNextRequestMeta(meta) {
+    pendingRequestMeta = meta && typeof meta === 'object' ? { ...meta } : null;
+  }
+
+  function consumeRequestMeta(settingsOverride) {
+    const nextMeta = pendingRequestMeta;
+    pendingRequestMeta = null;
+    if (nextMeta) return nextMeta;
+    if (settingsOverride && typeof settingsOverride === 'object' && settingsOverride.__requestMeta) {
+      return settingsOverride.__requestMeta;
+    }
+    return null;
+  }
+
+  function cloneRequestLog(entry) {
+    return entry ? { ...entry } : null;
+  }
+
+  function notifyRequestLogChange() {
+    for (const fn of requestLogListeners) {
+      try { fn(getRequestLogs()); } catch (_) {}
+    }
+    try { window.WORLD_ENGINE_UI?.refreshRequestLogs?.(); } catch (_) {}
+  }
+
+  function beginRequestLog(info) {
+    const entry = {
+      id: `req_${++requestLogSeq}`,
+      ts: Date.now(),
+      startedAt: Date.now(),
+      module: String(info?.module || 'world'),
+      purpose: String(info?.purpose || 'API 请求'),
+      status: String(info?.status || 'running'),
+      phase: String(info?.phase || '请求中'),
+      connectionMode: info?.connectionMode === 'proxy' ? 'proxy' : 'direct',
+      target: sanitizeLogUrl(info?.target || ''),
+      model: String(info?.model || ''),
+      temperature: info?.temperature ?? null,
+      maxTokens: info?.maxTokens ?? null,
+      timeoutSec: info?.timeoutSec ?? null,
+      attempt: Math.max(1, Number(info?.attempt) || 1),
+      maxAttempts: Math.max(1, Number(info?.maxAttempts) || 1),
+      httpStatus: info?.httpStatus ?? null,
+      finishReason: String(info?.finishReason || ''),
+      durationMs: info?.durationMs ?? null,
+      promptChars: Math.max(0, Number(info?.promptChars) || 0),
+      responseChars: Math.max(0, Number(info?.responseChars) || 0),
+      promptPreview: previewLogText(info?.promptPreview || '', 3000),
+      responsePreview: previewLogText(info?.responsePreview || '', 4000),
+      error: String(info?.error || '')
+    };
+    requestLogs.unshift(entry);
+    if (requestLogs.length > MAX_REQUEST_LOGS) requestLogs.length = MAX_REQUEST_LOGS;
+    try { info?.onLogId?.(entry.id); } catch (_) {}
+    notifyRequestLogChange();
+    return entry.id;
+  }
+
+  function updateRequestLog(id, patch) {
+    if (!id || !patch || typeof patch !== 'object') return null;
+    const entry = requestLogs.find(item => item.id === id);
+    if (!entry) return null;
+    if (patch.status !== undefined) entry.status = String(patch.status);
+    if (patch.phase !== undefined) entry.phase = String(patch.phase);
+    if (patch.httpStatus !== undefined) entry.httpStatus = patch.httpStatus;
+    if (patch.finishReason !== undefined) entry.finishReason = String(patch.finishReason || '');
+    if (patch.responseChars !== undefined) entry.responseChars = Math.max(0, Number(patch.responseChars) || 0);
+    if (patch.responsePreview !== undefined) entry.responsePreview = previewLogText(patch.responsePreview, 4000);
+    if (patch.error !== undefined) entry.error = String(patch.error || '');
+    if (patch.durationMs !== undefined) entry.durationMs = Number(patch.durationMs);
+    else if (['success', 'error', 'aborted'].includes(entry.status) && entry.startedAt) {
+      entry.durationMs = Math.max(0, Date.now() - entry.startedAt);
+    }
+    notifyRequestLogChange();
+    return cloneRequestLog(entry);
+  }
+
+  function recordRequestLog(info) {
+    const id = beginRequestLog(info);
+    if (info?.status && info.status !== 'running') updateRequestLog(id, info);
+    return id;
+  }
+
+  function getRequestLogs() {
+    return requestLogs.map(cloneRequestLog);
+  }
+
+  function clearRequestLogs() {
+    requestLogs.length = 0;
+    notifyRequestLogChange();
+  }
+
+  function onRequestLogChange(fn) {
+    if (typeof fn !== 'function') return () => {};
+    requestLogListeners.add(fn);
+    return () => requestLogListeners.delete(fn);
+  }
+
   function logRequestParams(label, target, settings, body) {
     console.log('[世界引擎] API 请求参数:', {
       connectionMode: settings.connectionMode === 'proxy' ? 'proxy' : 'direct',
@@ -238,9 +364,139 @@ window.WORLD_ENGINE_API = (function() {
 
   // [FIX] 经酒馆服务端转发的推演调用：浏览器 → 同源酒馆后端（无 CORS）→ 服务端代发到第三方 API。
   // 走 OpenAI source + reverse_proxy 路线，这样可把我们自己的 URL/KEY 透传给上游。
-  async function callApiViaProxy(settings, body, signal) {
+  async function executeLoggedChatCall(transportLabel, targetDisplay, doFetch, settings, body, signal, meta) {
+    const startedAt = Date.now();
+    const logId = beginRequestLog({
+      module: meta?.module || 'world',
+      purpose: meta?.purpose || 'API 请求',
+      status: 'running',
+      phase: '请求中',
+      connectionMode: settings.connectionMode === 'proxy' ? 'proxy' : 'direct',
+      target: targetDisplay,
+      model: body.model,
+      temperature: body.temperature,
+      maxTokens: body.max_tokens,
+      timeoutSec: timeoutSeconds(settings.apiTimeoutMs),
+      attempt: meta?.attempt,
+      maxAttempts: meta?.maxAttempts,
+      promptChars: messageChars(body.messages),
+      promptPreview: (body.messages || []).map(m => String(m?.content || '')).join('\n'),
+      onLogId: meta?.onLogId
+    });
+    logRequestParams(transportLabel, targetDisplay, settings, body);
+    try {
+      const result = await doFetch();
+      const resp = result.resp;
+      const rawText = String(result.text || '');
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      if (!resp.ok) {
+        const msg = `HTTP ${resp.status}: ${responseDetail(result)}`;
+        updateRequestLog(logId, {
+          status: 'error',
+          phase: 'HTTP 错误',
+          httpStatus: resp.status,
+          durationMs,
+          responseChars: rawText.length,
+          responsePreview: rawText || msg,
+          error: msg
+        });
+        throw new Error(msg);
+      }
+      const data = requireJson(result, transportLabel === 'tavern-proxy' ? '酒馆代理' : 'API');
+      if (data && data.error) {
+        const msg = (transportLabel === 'tavern-proxy' ? '酒馆代理返回错误：' : 'API 返回错误：')
+          + (data.error.message || JSON.stringify(data.error));
+        updateRequestLog(logId, {
+          status: 'error',
+          phase: '接口错误',
+          httpStatus: resp.status,
+          durationMs,
+          responseChars: rawText.length,
+          responsePreview: rawText,
+          error: msg
+        });
+        throw new Error(msg);
+      }
+      const choice = data.choices?.[0];
+      if (!choice) {
+        const msg = 'API 返回缺少 choices[0]';
+        updateRequestLog(logId, {
+          status: 'error',
+          phase: '格式异常',
+          httpStatus: resp.status,
+          durationMs,
+          responseChars: rawText.length,
+          responsePreview: rawText,
+          error: msg
+        });
+        throw new Error(msg);
+      }
+      const finishReason = String(choice.finish_reason || '');
+      if (finishReason === 'length') {
+        console.warn('[世界引擎] API 输出达到长度上限，将读取截断前已完整返回的字段');
+      }
+      const content = extractChoiceContent(choice);
+      if (!String(content || '').trim()) {
+        const msg = `API 返回内容为空${finishReason ? `（finish_reason: ${finishReason}）` : ''}`;
+        updateRequestLog(logId, {
+          status: 'error',
+          phase: '空返回',
+          httpStatus: resp.status,
+          finishReason,
+          durationMs,
+          responseChars: rawText.length,
+          responsePreview: rawText,
+          error: msg
+        });
+        throw new Error(msg);
+      }
+      updateRequestLog(logId, {
+        status: 'success',
+        phase: '成功',
+        httpStatus: resp.status,
+        finishReason,
+        durationMs,
+        responseChars: content.length,
+        responsePreview: content,
+        error: ''
+      });
+      return content;
+    } catch (error) {
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      const aborted = Boolean(signal?.aborted || error?.name === 'AbortError');
+      const existing = requestLogs.find(item => item.id === logId);
+      if (existing && existing.status === 'running') {
+        updateRequestLog(logId, {
+          status: aborted ? 'aborted' : 'error',
+          phase: aborted ? '已中止' : '请求异常',
+          durationMs,
+          error: aborted ? '请求已中止' : String(error?.message || error)
+        });
+      }
+      throw error;
+    }
+  }
+
+  async function callApiViaProxy(settings, body, signal, meta) {
     const base = getProxyBase(settings);
-    if (!base) throw new Error('未配置 API URL，请在设置中填写');
+    if (!base) {
+      const msg = '未配置 API URL，请在设置中填写';
+      recordRequestLog({
+        module: meta?.module || 'world',
+        purpose: meta?.purpose || 'API 请求',
+        status: 'error',
+        phase: '配置缺失',
+        connectionMode: 'proxy',
+        target: '',
+        model: body.model,
+        attempt: meta?.attempt,
+        maxAttempts: meta?.maxAttempts,
+        promptChars: messageChars(body.messages),
+        error: msg,
+        onLogId: meta?.onLogId
+      });
+      throw new Error(msg);
+    }
     const payload = {
       chat_completion_source: 'openai',
       reverse_proxy: base,
@@ -251,34 +507,25 @@ window.WORLD_ENGINE_API = (function() {
       max_tokens: body.max_tokens,
       stream: false
     };
-    logRequestParams('tavern-proxy', base, settings, payload);
-    const result = await fetchResponseWithTimeout('/api/backends/chat-completions/generate', {
+    return executeLoggedChatCall('tavern-proxy', base, () => fetchResponseWithTimeout('/api/backends/chat-completions/generate', {
       method: 'POST',
       headers: tavernHeaders(),
       body: JSON.stringify(payload)
-    }, signal, settings.apiTimeoutMs);
-    const resp = result.resp;
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
-    }
-    const data = requireJson(result, '酒馆代理');
-    if (data && data.error) {
-      throw new Error('酒馆代理返回错误：' + (data.error.message || JSON.stringify(data.error)));
-    }
-    const choice = data.choices?.[0];
-    if (!choice) throw new Error('API 返回缺少 choices[0]');
-    if (choice.finish_reason === 'length') {
-      console.warn('[世界引擎] API 输出达到长度上限，将读取截断前已完整返回的字段');
-    }
-    return choice.message?.content || '';
+    }, signal, settings.apiTimeoutMs), settings, payload, signal, meta);
   }
 
   /**
    * 调用独立 API（非酒馆自带），OpenAI 兼容格式
    */
   async function callApi(prompt, maxTokens, temperature, signal, settingsOverride) {
-    const settings = settingsOverride
-      ? { ...REQUEST_DEFAULTS, ...settingsOverride }
+    const meta = consumeRequestMeta(settingsOverride);
+    let cleanOverride = settingsOverride;
+    if (cleanOverride && Object.prototype.hasOwnProperty.call(cleanOverride, '__requestMeta')) {
+      cleanOverride = { ...cleanOverride };
+      delete cleanOverride.__requestMeta;
+    }
+    const settings = cleanOverride
+      ? { ...REQUEST_DEFAULTS, ...cleanOverride }
       : getSettings();
     const selectedTemperature = temperature ?? settings.temperature;
     const configuredMaxTokens = Math.max(1, parseInt(maxTokens ?? settings.maxTokens) || 65000);
@@ -294,11 +541,28 @@ window.WORLD_ENGINE_API = (function() {
 
     // [FIX] 经酒馆代理：绕过第三方 API 的 CORS 限制，由酒馆 Node 服务端转发
     if (settings.connectionMode === 'proxy') {
-      return callApiViaProxy(settings, body, signal);
+      return callApiViaProxy(settings, body, signal, meta);
     }
 
     const url = normalizeUrl(settings.apiUrl);
-    if (!url) throw new Error('未配置 API URL，请在设置中填写');
+    if (!url) {
+      const msg = '未配置 API URL，请在设置中填写';
+      recordRequestLog({
+        module: meta?.module || 'world',
+        purpose: meta?.purpose || 'API 请求',
+        status: 'error',
+        phase: '配置缺失',
+        connectionMode: 'direct',
+        target: '',
+        model: body.model,
+        attempt: meta?.attempt,
+        maxAttempts: meta?.maxAttempts,
+        promptChars: messageChars(body.messages),
+        error: msg,
+        onLogId: meta?.onLogId
+      });
+      throw new Error(msg);
+    }
 
     const headers = {
       'Content-Type': 'application/json'
@@ -307,26 +571,11 @@ window.WORLD_ENGINE_API = (function() {
       headers['Authorization'] = 'Bearer ' + settings.apiKey;
     }
 
-    logRequestParams('direct', url, settings, body);
-
-    const result = await fetchResponseWithTimeout(url, {
+    return executeLoggedChatCall('direct', url, () => fetchResponseWithTimeout(url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body)
-    }, signal, settings.apiTimeoutMs);
-    const resp = result.resp;
-
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
-    }
-
-    const data = requireJson(result, 'API');
-    const choice = data.choices?.[0];
-    if (!choice) throw new Error('API 返回缺少 choices[0]');
-    if (choice.finish_reason === 'length') {
-      console.warn('[世界引擎] API 输出达到长度上限，将读取截断前已完整返回的字段');
-    }
-    return choice.message?.content || '';
+    }, signal, settings.apiTimeoutMs), settings, body, signal, meta);
   }
 
   function repairTruncatedJSON(content) {
@@ -416,58 +665,138 @@ window.WORLD_ENGINE_API = (function() {
    * 获取模型列表（OpenAI 兼容格式）
    */
   async function fetchModelList(settingsOverride) {
-    const settings = settingsOverride
-      ? { ...REQUEST_DEFAULTS, ...settingsOverride }
+    const meta = consumeRequestMeta(settingsOverride);
+    let cleanOverride = settingsOverride;
+    if (cleanOverride && Object.prototype.hasOwnProperty.call(cleanOverride, '__requestMeta')) {
+      cleanOverride = { ...cleanOverride };
+      delete cleanOverride.__requestMeta;
+    }
+    const settings = cleanOverride
+      ? { ...REQUEST_DEFAULTS, ...cleanOverride }
       : getSettings();
     const baseUrl = normalizeUrl(settings.apiUrl).replace(/\/chat\/completions$/, '');
+    const startedAt = Date.now();
+    const isProxy = settings.connectionMode === 'proxy';
+    const targetUrl = isProxy ? baseUrl : (baseUrl ? baseUrl + '/models' : '');
+    const logId = beginRequestLog({
+      module: meta?.module || 'world',
+      purpose: meta?.purpose || '获取模型列表',
+      status: 'running',
+      phase: '请求中',
+      connectionMode: isProxy ? 'proxy' : 'direct',
+      target: targetUrl,
+      model: '',
+      timeoutSec: timeoutSeconds(settings.apiTimeoutMs),
+      onLogId: meta?.onLogId
+    });
 
-    // [FIX] 经酒馆代理：用酒馆 /status 端点拉模型列表，绕过 CORS
-    if (settings.connectionMode === 'proxy') {
-      if (!baseUrl) throw new Error('未配置 API URL，请在设置中填写');
-      const result = await fetchResponseWithTimeout('/api/backends/chat-completions/status', {
-        method: 'POST',
-        headers: tavernHeaders(),
-        body: JSON.stringify({
-          chat_completion_source: 'openai',
-          reverse_proxy: baseUrl,
-          proxy_password: settings.apiKey || ''
-        })
-      }, null, settings.apiTimeoutMs);
+    try {
+      // [FIX] 经酒馆代理：用酒馆 /status 端点拉模型列表，绕过 CORS
+      if (isProxy) {
+        if (!baseUrl) throw new Error('未配置 API URL，请在设置中填写');
+        const result = await fetchResponseWithTimeout('/api/backends/chat-completions/status', {
+          method: 'POST',
+          headers: tavernHeaders(),
+          body: JSON.stringify({
+            chat_completion_source: 'openai',
+            reverse_proxy: baseUrl,
+            proxy_password: settings.apiKey || ''
+          })
+        }, null, settings.apiTimeoutMs);
+        if (!result.resp.ok) throw new Error(`HTTP ${result.resp.status}: ${responseDetail(result)}`);
+        const data = requireJson(result, '酒馆代理');
+        if (data && data.error) throw new Error('酒馆代理拉取模型失败（请检查 URL/密钥是否正确）');
+        if (data.data && Array.isArray(data.data)) {
+          const list = data.data.map(m => m.id);
+          updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${list.length} 个模型` });
+          return list;
+        }
+        throw new Error('无法解析模型列表');
+      }
+
+      const url = baseUrl + '/models';
+      const headers = { 'Content-Type': 'application/json' };
+      if (settings.apiKey) headers['Authorization'] = 'Bearer ' + settings.apiKey;
+
+      const result = await fetchResponseWithTimeout(url, { headers }, null, settings.apiTimeoutMs);
       if (!result.resp.ok) throw new Error(`HTTP ${result.resp.status}: ${responseDetail(result)}`);
-      const data = requireJson(result, '酒馆代理');
-      if (data && data.error) throw new Error('酒馆代理拉取模型失败（请检查 URL/密钥是否正确）');
+      const data = requireJson(result, 'API');
       if (data.data && Array.isArray(data.data)) {
-        return data.data.map(m => m.id);
+        const list = data.data.map(m => m.id);
+        updateRequestLog(logId, { status: 'success', phase: '成功', httpStatus: result.resp.status, durationMs: Date.now() - startedAt, responsePreview: `获取到 ${list.length} 个模型` });
+        return list;
       }
       throw new Error('无法解析模型列表');
+    } catch (error) {
+      updateRequestLog(logId, {
+        status: 'error',
+        phase: '拉取失败',
+        durationMs: Date.now() - startedAt,
+        error: String(error?.message || error)
+      });
+      throw error;
     }
-
-    const url = baseUrl + '/models';
-    const headers = { 'Content-Type': 'application/json' };
-    if (settings.apiKey) headers['Authorization'] = 'Bearer ' + settings.apiKey;
-
-    const result = await fetchResponseWithTimeout(url, { headers }, null, settings.apiTimeoutMs);
-    if (!result.resp.ok) throw new Error(`HTTP ${result.resp.status}: ${responseDetail(result)}`);
-    const data = requireJson(result, 'API');
-    if (data.data && Array.isArray(data.data)) {
-      return data.data.map(m => m.id);
-    }
-    throw new Error('无法解析模型列表');
   }
 
-  async function postJsonEndpoint(url, apiKey, payload, signal, timeoutMs, label) {
-    if (!url) throw new Error(`未配置 ${label} API URL`);
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
-    const result = await fetchResponseWithTimeout(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload)
-    }, signal, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 60000);
-    if (!result.resp.ok) {
-      throw new Error(`${label} HTTP ${result.resp.status}: ${responseDetail(result)}`);
+  async function postJsonEndpoint(url, apiKey, payload, signal, timeoutMs, label, meta) {
+    const startedAt = Date.now();
+    const logId = beginRequestLog({
+      module: meta?.module || 'memory',
+      purpose: meta?.purpose || label,
+      status: 'running',
+      phase: '请求中',
+      connectionMode: 'direct',
+      target: url,
+      model: String(payload?.model || ''),
+      timeoutSec: timeoutSeconds(timeoutMs),
+      promptChars: JSON.stringify(payload || {}).length,
+      onLogId: meta?.onLogId
+    });
+    try {
+      if (!url) throw new Error(`未配置 ${label} API URL`);
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+      const result = await fetchResponseWithTimeout(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
+      }, signal, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 60000);
+      if (!result.resp.ok) {
+        const msg = `${label} HTTP ${result.resp.status}: ${responseDetail(result)}`;
+        updateRequestLog(logId, {
+          status: 'error',
+          phase: 'HTTP 错误',
+          httpStatus: result.resp.status,
+          durationMs: Date.now() - startedAt,
+          responseChars: String(result.text || '').length,
+          responsePreview: result.text || msg,
+          error: msg
+        });
+        throw new Error(msg);
+      }
+      const json = requireJson(result, label);
+      updateRequestLog(logId, {
+        status: 'success',
+        phase: '成功',
+        httpStatus: result.resp.status,
+        durationMs: Date.now() - startedAt,
+        responseChars: String(result.text || '').length,
+        responsePreview: meta?.summarize ? meta.summarize(json) : previewLogText(result.text, 600)
+      });
+      return json;
+    } catch (error) {
+      const existing = requestLogs.find(item => item.id === logId);
+      if (existing && existing.status === 'running') {
+        const aborted = Boolean(signal?.aborted || error?.name === 'AbortError');
+        updateRequestLog(logId, {
+          status: aborted ? 'aborted' : 'error',
+          phase: aborted ? '已中止' : '请求异常',
+          durationMs: Date.now() - startedAt,
+          error: aborted ? '请求已中止' : String(error?.message || error)
+        });
+      }
+      throw error;
     }
-    return requireJson(result, label);
   }
 
   async function callEmbeddingApi(texts, settingsOverride, signal) {
@@ -483,7 +812,16 @@ window.WORLD_ENGINE_API = (function() {
       { model, input, encoding_format: 'float' },
       signal,
       cfg.apiTimeoutMs ?? 60000,
-      'Embedding API'
+      'Embedding API',
+      {
+        module: 'memory',
+        purpose: `Embedding 向量（${input.length} 条）`,
+        summarize: json => {
+          const count = Array.isArray(json?.data) ? json.data.length : 0;
+          const dim = Array.isArray(json?.data?.[0]?.embedding) ? json.data[0].embedding.length : 0;
+          return `返回 ${count} 条向量（维度 ${dim}）`;
+        }
+      }
     );
     const rows = Array.isArray(data.data) ? data.data.slice() : null;
     if (!rows || !rows.length) throw new Error('Embedding API 返回缺少 data 向量数组');
@@ -507,7 +845,15 @@ window.WORLD_ENGINE_API = (function() {
       { model, query: String(query ?? ''), documents: docs, top_n: topN, return_documents: false },
       signal,
       cfg.apiTimeoutMs ?? 60000,
-      'Rerank API'
+      'Rerank API',
+      {
+        module: 'memory',
+        purpose: `Rerank 重排（${docs.length} 候选）`,
+        summarize: json => {
+          const list = Array.isArray(json?.results) ? json.results : (Array.isArray(json?.data) ? json.data : []);
+          return `重排返回 ${list.length} 条相关性打分`;
+        }
+      }
     );
     const list = Array.isArray(data.results) ? data.results : (Array.isArray(data.data) ? data.data : null);
     if (!list) throw new Error('Rerank API 返回缺少 results 数组');
@@ -520,5 +866,8 @@ window.WORLD_ENGINE_API = (function() {
       .sort((a, b) => b.score - a.score);
   }
 
-  return { callApi, callEmbeddingApi, callRerankApi, parseJSON, getSettings, fetchModelList };
+  return {
+    callApi, callEmbeddingApi, callRerankApi, parseJSON, getSettings, fetchModelList,
+    setNextRequestMeta, getRequestLogs, clearRequestLogs, updateRequestLog, recordRequestLog, onRequestLogChange
+  };
 })();

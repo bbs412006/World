@@ -46,6 +46,9 @@ window.WORLD_ENGINE_UI = (function() {
   let _wbCachedChatId = null;
   let _wbCachedScope = null;
   let _wbScrollTop = 0;
+  let _reqLogOpen = false;
+  let _reqLogFilter = 'all';
+  const _reqLogExpanded = new Set();
 
   // 引擎面扩展点：新增引擎按注册顺序进入“下一界面”循环。
   // 可提供 render/bind、主题/版本、设置、运行状态、球体 class 与卫星按钮动作等钩子。
@@ -358,6 +361,33 @@ window.WORLD_ENGINE_UI = (function() {
           <button class="we-panel-settings" id="we-btn-settings-open" title="设置"><i class="fa-solid fa-gear"></i></button>
         </div>
       </div>
+      <div class="we-reqlog-dock" id="we-reqlog-dock">
+        <div class="we-reqlog-bar" id="we-reqlog-bar" role="button" tabindex="0" aria-expanded="false" title="展开或收起三模块统一请求日志">
+          <span class="we-reqlog-bar-left">
+            <i class="fa-solid fa-terminal"></i>
+            <span class="we-reqlog-bar-title">请求日志</span>
+            <span class="we-reqlog-counts" id="we-reqlog-counts">暂无记录</span>
+          </span>
+          <span class="we-reqlog-bar-summary" id="we-reqlog-bar-summary"></span>
+          <span class="we-reqlog-bar-arrow" id="we-reqlog-bar-arrow">▼</span>
+        </div>
+        <div class="we-reqlog-drawer" id="we-reqlog-drawer" style="display:none;">
+          <div class="we-reqlog-toolbar">
+            <div class="we-reqlog-filters">
+              <button type="button" class="we-reqlog-chip is-active" data-reqlog-filter="all">全部</button>
+              <button type="button" class="we-reqlog-chip" data-reqlog-filter="world">世界</button>
+              <button type="button" class="we-reqlog-chip" data-reqlog-filter="memory">记忆</button>
+              <button type="button" class="we-reqlog-chip" data-reqlog-filter="outline">大纲</button>
+              <button type="button" class="we-reqlog-chip" data-reqlog-filter="error">仅失败</button>
+            </div>
+            <div class="we-reqlog-ops">
+              <button type="button" class="we-btn we-reqlog-btn" id="we-reqlog-export" title="导出全部请求日志 JSON">导出</button>
+              <button type="button" class="we-btn we-reqlog-btn" id="we-reqlog-clear" title="清空当前记录">清空</button>
+            </div>
+          </div>
+          <div class="we-reqlog-list" id="we-reqlog-list"></div>
+        </div>
+      </div>
       <div class="we-panel-body" id="we-panel-body">
         <div class="we-loading">加载中...</div>
       </div>
@@ -365,6 +395,10 @@ window.WORLD_ENGINE_UI = (function() {
     document.body.appendChild(panel);
     panelElement = panel;
     panelBodyElement = panel.querySelector('#we-panel-body');
+
+    bindRequestLogDock(panel);
+    window.WORLD_ENGINE_API?.onRequestLogChange?.(() => refreshRequestLogs());
+    refreshRequestLogs();
 
     // [FIX] 显示扩展版本号（来自 manifest.json，读不到则隐藏）
     const verEl = panel.querySelector('#we-panel-version');
@@ -397,6 +431,179 @@ window.WORLD_ENGINE_UI = (function() {
 
   // 当前视图：'home' | 'situation' | 'events' | 'relations' | 'resources' | 'settings'
   let _currentView = 'home';
+
+  function reqLogModuleLabel(mod) {
+    if (mod === 'world') return '世界';
+    if (mod === 'memory') return '记忆';
+    if (mod === 'outline') return '大纲';
+    return '系统';
+  }
+
+  function formatReqLogTime(ts) {
+    const d = new Date(ts || Date.now());
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function formatReqLogDuration(ms) {
+    if (!Number.isFinite(Number(ms))) return '';
+    const v = Number(ms);
+    return v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;
+  }
+
+  function refreshRequestLogs() {
+    if (!panelElement) return;
+    const dock = panelElement.querySelector('#we-reqlog-dock');
+    if (!dock) return;
+    const logs = window.WORLD_ENGINE_API?.getRequestLogs?.() || [];
+    const total = logs.length;
+    const okCount = logs.filter(item => item.status === 'success').length;
+    const errCount = logs.filter(item => item.status === 'error').length;
+    const runCount = logs.filter(item => item.status === 'running').length;
+
+    dock.classList.toggle('has-error', errCount > 0);
+    dock.classList.toggle('is-running', runCount > 0);
+    dock.classList.toggle('is-open', _reqLogOpen);
+
+    const countsEl = panelElement.querySelector('#we-reqlog-counts');
+    if (countsEl) {
+      countsEl.textContent = total
+        ? `共 ${total} · 成功 ${okCount}${errCount ? ` · 失败 ${errCount}` : ''}${runCount ? ` · 进行中 ${runCount}` : ''}`
+        : '暂无记录';
+    }
+    const barSummaryEl = panelElement.querySelector('#we-reqlog-bar-summary');
+    if (barSummaryEl) {
+      const latest = logs[0];
+      if (latest) {
+        const icon = latest.status === 'success' ? '✓' : (latest.status === 'error' ? '✗' : (latest.status === 'aborted' ? '■' : '⏳'));
+        const dur = formatReqLogDuration(latest.durationMs);
+        barSummaryEl.textContent = `[${reqLogModuleLabel(latest.module)}] ${latest.purpose} ${icon}${dur ? ` · ${dur}` : ''}`;
+      } else {
+        barSummaryEl.textContent = '';
+      }
+    }
+    const barEl = panelElement.querySelector('#we-reqlog-bar');
+    if (barEl && typeof barEl.setAttribute === 'function') {
+      barEl.setAttribute('aria-expanded', _reqLogOpen ? 'true' : 'false');
+    }
+    const arrowEl = panelElement.querySelector('#we-reqlog-bar-arrow');
+    if (arrowEl) arrowEl.textContent = _reqLogOpen ? '▲' : '▼';
+    const drawerEl = panelElement.querySelector('#we-reqlog-drawer');
+    if (drawerEl) drawerEl.style.display = _reqLogOpen ? '' : 'none';
+
+    panelElement.querySelectorAll('.we-reqlog-chip').forEach(chip => {
+      chip.classList.toggle('is-active', chip.dataset?.reqlogFilter === _reqLogFilter);
+    });
+
+    if (!_reqLogOpen) return;
+    const listEl = panelElement.querySelector('#we-reqlog-list');
+    if (!listEl) return;
+
+    const filtered = logs.filter(item => {
+      if (_reqLogFilter === 'all') return true;
+      if (_reqLogFilter === 'error') return item.status === 'error';
+      return item.module === _reqLogFilter;
+    });
+    if (!filtered.length) {
+      listEl.innerHTML = `<div class="we-empty" style="padding:12px;">${total ? '当前筛选条件下暂无请求记录' : '暂无 API 请求记录；触发世界推演、记忆提取或大纲核对后会在此统一记录成功与失败信息'}</div>`;
+      return;
+    }
+    listEl.innerHTML = filtered.map(item => {
+      const modClass = `is-mod-${h(item.module || 'system')}`;
+      const statusClass = `is-st-${h(item.status || 'running')}`;
+      const statusSymbol = item.status === 'success' ? '✓' : (item.status === 'error' ? '✗' : (item.status === 'aborted' ? '■' : '⏳'));
+      const dur = formatReqLogDuration(item.durationMs);
+      const attemptText = item.maxAttempts > 1 ? `第 ${item.attempt}/${item.maxAttempts} 次` : '';
+      const metaParts = [
+        item.model || '未指定模型',
+        item.connectionMode === 'proxy' ? '酒馆代理' : '直连',
+        item.httpStatus != null ? `HTTP ${item.httpStatus}` : '',
+        item.finishReason ? `finish: ${item.finishReason}` : '',
+        dur ? `耗时 ${dur}` : '',
+        attemptText,
+        `Prompt ${item.promptChars || 0}字 / 返回 ${item.responseChars || 0}字`
+      ].filter(Boolean);
+      const expanded = _reqLogExpanded.has(item.id);
+      return `<div class="we-reqlog-item ${statusClass}">
+        <div class="we-reqlog-item-head">
+          <div class="we-reqlog-item-title">
+            <span class="we-reqlog-mod ${modClass}">${h(reqLogModuleLabel(item.module))}</span>
+            <span class="we-reqlog-purpose">${h(item.purpose)}</span>
+          </div>
+          <div class="we-reqlog-item-right">
+            <span class="we-reqlog-status ${statusClass}">${statusSymbol} ${h(item.phase)}</span>
+            <span class="we-reqlog-time">${h(formatReqLogTime(item.ts))}</span>
+          </div>
+        </div>
+        <div class="we-reqlog-meta">${h(metaParts.join(' · '))}</div>
+        ${item.error ? `<div class="we-reqlog-err">${h(item.error)}</div>` : ''}
+        <details class="we-reqlog-details" data-reqlog-id="${h(item.id)}"${expanded ? ' open' : ''}>
+          <summary>请求与返回详情</summary>
+          <div class="we-reqlog-detail-body">
+            ${item.target ? `<div class="we-reqlog-detail-line"><b>目标：</b><code>${h(item.target)}</code></div>` : ''}
+            ${item.temperature != null || item.maxTokens != null ? `<div class="we-reqlog-detail-line"><b>参数：</b>temperature=${h(item.temperature ?? '-')} · max_tokens=${h(item.maxTokens ?? '-')} · timeout=${h(item.timeoutSec ?? '-')}s</div>` : ''}
+            <div class="we-reqlog-detail-label">返回内容 / 原始输出</div>
+            <pre class="we-reqlog-pre">${h(item.responsePreview || (item.status === 'running' ? '正在等待响应…' : '（无返回正文）'))}</pre>
+            ${item.promptPreview ? `<div class="we-reqlog-detail-label">请求正文预览</div><pre class="we-reqlog-pre">${h(item.promptPreview)}</pre>` : ''}
+          </div>
+        </details>
+      </div>`;
+    }).join('');
+    if (typeof listEl.querySelectorAll === 'function') {
+      listEl.querySelectorAll('details.we-reqlog-details[data-reqlog-id]').forEach(det => {
+        if (typeof det.addEventListener === 'function') {
+          det.addEventListener('toggle', () => {
+            const id = det.dataset.reqlogId;
+            if (!id) return;
+            if (det.open) _reqLogExpanded.add(id);
+            else _reqLogExpanded.delete(id);
+          });
+        }
+      });
+    }
+  }
+
+  function bindRequestLogDock(panel) {
+    const bar = panel.querySelector('#we-reqlog-bar');
+    if (bar) {
+      const toggle = () => {
+        _reqLogOpen = !_reqLogOpen;
+        refreshRequestLogs();
+      };
+      bar.onclick = toggle;
+      bar.onkeydown = e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggle();
+        }
+      };
+    }
+    const drawer = panel.querySelector('#we-reqlog-drawer');
+    if (drawer) {
+      drawer.onclick = e => {
+        const chip = e.target?.closest?.('[data-reqlog-filter]');
+        if (chip) {
+          _reqLogFilter = chip.dataset.reqlogFilter || 'all';
+          refreshRequestLogs();
+          return;
+        }
+        const clearBtn = e.target?.closest?.('#we-reqlog-clear');
+        if (clearBtn) {
+          _reqLogExpanded.clear();
+          window.WORLD_ENGINE_API?.clearRequestLogs?.();
+          showToast('已清空请求日志');
+          return;
+        }
+        const exportBtn = e.target?.closest?.('#we-reqlog-export');
+        if (exportBtn) {
+          const logs = window.WORLD_ENGINE_API?.getRequestLogs?.() || [];
+          if (!logs.length) { showToast('当前没有可导出的请求日志', true); return; }
+          setupDownload(JSON.stringify({ exportedAt: new Date().toISOString(), count: logs.length, logs }, null, 2), `story-engine-request-logs-${Date.now()}.json`);
+          showToast(`已导出 ${logs.length} 条请求日志`);
+        }
+      };
+    }
+  }
 
   function renderMemoryView() {
     if (_memorySettingsOpen) return renderMemorySettingsView();
@@ -6339,6 +6546,10 @@ window.WORLD_ENGINE_UI = (function() {
         fetchBtn.disabled = true;
         fetchBtn.textContent = '获取中...';
         try {
+          api.setNextRequestMeta?.({
+            module: requestScope === 'memory' ? 'memory' : 'world',
+            purpose: '获取模型列表'
+          });
           const models = await api.fetchModelList(requestSettings);
           const select = modelListElement;
           if (select) {
@@ -6717,6 +6928,7 @@ window.WORLD_ENGINE_UI = (function() {
     panelElement.style.display = 'flex';
     panelVisible = true;
     refresh();
+    refreshRequestLogs();
   }
 
   function hidePanel() {
@@ -7514,7 +7726,7 @@ window.WORLD_ENGINE_UI = (function() {
   return {
     buildPanel, buildInputButton, showPanel, hidePanel, togglePanel, refresh, setStatus,
     setEvolvingUI, setMemoryEvolvingUI, setInjectedScope, updateBallControls,
-    registerEngineFace, renderLastPromptViewer, bindPromptSegToggle,
+    registerEngineFace, renderLastPromptViewer, bindPromptSegToggle, refreshRequestLogs,
     listEngineFaces: () => { ensureBuiltinEngineFaces(); return _engineFaceOrder.map(id => ({ ...getEngineFace(id) })); },
     advanceEngineFace
   };

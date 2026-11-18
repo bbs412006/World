@@ -293,18 +293,82 @@ window.MEMORY_ENGINE = (function() {
     return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
 
-  function parseResponse(raw, tasks) {
-    const text = clean(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    let value;
-    try { value = JSON.parse(text); }
-    catch (_) {
-      const objectStart = text.indexOf('{'), objectEnd = text.lastIndexOf('}');
-      const arrayStart = text.indexOf('['), arrayEnd = text.lastIndexOf(']');
-      if (arrayStart >= 0 && arrayStart < objectStart && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
-      else if (objectStart >= 0 && objectEnd > objectStart) value = JSON.parse(text.slice(objectStart, objectEnd + 1));
-      else if (arrayStart >= 0 && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
-      else throw new Error('API 返回中没有合法 JSON 对象或数组');
+  function extractBalancedJsonSpan(text) {
+    let result = null;
+    let inString = false;
+    let escaped = false;
+    let rootChar = '';
+    let depth = 0;
+    let start = -1;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (!rootChar && (ch === '{' || ch === '[')) {
+        rootChar = ch;
+        start = i;
+        depth = 1;
+      } else if (rootChar) {
+        const open = rootChar;
+        const close = open === '{' ? '}' : ']';
+        if (ch === open) depth++;
+        else if (ch === close) {
+          depth--;
+          if (depth === 0 && start !== -1) {
+            try {
+              const parsed = JSON.parse(text.slice(start, i + 1));
+              if (parsed && typeof parsed === 'object') result = parsed;
+            } catch (_) {}
+            rootChar = '';
+            start = -1;
+          }
+        }
+      }
     }
+    return result;
+  }
+
+  function parseJsonPayload(raw) {
+    let text = clean(raw);
+    if (!text) throw new Error('API 返回中没有合法 JSON 对象或数组');
+    // 剔除思考模型常见 <think>/<thought>/<reasoning> 包装，避免其中方括号或花括号误导截取
+    text = text.replace(/<(?:think|thought|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+    const candidates = [];
+    const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+    let match;
+    while ((match = fenceRe.exec(text)) !== null) {
+      const inner = clean(match[1]);
+      if (inner) candidates.push(inner);
+    }
+    candidates.reverse();
+    const strippedTop = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    if (strippedTop) candidates.push(strippedTop);
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch (_) {}
+      const balanced = extractBalancedJsonSpan(candidate);
+      if (balanced) return balanced;
+      try {
+        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(candidate);
+        if (repaired && typeof repaired === 'object') return repaired;
+      } catch (_) {}
+    }
+    throw new Error('API 返回中没有合法 JSON 对象或数组');
+  }
+
+  function parseResponse(raw, tasks) {
+    const value = parseJsonPayload(raw);
     const nameBlacklist = configuredNameBlacklist(settings());
     // 兼容 0.1.x：旧 API 只返回人物记忆数组。
     const personalValue = tasks.memory ? (Array.isArray(value)
@@ -1076,13 +1140,34 @@ window.MEMORY_ENGINE = (function() {
     const prompt = await buildRequestPrompt(tasks, state, st);
     lastDebug = { prompt, requestPrompt: prompt, rawResult: '', apiResponse: '', parsed: null, error: '' };
     const retries = Math.max(0, Number(options?.retries ?? st.apiAutoRetries) || 0);
+    const purpose = tasks.memory && tasks.small
+      ? '人物、实体与纪要'
+      : (tasks.memory ? '人物与实体提取' : (tasks.small ? '阶段纪要' : '总述'));
     for (let attempt = 0; attempt <= retries; attempt++) {
+      let logId = null;
       try {
+        window.WORLD_ENGINE_API?.setNextRequestMeta?.({
+          module: 'memory',
+          purpose,
+          attempt: attempt + 1,
+          maxAttempts: retries + 1,
+          onLogId: id => { logId = id; }
+        });
         const raw = await window.WORLD_ENGINE_API.callApi(
           prompt, st.maxTokens, st.temperature, abortController?.signal, st
         );
         lastDebug.rawResult = lastDebug.apiResponse = raw;
-        const parsed = parseResponse(raw, tasks);
+        let parsed;
+        try {
+          parsed = parseResponse(raw, tasks);
+        } catch (parseErr) {
+          window.WORLD_ENGINE_API?.updateRequestLog?.(logId, {
+            status: 'error',
+            phase: '解析失败',
+            error: String(parseErr?.message || parseErr)
+          });
+          throw parseErr;
+        }
         lastDebug.parsed = clone(parsed);
         return parsed;
       } catch (error) {

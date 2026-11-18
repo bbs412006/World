@@ -1865,6 +1865,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       draft.error = false;
       refresh();
       try {
+        api.setNextRequestMeta?.({ module: 'outline', purpose: '获取模型列表' });
         const models = await api.fetchModelList(cfg);
         draft.fetchedModels = Array.isArray(models) ? models : [];
         draft.message = draft.fetchedModels.length ? `获取到 ${draft.fetchedModels.length} 个模型。` : '模型列表为空。';
