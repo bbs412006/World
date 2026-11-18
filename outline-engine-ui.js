@@ -703,13 +703,83 @@ window.OUTLINE_ENGINE_UI = (function() {
     </section>`;
   }
 
+  function renderCurrentPositionCard(current, draft, schedContext) {
+    const plan = current.plan || {}, chapters = chaptersOf(plan), tracks = tracksOf(plan), allNodes = nodesOf(plan);
+    if (draft.lastCurrentChapterId !== current.currentChapterId && draft.selectedChapterId === draft.lastCurrentChapterId) draft.selectedChapterId = '';
+    draft.lastCurrentChapterId = current.currentChapterId;
+    const hasAnyContent = Boolean(clean(plan.title) || clean(plan.synopsis) || chapters.length || tracks.length || allNodes.length);
+    const curChapter = chapters.find(ch => ch.id === current.currentChapterId) || chapters[0] || null;
+    const viewChapter = chapters.find(ch => ch.id === draft.selectedChapterId) || curChapter;
+    const isPreviewingOther = Boolean(viewChapter && curChapter && viewChapter.id !== curChapter.id);
+
+    if (!hasAnyContent) {
+      return `<section class="we-section we-outline-pos-section">
+        <div class="we-outline-section-head">
+          <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置<span class="we-section-motto">— 脉络所至，一目了然</span></div>
+          <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
+        </div>
+        <div class="we-outline-empty-box">
+          <p class="we-outline-empty">尚未建立剧情大纲。可点“整理文本”由 AI 拆解，或进入“剧情”页新建章节与剧情线。</p>
+          <div class="we-outline-actions">${button('open-text', '整理文本导入', '', 'primary')}${button('view-tracks', '前往剧情看板')}</div>
+        </div>
+      </section>`;
+    }
+
+    const doneAll = allNodes.filter(node => ['completed', 'skipped'].includes(nodeStatus(current, node.id))).length;
+    const viewIndex = viewChapter ? chapters.findIndex(ch => ch.id === viewChapter.id) : -1;
+    const gates = viewChapter ? (viewChapter.exitNodeIds || chapterNodes(plan, viewChapter.id).filter(node => node.required !== false).map(node => node.id)) : [];
+    const doneGates = gates.filter(id => ['completed', 'skipped'].includes(nodeStatus(current, id))).length;
+
+    // 聚焦当前位置的节点：优先展示本轮拟注入节点 + 当前展示章内节点（只取核心前 5 条，保持首页紧凑）
+    const seen = new Set(), focusNodes = [];
+    const pushUnique = list => {
+      for (const node of list) {
+        if (node && !seen.has(node.id)) { seen.add(node.id); focusNodes.push(node); }
+      }
+    };
+    const chNodes = viewChapter ? chapterNodes(plan, viewChapter.id) : allNodes;
+    const activeChNodes = chNodes.filter(node => !['completed', 'skipped'].includes(nodeStatus(current, node.id)));
+    if (!isPreviewingOther) pushUnique(schedContext.narrative?.selected || []);
+    pushUnique(activeChNodes.length ? activeChNodes : chNodes);
+    pushUnique(chNodes);
+    const MAX_HOME_NODES = 5;
+    const visibleNodes = focusNodes.slice(0, MAX_HOME_NODES);
+    const omittedCount = Math.max(0, focusNodes.length - visibleNodes.length);
+
+    const chapterLine = viewChapter
+      ? `<div class="we-outline-pos-chapter">
+          <div class="we-outline-track-title-row">
+            <strong>${viewIndex >= 0 ? `第 ${viewIndex + 1}/${chapters.length} 章 · ` : ''}${h(viewChapter.title || '未命名章节')}</strong>
+            ${isPreviewingOther
+              ? `<span class="we-outline-badge">正在查看其它章</span>${button('select-chapter', '回到当前章', ` data-outline-chapter="${h(curChapter.id)}"`)}`
+              : '<span class="we-outline-badge we-outline-badge-current">当前章</span>'}
+            ${gates.length ? `<span class="we-outline-hint">推进门槛 ${doneGates}/${gates.length}</span>` : ''}
+          </div>
+          ${viewChapter.goal ? `<p class="we-outline-goal">${h(viewChapter.goal)}</p>` : ''}
+        </div>`
+      : `<div class="we-outline-pos-chapter"><strong>跨章自由推进中</strong></div>`;
+
+    return `<section class="we-section we-outline-pos-section">
+      <div class="we-outline-section-head">
+        <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置<span class="we-section-motto">— 脉络所至，一目了然</span></div>
+        <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
+      </div>
+      ${plan.title ? `<div class="we-outline-pos-plan">《${h(plan.title)}》</div>` : ''}
+      ${chapterLine}
+      <div class="we-outline-pos-nodes">
+        ${visibleNodes.map((node, index) => renderNodeCard(current, node, index, draft, schedContext)).join('') || '<p class="we-outline-empty">当前位置暂无待推进节点。</p>'}
+        ${omittedCount > 0 ? `<p class="we-outline-hint">还有 ${omittedCount} 个节点已折叠，请在“剧情看板”查看与编排。</p>` : ''}
+      </div>
+      <div class="we-outline-pos-foot">全书共 ${chapters.length} 章 · ${tracks.length} 条剧情线 · 已完成 ${doneAll}/${allNodes.length} 个节点</div>
+    </section>`;
+  }
+
   function renderHome(current, draft, running, enabled) {
     const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
-    const mode = draft.boardMode === 'track' ? 'track' : 'chapter';
     return `<div class="we-outline-home">
       ${renderOutlineCore(current, draft, running, enabled, schedContext.narrative)}
       ${renderOutlineNavList(draft)}
-      ${renderStoryBoard(current, draft, schedContext, mode, '剧情看板', '章回多线，随增随改')}
+      ${renderCurrentPositionCard(current, draft, schedContext)}
       ${renderSuggestions(current)}
     </div>`;
   }
@@ -1291,7 +1361,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (['home', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug'].some(view => action === 'view-' + view)) {
       const nextView = action.slice(5);
       draft.view = nextView;
-      if (nextView === 'tracks') draft.tracksBoardMode = 'track';
+      if (nextView === 'tracks' && !draft.tracksBoardMode) draft.tracksBoardMode = 'track';
       draft.selectedNavView = null;
       draft.settingsOpen = false;
       draft.editorOpen = false;
@@ -1302,8 +1372,8 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (action === 'toggle-settings') { draft.settingsOpen = !draft.settingsOpen; if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; } if (!draft.settingsDraft) draft.settingsDraft = clone(settings()); }
     else if (action === 'close-settings') draft.settingsOpen = false;
     else if (action === 'toggle-injection-preview') draft.injectionPreviewOpen = !draft.injectionPreviewOpen;
-    else if (action === 'board-mode-chapter') { if (draft.view === 'tracks') draft.tracksBoardMode = 'chapter'; else draft.boardMode = 'chapter'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
-    else if (action === 'board-mode-track') { if (draft.view === 'tracks') draft.tracksBoardMode = 'track'; else draft.boardMode = 'track'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
+    else if (action === 'board-mode-chapter') { if (draft.view !== 'tracks') draft.view = 'tracks'; draft.tracksBoardMode = 'chapter'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
+    else if (action === 'board-mode-track') { if (draft.view !== 'tracks') draft.view = 'tracks'; draft.tracksBoardMode = 'track'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
     else if (action === 'toggle-node') { draft.expandedNodes[ds.outlineNid] = !draft.expandedNodes[ds.outlineNid]; }
     else if (action === 'toggle-adv-fold') {
       if (draft.inlineEdit?.kind === 'node' && draft.inlineEdit.data?.id === ds.outlineNid) draft.inlineEdit.showAdvanced = !draft.inlineEdit.showAdvanced;
@@ -1313,6 +1383,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (action === 'quick-edit-cancel') { draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
     else if (action === 'quick-edit-plan') {
       if (!canCommitSavedPlan(draft)) return;
+      if (draft.view === 'home') draft.view = 'tracks';
       const p = current.plan || {};
       draft.inlineEdit = { kind: 'plan', id: 'plan', isNew: false, data: { title: p.title || '', synopsis: p.synopsis || '', constraints: p.constraints || '', publicSynopsis: p.publicSynopsis || '', publicConstraints: p.publicConstraints || '' } };
     }
@@ -1329,7 +1400,8 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'quick-add-chapter') {
       if (!canCommitSavedPlan(draft)) return;
-      if (draft.view === 'tracks') draft.tracksBoardMode = 'chapter'; else draft.boardMode = 'chapter';
+      if (draft.view === 'home') draft.view = 'tracks';
+      draft.tracksBoardMode = 'chapter';
       const cid = uid('chapter');
       draft.inlineEdit = { kind: 'chapter', id: cid, isNew: true, data: { id: cid, title: `第 ${chaptersOf(current.plan).length + 1} 章`, goal: '', exitNodeIds: [] } };
     }
@@ -1372,7 +1444,8 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'quick-add-track') {
       if (!canCommitSavedPlan(draft)) return;
-      if (draft.view === 'tracks') draft.tracksBoardMode = 'track'; else draft.boardMode = 'track';
+      if (draft.view === 'home') draft.view = 'tracks';
+      draft.tracksBoardMode = 'track';
       const tid = uid('track');
       draft.inlineEdit = { kind: 'track', id: tid, isNew: true, data: { id: tid, kind: tracksOf(current.plan).length ? 'side' : 'main', title: '', goal: '', priority: 0, paused: false } };
     }
@@ -1424,12 +1497,13 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'quick-add-node') {
       if (!canCommitSavedPlan(draft)) return;
+      if (draft.view === 'home') draft.view = 'tracks';
       const plan = current.plan || {}, chs = chaptersOf(plan);
       const track = tracksOf(plan).find(t => t.id === ds.outlineTrack) || tracksOf(plan)[0] || { id: 'main', kind: 'main' };
       const resolvedChapterId = chs.find(c => c.id === draft.selectedChapterId)?.id || chs.find(c => c.id === current.currentChapterId)?.id || chs[0]?.id || '';
       const chId = ds.outlineChapter || resolvedChapterId;
-      const activeMode = draft.view === 'tracks' ? (draft.tracksBoardMode || 'track') : (draft.boardMode || 'chapter');
-      const node = blankNodeFor(track, activeMode === 'track' ? '' : chId);
+      const activeMode = draft.tracksBoardMode || 'track';
+      const node = blankNodeFor(track, activeMode === 'track' && !ds.outlineChapter ? '' : chId);
       draft.confirmDeleteTrackId = null;
       draft.inlineEdit = { kind: 'node', id: node.id, isNew: true, showAdvanced: false, data: node, entityPicks: {} };
     }

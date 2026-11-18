@@ -195,8 +195,8 @@ function runMainEntrySuite() {
   assert.ok(outlineHtml.includes('we-outline-core-section') && outlineHtml.includes('剧情脉络'), '剧情大纲首页应包含核心环形仪表盘');
   assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="tracks"') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"'), '剧情大纲首页纵轴导航应保留剧情、注入、线索 3 项高频入口');
   assert.ok(!outlineHtml.includes('data-outline-nav="transfer"') && !outlineHtml.includes('data-outline-nav="recovery"'), '低频存档与恢复已收进设置页，不应占首页纵轴导航');
-  assert.ok(outlineHtml.includes('we-outline-home-chapter') && outlineHtml.includes('剧情看板'), '剧情大纲首页应包含统一剧情看板');
-  assert.ok(outlineHtml.includes('data-outline-action="board-mode-chapter"') && outlineHtml.includes('data-outline-action="board-mode-track"'), '剧情看板应支持按章节/按剧情线切换');
+  assert.ok(outlineHtml.includes('we-outline-pos-section') && outlineHtml.includes('当前位置'), '剧情大纲首页应展示当前所处剧情位置');
+  assert.ok(!outlineHtml.includes('we-outline-board-toolbar'), '完整剧情看板已放进导航“剧情”模块，首页不再重复平铺');
 
   // 4. 二级分页、设置选项卡与编辑器均使用统一的 we-sub-topbar 与 we-settings-tabs-shell
   return (async () => {
@@ -206,7 +206,7 @@ function runMainEntrySuite() {
 
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-tracks');
     const tracksHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(tracksHtml.includes('we-outline-home-chapter') && tracksHtml.includes('we-outline-board-toolbar'), '剧情分页应复用同一套剧情看板卡片与工具栏样式');
+    assert.ok(tracksHtml.includes('we-outline-home-chapter') && tracksHtml.includes('we-outline-board-toolbar') && tracksHtml.includes('data-outline-action="board-mode-chapter"') && tracksHtml.includes('data-outline-action="board-mode-track"'), '剧情分页应直接采用完整剧情看板样式并支持按章节/按剧情线切换');
 
     for (const view of ['tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
       await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-' + view);

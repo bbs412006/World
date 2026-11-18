@@ -409,6 +409,31 @@
   font-size: 11px;
   line-height: 1.6;
 }
+.we-outline-pos-section { margin-bottom: 0; }
+.we-outline-pos-plan {
+  font-family: "SimSun", "宋体", "Songti SC", "STSong", serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--we-beige);
+  margin: 4px 0;
+}
+.we-outline-pos-chapter {
+  padding: 7px 10px;
+  margin: 6px 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--we-hairline);
+  background: var(--we-bg2);
+}
+.we-outline-pos-chapter strong { color: var(--we-text); font-size: 13px; }
+.we-outline-pos-nodes { display: flex; flex-direction: column; gap: 2px; }
+.we-outline-pos-foot {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--we-hairline);
+  font-size: 11px;
+  color: var(--we-text3);
+  text-align: right;
+}
 .we-outline-inject-preview {
   margin-top: 10px;
   padding-top: 10px;
