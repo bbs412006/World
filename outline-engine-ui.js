@@ -14,11 +14,36 @@ window.OUTLINE_ENGINE_UI = (function() {
   };
   const OUTLINE_SETTINGS_TABS = [
     { key: 'common', label: '常用' },
-    { key: 'api', label: '连接' },
+    { key: 'link', label: '联动' },
+    { key: 'advanced', label: '高级' },
     { key: 'archive', label: '存档' },
     { key: 'debug', label: '调试' },
     { key: 'about', label: '关于' }
   ];
+  const OUTLINE_THEME_KEY = 'outline-engine-theme';
+  const OUTLINE_THEMES = [
+    { id: 'default', name: '墨玉 · 默认' },
+    { id: 'night', name: '夜阑 · 近黑' },
+    { id: 'deepsea', name: '深海 · 幽蓝' },
+    { id: 'plum', name: '夜合 · 暗紫' },
+    { id: 'paper', name: '云白 · 清爽' },
+    { id: 'sakura', name: '早樱 · 浅粉' }
+  ];
+  function normalizeOutlineTheme(id) {
+    return OUTLINE_THEMES.some(theme => theme.id === id) ? id : 'default';
+  }
+  function getStoredOutlineTheme() {
+    try { return normalizeOutlineTheme(localStorage.getItem(OUTLINE_THEME_KEY) || localStorage.getItem('we-theme') || 'default'); }
+    catch (_) { return 'default'; }
+  }
+  function applyOutlineTheme(id) {
+    const theme = normalizeOutlineTheme(id);
+    if (typeof document !== 'undefined' && document.documentElement) {
+      if (theme === 'default') document.documentElement.removeAttribute('data-we-theme');
+      else document.documentElement.setAttribute('data-we-theme', theme);
+    }
+    try { localStorage.setItem(OUTLINE_THEME_KEY, theme); } catch (_) {}
+  }
   let initialized = false;
   const clean = value => String(value == null ? '' : value).trim();
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -36,7 +61,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   function draftFor(id) {
     id = id || chatId();
     if (!drafts.has(id)) drafts.set(id, {
-      view: 'home', boardMode: 'chapter', tracksBoardMode: 'track', selectedNavView: null, settingsOpen: false, settingsTab: 'common', settingsDraft: null,
+      view: 'home', boardMode: 'chapter', tracksBoardMode: 'track', selectedNavView: null, settingsOpen: false, settingsTab: 'common', settingsDraft: null, coordinationMode: null, collapsedSections: {},
       editorOpen: false, textOpen: false, injectionPreviewOpen: false,
       expandedNodes: {}, expandedEditorNodes: {}, expandedEditorAdv: {}, inlineEdit: null,
       confirmDeleteTrackId: null, confirmBatchDeleteTrackId: null,
@@ -90,6 +115,31 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (opt.type === 'checkbox') return `<label class="we-outline-check"><input ${attrs} type="checkbox"${value ? ' checked' : ''}><span>${h(label)}</span></label>`;
     if (opt.choices) return `<label class="we-outline-field"><span>${h(label)}</span><select ${attrs}>${opt.choices.map(([id, text]) => `<option value="${h(id)}"${String(value) === id ? ' selected' : ''}>${h(text)}</option>`).join('')}</select></label>`;
     return `<label class="we-outline-field"><span>${h(label)}</span><input ${attrs} type="${h(opt.type || 'text')}" value="${h(value)}"${opt.min != null ? ` min="${opt.min}"` : ''}${opt.step ? ` step="${opt.step}"` : ''}${opt.type === 'password' ? ' autocomplete="new-password"' : ''}></label>`;
+  }
+  function settingHint(hint) {
+    return hint ? `<div class="we-outline-field-hint">${hint}</div>` : '';
+  }
+  function settingsSection(draft, id, title, body) {
+    const collapsed = Boolean(draft?.collapsedSections?.[id]);
+    return `<div class="we-section"><div class="we-section-title"><span class="we-section-toggle" data-section="${h(id)}"><span class="we-section-arrow" id="we-section-arrow-${h(id)}">${collapsed ? '▶' : '▼'}</span>${h(title)}</span></div><div class="we-section-body" id="we-section-body-${h(id)}"${collapsed ? ' style="display:none"' : ''}>${body}</div></div>`;
+  }
+  function settingCheck(label, name, checked, hint) {
+    return `<div class="we-input-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input id="we-outline-${h(name)}" data-outline-setting="${h(name)}" type="checkbox"${checked ? ' checked' : ''}>${h(label)}</label>${settingHint(hint)}</div>`;
+  }
+  function settingInput(label, name, value, opts) {
+    const opt = opts || {};
+    const numAttrs = `${opt.min != null ? ` min="${opt.min}"` : ''}${opt.max != null ? ` max="${opt.max}"` : ''}${opt.step ? ` step="${opt.step}"` : ''}`;
+    const placeholder = opt.placeholder ? ` placeholder="${h(opt.placeholder)}"` : '';
+    const auto = opt.type === 'password' ? ' autocomplete="new-password"' : '';
+    return `<div class="we-input-group"><label>${h(label)}</label><input id="we-outline-${h(name)}" data-outline-setting="${h(name)}" type="${h(opt.type || 'text')}" value="${h(value)}"${placeholder}${numAttrs}${auto} style="width:100%;">${settingHint(opt.hint)}</div>`;
+  }
+  function settingSelect(label, name, value, choices, hint) {
+    return `<div class="we-input-group"><label>${h(label)}</label><select id="we-outline-${h(name)}" data-outline-setting="${h(name)}" style="width:100%;">${choices.map(([id, text]) => `<option value="${h(id)}"${String(value) === id ? ' selected' : ''}>${h(text)}</option>`).join('')}</select>${settingHint(hint)}</div>`;
+  }
+  function settingCompactField(label, name, value, opts) {
+    const opt = opts || {};
+    const numAttrs = `${opt.min != null ? ` min="${opt.min}"` : ''}${opt.max != null ? ` max="${opt.max}"` : ''}${opt.step ? ` step="${opt.step}"` : ''}`;
+    return `<div style="flex:1;"><label>${h(label)}</label><input id="we-outline-${h(name)}" data-outline-setting="${h(name)}" type="${h(opt.type || 'number')}" value="${h(value)}"${numAttrs} style="width:100%;"></div>`;
   }
   function subTopbar(title, poem, backAction) {
     return `<div class="we-sub-topbar">
@@ -899,13 +949,12 @@ window.OUTLINE_ENGINE_UI = (function() {
       ${draft.preview ? `<section class="we-section we-outline-preview">${renderPlanPreview(draft.preview)}<div class="we-outline-actions">${button('adopt-preview', '确认采用整理结果', '', 'primary')}${button('edit-preview', '先进入全量编排')}${button('discard-preview', '丢弃预览', '', 'danger')}</div></section>` : ''}`;
   }
 
-  function renderArchiveBody(current, draft) {
+  function renderArchiveBody(current, draft, options) {
+    const collapsible = Boolean(options?.collapsible);
     let cc, status, snapshots = [];
     try { cc = cache(); status = cc?.getStatus?.(); snapshots = cc?.listSnapshots?.() || []; } catch (_) {}
     const hasPlan = Boolean(clean(current.plan?.title) || chaptersOf(current.plan).length || tracksOf(current.plan).length || nodesOf(current.plan).length);
-    return `<section class="we-section we-outline-transfer">
-        <div class="we-section-title">聊天备份保存点</div>
-        <p class="we-outline-hint">${status ? `实时同步${status.syncEnabled ? '已开启' : '已关闭'} · 本地修订 ${h(status.localRev ?? 0)} / 聊天修订 ${h(status.liveRev ?? 0)} · ${snapshots.length} 份保存点` : '当前聊天存档接口尚未就绪。'}</p>
+    const snapshotBody = `<p class="we-outline-hint">${status ? `实时同步${status.syncEnabled ? '已开启' : '已关闭'} · 本地修订 ${h(status.localRev ?? 0)} / 聊天修订 ${h(status.liveRev ?? 0)} · ${snapshots.length} 份保存点` : '当前聊天存档接口尚未就绪。'}</p>
         <div class="we-outline-actions we-outline-snap-create"><input id="we-outline-snapshot-name" value="${h(draft.snapshotName)}" placeholder="保存点名称">${button('snapshot-create', '新建命名保存点', cc ? '' : ' disabled', 'primary')}</div>
         <div class="we-chatcache-list">${snapshots.map(snap => `<div class="we-snapshot-row">
           <div class="we-snapshot-main">
@@ -914,23 +963,39 @@ window.OUTLINE_ENGINE_UI = (function() {
           </div>
           <div class="we-snapshot-actions">${button('snapshot-restore', '恢复', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-rename', '重命名', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-export', '导出', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-delete', '删除', ` data-outline-snapshot="${h(snap.id)}"`, 'danger')}</div>
         </div>`).join('') || '<div class="we-empty" style="padding:10px;">暂无剧情保存点</div>'}</div>
-        <label class="we-outline-field" style="margin-top:10px;"><span>导入聊天保存点 JSON</span><input id="we-outline-snapshot-file" type="file" accept=".json,application/json"></label>
-      </section>
-      <section class="we-section we-outline-transfer">
-        <div class="we-section-title">计划、联动数据导出与清空</div>
-        <div class="we-outline-actions">
+        <div class="we-input-group" style="margin-top:10px;margin-bottom:0;">
+          <label>导入聊天保存点 JSON</label>
+          <input id="we-outline-snapshot-file" type="file" accept=".json,application/json" style="width:100%;">
+        </div>`;
+    const dataBody = `<div class="we-outline-actions">
           ${button('export-plan', '导出作者计划 JSON')}
           ${button('export-full', '导出完整联动 JSON')}
           ${button('history-export', '导出联合历史')}
           ${hasPlan ? button('clear-outline', '清空当前大纲', '', 'danger') : ''}
         </div>
-        <label class="we-outline-field"><span>导入计划、剧情完整 JSON 或联合历史（先预览再写入）</span><input id="we-outline-json-file" type="file" accept=".json,application/json"></label>
-        <p class="we-outline-hint">清空前会自动为你保存一份聊天快照以便后悔恢复；跨聊天导入会清除旧聊天的运行游标。</p>
+        <div class="we-input-group" style="margin-top:8px;margin-bottom:0;">
+          <label>导入计划、剧情完整 JSON 或联合历史（先预览再写入）</label>
+          <input id="we-outline-json-file" type="file" accept=".json,application/json" style="width:100%;">
+          <div class="we-outline-field-hint">清空前会自动为你保存一份聊天快照以便后悔恢复；跨聊天导入会清除旧聊天的运行游标。</div>
+        </div>`;
+    const recoveryInner = `${renderQuarantineNotice()}${renderRecoveryDetails()}`;
+    if (collapsible) {
+      return settingsSection(draft, 'set-outline-snapshots', '聊天备份保存点', snapshotBody)
+        + settingsSection(draft, 'set-outline-data', '剧情数据导入 / 导出', dataBody)
+        + settingsSection(draft, 'set-outline-recovery', '联合历史恢复与审计', recoveryInner);
+    }
+    return `<section class="we-section we-outline-transfer">
+        <div class="we-section-title">聊天备份保存点</div>
+        ${snapshotBody}
+      </section>
+      <section class="we-section we-outline-transfer">
+        <div class="we-section-title">剧情数据导入 / 导出</div>
+        ${dataBody}
       </section>
       <section class="we-section">
         <details class="we-outline-adv-fold">
           <summary>联合历史恢复与审计（世界 / 记忆 / 剧情回退重建）</summary>
-          <div class="we-outline-adv-body" style="margin-top:8px;">${renderQuarantineNotice()}${renderRecoveryDetails()}</div>
+          <div class="we-outline-adv-body" style="margin-top:8px;">${recoveryInner}</div>
         </details>
       </section>`;
   }
@@ -940,81 +1005,136 @@ window.OUTLINE_ENGINE_UI = (function() {
     const activeTab = OUTLINE_SETTINGS_TABS.some(t => t.key === draft.settingsTab) ? draft.settingsTab : 'common';
     draft.settingsTab = activeTab;
     const outlineVersion = window.OUTLINE_ENGINE_SETTINGS?.VERSION || '2.0.0';
+    const isCustomApi = value.apiSource === 'custom';
+    const runningLabel = engine()?.getRunningLabel?.() || (isRebuilding() ? '联合历史重建中' : draft.busy ? '剧情任务中' : '');
+    const apiBody = `
+      ${settingSelect('API 来源', 'apiSource', value.apiSource || 'world', [['world', '复用世界引擎 API（默认）'], ['custom', '剧情模块独立 API']], '复用模式读取世界引擎已配置的连接；此处保存不会改写世界或记忆的设置。')}
+      <fieldset class="we-outline-custom-api we-outline-custom-api-flat"${isCustomApi ? '' : ' disabled'}>
+        ${settingSelect('连接方式', 'connectionMode', value.connectionMode || 'direct', [['direct', '直连（默认）'], ['proxy', '经酒馆代理（解决跨域 CORS）']], '连不上或控制台报 CORS 错误时，切到「经酒馆代理」由酒馆服务端转发。')}
+        ${settingInput('剧情大纲 API URL（OpenAI 兼容）', 'apiUrl', value.apiUrl || '', { placeholder: 'https://api.openai.com/v1', hint: '填到「版本前缀」一级即可，/chat/completions 可加可不加。' })}
+        ${settingInput('剧情大纲 API Key', 'apiKey', value.apiKey || '', { type: 'password' })}
+        <div class="we-input-group" style="display:flex;gap:6px;align-items:end;">
+          <div style="flex:1;">
+            <label>模型</label>
+            <input id="we-outline-model" data-outline-setting="model" type="text" value="${h(value.model || '')}" placeholder="模型名称" style="width:100%;">
+          </div>
+          ${button('fetch-models', draft.fetchingModels ? '获取中…' : '获取列表', ` id="we-outline-fetch-models"${draft.fetchingModels ? ' disabled' : ''} style="white-space:nowrap;flex-shrink:0;"`)}
+        </div>
+        <div class="we-input-group">
+          <select id="we-outline-model-list" style="${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? '' : 'display:none;'}width:100%;margin-top:4px;"><option value="">-- 选择模型${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? `（共 ${draft.fetchedModels.length} 个）` : ''} --</option>${(draft.fetchedModels || []).map(m => `<option value="${h(m)}"${String(value.model || '') === String(m) ? ' selected' : ''}>${h(m)}</option>`).join('')}</select>
+        </div>
+        <div class="we-input-group" style="display:flex;gap:6px;">
+          ${settingCompactField('温度', 'temperature', value.temperature ?? 0.2, { type: 'number', min: 0, step: 0.1 })}
+          ${settingCompactField('最大输出 token', 'maxTokens', value.maxTokens ?? 8192, { type: 'number', min: 1, step: 1 })}
+        </div>
+        ${settingInput('请求超时（秒）', 'apiTimeoutSeconds', (value.apiTimeoutMs ?? 120000) / 1000, { type: 'number', min: 0, step: 1, hint: '超过该时间仍未收到完整响应会自动中止。0 = 不超时。' })}
+      </fieldset>`;
+
+    const evolveBody = `
+      ${settingCheck('启用剧情模块', 'engineEnabled', value.engineEnabled, '关闭后仅停用自动检查与正文注入，仍可随时新建、编辑或删除大纲，不影响世界引擎与记忆引擎。')}
+      ${settingCheck('首楼为 AI 开场白', 'firstLayerIsAiOpening', value.firstLayerIsAiOpening !== false, '默认勾选：第 0 层不计入自动检查轮次与进度核对；取消勾选后，第 0 层按普通对话参与核对。')}
+      ${settingCheck('自动检查新增正文', 'autoCheck', value.autoCheck !== false, '开启后每累积指定新增 AI 轮次自动调用 API 核对节点状态与线索揭露；关闭则仅手动触发。')}
+      ${settingInput('每多少个新增轮次检查一次（X）', 'checkEveryX', value.checkEveryX ?? 3, { type: 'number', min: 1, step: 1, hint: '重 Roll 不计入新轮次。' })}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${button('check-now', '立即检查正文', '', 'primary')}
+      </div>
+      <div class="we-hint" id="we-outline-task-status" style="margin-top:8px;">${runningLabel ? `正在进行${h(runningLabel)}` : '当前没有运行中的剧情任务'}</div>`;
+
+    const injectBody = `
+      ${settingCheck('注入正文指导', 'injectIntoPrompt', value.injectIntoPrompt !== false, '按当前章节焦点、主支暗线优先度与冷却轮次，挑选活跃节点与公开线索提示注入正文提示词。')}
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        ${settingCompactField('正文每轮最多安排节点', 'narrativeLimit', value.narrativeLimit ?? 3, { type: 'number', min: 1, step: 1 })}
+        ${settingCompactField('重复安排冷却轮次', 'cooldownTicks', value.cooldownTicks ?? 1, { type: 'number', min: 0, step: 1 })}
+      </div>
+      ${settingInput('注入目标字数预算', 'injectMaxChars', value.injectMaxChars ?? 2500, { type: 'number', min: 200, step: 100, hint: '限制注入正文的剧情指导篇幅，优先保留主线节点、当前章焦点与关键过渡门槛。' })}`;
+
+    const bridgeSummary = window.STORY_ENGINE_BRIDGE?.getStatusSummary?.() || null;
+    const effectiveCoordMode = (draft.coordinationMode === 'independent' || draft.coordinationMode === 'stagger-serial')
+      ? draft.coordinationMode
+      : (window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || 'stagger-serial');
+    const bridgeHint = bridgeSummary
+      ? `当前已开启模块：${[bridgeSummary.worldEnabled && '世界', bridgeSummary.memoryEnabled && '记忆', bridgeSummary.outlineEnabled && '大纲'].filter(Boolean).join(' · ') || '无'} · 正文注入顺序：世界 → 记忆 → 大纲`
+      : '未加载协同桥（当前处于严格独立模式；仍可预存配置，停用任一模块不影响其余模块工作）';
+    const bridgeBody = `
+      <div class="we-hint" style="margin-bottom:8px;">${h(bridgeHint)}</div>
+      <div class="we-input-group">
+        <label>同轮多模块 API 并发调度策略</label>
+        <select id="we-outline-coordinationMode" style="width:100%;">
+          <option value="stagger-serial"${effectiveCoordMode === 'stagger-serial' ? ' selected' : ''}>串行错峰管道（推荐 · 保护 Vertex 等并发受限渠道）</option>
+          <option value="independent"${effectiveCoordMode === 'independent' ? ' selected' : ''}>各自独立并发（无排队，按各自原定时器直发）</option>
+        </select>
+        <div class="we-outline-field-hint">启用 ≥2 个自动后台引擎且选择串行错峰时，固定按“世界推演 → 大纲核对 → 记忆提取”先后错峰排队，单并发执行并复用前置最新公开结果；仅启用单个引擎时始终立即直通。三个模块共享此调度策略。</div>
+      </div>`;
+    const worldLinkBody = `
+      ${settingCheck('提供指导给世界推演', 'injectIntoWorldEngine', value.injectIntoWorldEngine !== false, '开启后，世界后台推演会收到大纲提供的线索触发倾向、幕后布局与关键节点意图，辅助推演衔接；未揭露私密事实不会泄露给玩家角色。')}
+      ${settingInput('后台每轮最多安排节点', 'worldLimit', value.worldLimit ?? 3, { type: 'number', min: 1, step: 1, hint: '限制每次交给世界引擎推演的剧情节点条数，避免挤占世界推演提示词空间。' })}
+      ${settingCheck('在大纲核对与线索判定中使用世界公开状态', 'useWorldReference', value.useWorldReference !== false, '允许大纲后台核对参考世界公开摘要与大势，且线索条件可读取世界故事天数与事件账本（关闭后大纲完全脱离世界状态独立判定）。')}`;
+    const memoryLinkBody = `
+      ${settingCheck('向记忆引擎同步已核实线索与公开焦距', 'injectIntoMemoryEngine', value.injectIntoMemoryEngine !== false, '开启后，经正文逐字原文证据核实的新增线索接触（contacts）与揭露真相（reveals）会自动安全写入对应人物记忆，并向记忆提取提供公开章节焦点；未揭露私密事实始终隔离。')}
+      ${settingCheck('在大纲核对与整理中参考记忆摘要与持续事实', 'useMemoryReference', value.useMemoryReference !== false, '开启后，整理与核对会参考记忆引擎中的人物别名、活跃持续事实、最新总述、近期纪要及人物弧光作为只读背景（不会作为正文原文完成证据）。')}`;
+
+    const retryBody = settingInput('API 异常自动重试次数（X）', 'apiAutoRetries', value.apiAutoRetries ?? 0, { type: 'number', min: 0, step: 1, hint: '仅连接、HTTP、超时、空返回或 JSON 无法修补等故障才重试；正常解析为空变更不算错误。' });
+    const proposalBody = settingCheck('允许 AI 提出结构调整建议', 'allowProposals', value.allowProposals !== false, '核对正文后若发现故事走向明显偏离预设计划，允许 AI 在建议区生成微调草案；所有建议需作者审阅确认后才会写入正式大纲。');
+    const outlineTheme = getStoredOutlineTheme();
+    const outlineThemeOptions = OUTLINE_THEMES.map(theme => `<option value="${theme.id}"${theme.id === outlineTheme ? ' selected' : ''}>${theme.name}</option>`).join('');
+    const displayBody = `
+      <div class="we-input-group">
+        <label>剧情大纲主题配色</label>
+        <select id="we-outline-theme-select" style="width:100%;">${outlineThemeOptions}</select>
+        <div class="we-outline-field-hint">只影响剧情大纲面板并独立记忆；切回世界或记忆引擎时自动恢复对应模块自己的配色。</div>
+      </div>`;
+
+    const syncBody = `
+      ${settingCheck('实时同步到酒馆聊天', 'syncToChat', value.syncToChat, '开启同步后，大纲计划与进度会随酒馆聊天保存；API Key 等全局设置不会写入聊天。')}
+      ${settingCheck('自动备份', 'autoBackup', value.autoBackup, '关键节点推进、批量调整或覆盖导入前自动保留聊天恢复保存点。')}`;
+
+    const debugSectionBody = `<button class="we-btn" type="button" data-outline-action="export-diag" style="width:100%;margin-bottom:8px;">导出诊断包</button><div id="we-outline-debug-render">${renderDebugContent()}</div>`;
+
+    const aboutBody = `
+      <div class="we-about-current"><span class="we-changelog-cur">剧情大纲 v${h(outlineVersion)}</span></div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">剧情大纲 ${h(outlineVersion)}</div>
+        <div style="font-size:12px;color:var(--we-text2);line-height:1.7;">
+          跨章节多线剧情引擎。主线、支线与暗线按前置条件、时间与剧情线索独立调度；幕后事实与正文公开线索分层投影，配合世界与记忆联合历史实现可回退、可审计的叙事推演。
+        </div>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v2.1.1 · 设置界面统一与三模块对称联动</div>
+        <ul class="we-changelog-items">
+          <li>设置页结构与视觉全面统一：API 连接并入「常用」，补齐「联动」「高级」选项卡，统一使用可折叠分区、竖排标准控件与底部常驻保存栏，并在「常用」补入「首楼为 AI 开场白」开关、「高级」补入独立主题配色切换。</li>
+          <li>「联动」页升级为「三模块协同调度」「与世界引擎联动」「与记忆引擎联动」三张对称卡片：支持直接切换三模块共用的并发调度策略，并可独立开关参考世界公开状态、向记忆同步核实线索及参考记忆背景，断联后依然严格独立运行。</li>
+        </ul>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v2.1.0 · 界面精简与三模块协同联动</div>
+        <ul class="we-changelog-items">
+          <li>首页精简展示当前所处剧情位置，完整剧情看板收进纵轴「剧情」模块，存档与恢复整合进右上角设置。</li>
+          <li>接入跨模块协同桥：整理与核对融入已激活世界/记忆模块的人物及势力别名参考；核对只读上下文补充记忆持续事实、最新总述、近期纪要与人物弧光。</li>
+          <li>经逐字原文证据核实的新增线索接触（contacts）与揭露真相（reveals）可自动安全同步至对应人物主观记忆时间链；未揭露私密事实仍严密隔离。</li>
+          <li>支持同轮多模块并发「串行错峰管道」，紧随世界推演之后核对正文，减少重复重查并对齐正文注入顺序（世界 → 记忆 → 大纲）。</li>
+        </ul>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v2.0.0 · 跨章多线调度与联合事实日志</div>
+        <ul class="we-changelog-items">
+          <li>章节与主线、支线、暗线解耦；新增私密事实、可发现线索、实际接触与知情分层投影及联合历史增量快照恢复。</li>
+        </ul>
+      </div>`;
+
     const panelContent = {
-      common: `<div class="we-section">
-          <div class="we-section-title">模块开关与检查</div>
-          <p class="we-outline-hint">关闭模块时仅停用自动检查与正文注入，仍可随时新建、编辑、删除大纲。</p>
-          <div class="we-outline-form-grid">
-            ${field('启用剧情模块', 'engineEnabled', value.engineEnabled, { type: 'checkbox' })}
-            ${field('自动检查新增正文', 'autoCheck', value.autoCheck !== false, { type: 'checkbox' })}
-            ${field('允许 AI 提出结构调整建议', 'allowProposals', value.allowProposals !== false, { type: 'checkbox' })}
-            ${field('每多少个新增轮次检查一次', 'checkEveryX', value.checkEveryX ?? 3, { type: 'number', min: 1, step: 1 })}
-          </div>
-        </div>
-        <div class="we-section">
-          <div class="we-section-title">调度预算与正文注入</div>
-          <p class="we-outline-hint">决定每次发给正文多少条节点指引，以及优先保留的核心字数上限。</p>
-          <div class="we-outline-form-grid">
-            ${field('注入正文指导', 'injectIntoPrompt', value.injectIntoPrompt !== false, { type: 'checkbox' })}
-            ${field('提供指导给世界推演', 'injectIntoWorldEngine', value.injectIntoWorldEngine !== false, { type: 'checkbox' })}
-            ${field('正文每轮最多安排节点', 'narrativeLimit', value.narrativeLimit ?? 3, { type: 'number', min: 1, step: 1 })}
-            ${field('后台每轮最多安排节点', 'worldLimit', value.worldLimit ?? 3, { type: 'number', min: 1, step: 1 })}
-            ${field('重复安排冷却轮次', 'cooldownTicks', value.cooldownTicks ?? 1, { type: 'number', min: 0, step: 1 })}
-            ${field('注入目标字数预算', 'injectMaxChars', value.injectMaxChars ?? 2500, { type: 'number', min: 200, step: 100 })}
-          </div>
-        </div>`,
-      api: `<div class="we-section">
-          <div class="we-section-title">API 连接</div>
-          ${field('API 来源', 'apiSource', value.apiSource || 'world', { choices: [['world', '复用世界引擎 API'], ['custom', '剧情模块独立 API']] })}
-          <p class="we-outline-hint">复用模式读取世界引擎已配置的连接；这里的保存不会改写世界或记忆的设置。</p>
-          <fieldset class="we-outline-custom-api"${value.apiSource === 'custom' ? '' : ' disabled'}>
-            <legend>独立 API 配置</legend>
-            <div class="we-outline-form-grid">
-              ${field('API URL（含版本前缀）', 'apiUrl', value.apiUrl || '')}
-              ${field('API Key', 'apiKey', value.apiKey || '', { type: 'password' })}
-            </div>
-            <div class="we-outline-model-row">
-              ${field('模型', 'model', value.model || '')}
-              ${button('fetch-models', draft.fetchingModels ? '获取中…' : '获取列表', ` id="we-outline-fetch-models"${draft.fetchingModels ? ' disabled' : ''}`)}
-            </div>
-            ${Array.isArray(draft.fetchedModels) && draft.fetchedModels.length ? `<label class="we-outline-field"><span>选择已拉取模型</span><select id="we-outline-model-list"><option value="">-- 选择模型（共 ${draft.fetchedModels.length} 个）--</option>${draft.fetchedModels.map(m => `<option value="${h(m)}"${String(value.model || '') === String(m) ? ' selected' : ''}>${h(m)}</option>`).join('')}</select></label>` : ''}
-            <div class="we-outline-form-grid">
-              ${field('连接方式', 'connectionMode', value.connectionMode || 'direct', { choices: [['direct', '浏览器直连'], ['proxy', '经酒馆服务端代理']] })}
-              ${field('温度', 'temperature', value.temperature ?? 0.2, { type: 'number', min: 0, step: 0.1 })}
-              ${field('最大输出 tokens', 'maxTokens', value.maxTokens ?? 8192, { type: 'number', min: 1, step: 1 })}
-              ${field('请求超时（秒，0 为不限）', 'apiTimeoutSeconds', (value.apiTimeoutMs ?? 120000) / 1000, { type: 'number', min: 0, step: 1 })}
-              ${field('API 异常自动重试次数', 'apiAutoRetries', value.apiAutoRetries ?? 0, { type: 'number', min: 0, step: 1 })}
-            </div>
-          </fieldset>
-        </div>`,
-      archive: `<div class="we-section">
-          <div class="we-section-title">当前聊天同步设置</div>
-          ${field('实时同步到酒馆聊天', 'syncToChat', value.syncToChat, { type: 'checkbox' })}
-          ${field('自动备份', 'autoBackup', value.autoBackup, { type: 'checkbox' })}
-          <p class="we-outline-hint">开启同步后，大纲计划与进度会随酒馆聊天保存；API Key 等全局设置不会写入聊天。</p>
-        </div>${renderArchiveBody(current, draft)}`,
-      debug: renderDebugBody(),
-      about: `<div class="we-section">
-          <div class="we-changelog-top"><span class="we-changelog-cur">剧情大纲 v${h(outlineVersion)}</span></div>
-          <div style="font-size:12px;color:var(--we-text2);line-height:1.75;">
-            跨章节多线剧情引擎。主线、支线与暗线按前置条件、时间与剧情线索独立调度；幕后事实与正文公开线索分层投影，配合世界与记忆联合历史实现可回退、可审计的叙事推演。
-          </div>
-        </div>
-        <div class="we-section" style="margin-top:10px;">
-          <div class="we-section-title">v2.1.0 · 界面精简与三模块协同联动</div>
-          <ul class="we-changelog-items">
-            <li>首页精简展示当前所处剧情位置，完整剧情看板收进纵轴「剧情」模块，存档与恢复整合进右上角设置。</li>
-            <li>接入跨模块协同桥：整理与核对融入已激活世界/记忆模块的人物及势力别名参考；核对只读上下文补充记忆持续事实、最新总述、近期纪要与人物弧光。</li>
-            <li>经逐字原文证据核实的新增线索接触（contacts）与揭露真相（reveals）可自动安全同步至对应人物主观记忆时间链；未揭露私密事实仍严密隔离。</li>
-            <li>支持同轮多模块并发「串行错峰管道」，紧随世界推演之后核对正文，减少重复重查并对齐正文注入顺序（世界 → 记忆 → 大纲）。</li>
-          </ul>
-        </div>
-        <div class="we-section" style="margin-top:10px;">
-          <div class="we-section-title">v2.0.0 · 跨章多线调度与联合事实日志</div>
-          <ul class="we-changelog-items">
-            <li>章节与主线、支线、暗线解耦；新增私密事实、可发现线索、实际接触与知情分层投影及联合历史增量快照恢复。</li>
-          </ul>
-        </div>`
+      common: settingsSection(draft, 'set-outline-api', '剧情大纲 API', apiBody)
+        + settingsSection(draft, 'set-outline-evolve', '剧情检查与节奏', evolveBody)
+        + settingsSection(draft, 'set-outline-inject', '剧情指导注入', injectBody),
+      link: settingsSection(draft, 'set-outline-bridge', '三模块协同调度', bridgeBody)
+        + settingsSection(draft, 'set-outline-world-link', '与世界引擎联动', worldLinkBody)
+        + settingsSection(draft, 'set-outline-memory-link', '与记忆引擎联动', memoryLinkBody),
+      advanced: settingsSection(draft, 'set-outline-retry', 'API 自动重试', retryBody)
+        + settingsSection(draft, 'set-outline-proposals', 'AI 结构调整建议', proposalBody)
+        + settingsSection(draft, 'set-outline-display', '界面显示', displayBody),
+      archive: settingsSection(draft, 'set-outline-sync', '同步与缓存', syncBody)
+        + renderArchiveBody(current, draft, { collapsible: true }),
+      debug: settingsSection(draft, 'set-outline-debug', '剧情推演调试', debugSectionBody),
+      about: aboutBody
     };
     const tabBar = `<div class="we-settings-tabs-shell">
       <button type="button" class="we-settings-tab-scroll" data-dir="-1" title="向左滚动"><i class="fa-solid fa-chevron-left"></i></button>
@@ -1027,11 +1147,10 @@ window.OUTLINE_ENGINE_UI = (function() {
       `<div class="we-settings-panel" data-tab="${tab.key}"${tab.key === activeTab ? '' : ' style="display:none;"'}>${panelContent[tab.key] || ''}</div>`
     ).join('');
 
-    return `${subTopbar('设置', '凡事豫则立', 'close-settings')}
+    return `${subTopbar('设置', '', 'close-settings')}
       ${tabBar}${panels}
       <div class="we-settings-save-actions we-settings-save-sticky">
-        ${button('save-settings', '保存剧情设置', '', 'primary')}
-        ${button('check-now', '立即检查正文')}
+        ${button('save-settings', '保存设置')}
       </div>`;
   }
 
@@ -1193,21 +1312,25 @@ window.OUTLINE_ENGINE_UI = (function() {
     return `<section class="we-section we-outline-temporal"><strong>${h(labels[notice.kind] || '时序待核对')}</strong><p>${h(notice.reason || '请核对正文与事实来源。')}</p><p class="we-outline-hint">回忆、梦境或故事内时间变化不会自动等同于删除真实聊天历史。需要联合恢复时请进入恢复页明确操作。</p>${(notice.evidence || []).map(item => `<blockquote><span>正文 ${h(item.messageId)}</span><p>${h(item.quote)}</p></blockquote>`).join('')}</section>`;
   }
 
-  function renderDebugBody() {
+  function renderDebugContent() {
     const debug = engine()?.getLastDebug?.() || {};
     let injection = null;
     try { injection = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastSnapshot?.('outline'); } catch (_) {}
     const sharedViewer = window.WORLD_ENGINE_UI?.renderLastPromptViewer?.({ focus: 'outline' }) || '';
-    return `<section class="we-section we-outline-debug">
-      <div class="we-section-title">剧情运行与注入调试</div>
-      <p>运行状态：${h(engine()?.getRunningLabel?.() || (engine()?.isRunning?.() ? '运行中' : '空闲'))}</p>
+    return `<p>运行状态：${h(engine()?.getRunningLabel?.() || (engine()?.isRunning?.() ? '运行中' : '空闲'))}</p>
       <p>最近错误：${h(engine()?.getLastError?.() || '无')}</p>
       <p>最终提示词注入：${h(injection?.status || '尚无记录')}</p>
-      <div class="we-outline-actions">${button('export-diag', '导出剧情诊断包')}</div>
       ${sharedViewer ? `<div style="margin-top:8px;">${sharedViewer}</div>` : ''}
       <details><summary>最近大纲后台请求</summary><pre>${h(debug.prompt || debug.requestPrompt || '暂无请求')}</pre></details>
       <details><summary>最近大纲后台响应</summary><pre>${h(debug.rawResult || debug.response || debug.apiResponse || '暂无响应')}</pre></details>
-      ${injection ? `<details><summary>最近注入检查原始摘要</summary><pre>${h(JSON.stringify(injection, null, 2))}</pre></details>` : ''}
+      ${injection ? `<details><summary>最近注入检查原始摘要</summary><pre>${h(JSON.stringify(injection, null, 2))}</pre></details>` : ''}`;
+  }
+
+  function renderDebugBody() {
+    return `<section class="we-section we-outline-debug">
+      <div class="we-section-title">剧情运行与注入调试</div>
+      <div class="we-outline-actions">${button('export-diag', '导出剧情诊断包')}</div>
+      ${renderDebugContent()}
     </section>`;
   }
 
@@ -1286,6 +1409,9 @@ window.OUTLINE_ENGINE_UI = (function() {
         const modelInput = typeof document !== 'undefined' ? document.getElementById('we-outline-model') : null;
         if (modelInput) modelInput.value = element.value;
       }
+    }
+    else if (element.id === 'we-outline-coordinationMode') {
+      draft.coordinationMode = element.value === 'independent' ? 'independent' : 'stagger-serial';
     }
     else if (element.id === 'we-outline-import-progress' && draft.pendingJson) draft.pendingJson.includeProgress = element.checked;
     else if (ds.outlineSetting) {
@@ -1384,7 +1510,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       draft.inlineEdit = null;
       draft.confirmDeleteTrackId = null;
     }
-    else if (action === 'toggle-settings') { draft.settingsOpen = !draft.settingsOpen; if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; } if (!draft.settingsDraft) draft.settingsDraft = clone(settings()); }
+    else if (action === 'toggle-settings') { draft.settingsOpen = !draft.settingsOpen; if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; draft.coordinationMode = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || null; } if (!draft.settingsDraft) draft.settingsDraft = clone(settings()); }
     else if (action === 'close-settings') draft.settingsOpen = false;
     else if (action === 'toggle-injection-preview') draft.injectionPreviewOpen = !draft.injectionPreviewOpen;
     else if (action === 'board-mode-chapter') { if (draft.view !== 'tracks') draft.view = 'tracks'; draft.tracksBoardMode = 'chapter'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
@@ -1754,9 +1880,12 @@ window.OUTLINE_ENGINE_UI = (function() {
       next.apiTimeoutMs = Math.max(0, Number(next.apiTimeoutMs) || 0);
       next.apiAutoRetries = Math.max(0, Math.min(10, Math.floor(Number(next.apiAutoRetries) || 0)));
       const previous = settings();
-      const requestKeys = ['engineEnabled', 'autoCheck', 'checkEveryX', 'allowProposals', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'apiAutoRetries'];
+      const requestKeys = ['engineEnabled', 'firstLayerIsAiOpening', 'autoCheck', 'checkEveryX', 'allowProposals', 'injectIntoWorldEngine', 'useWorldReference', 'injectIntoMemoryEngine', 'useMemoryReference', 'narrativeLimit', 'worldLimit', 'cooldownTicks', 'apiSource', 'apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'apiAutoRetries'];
       if (requestKeys.some(key => previous[key] !== next[key])) engine()?.abort?.();
       window.OUTLINE_ENGINE_SETTINGS.patchSettings(next);
+      if (draft.coordinationMode === 'independent' || draft.coordinationMode === 'stagger-serial') {
+        window.STORY_ENGINE_BRIDGE?.setCoordinationMode?.(draft.coordinationMode);
+      }
       draft.settingsDraft = clone(settings());
       if (next.syncToChat) cache()?.pushLiveNow?.();
       engine()?.applyInjection?.();
@@ -1895,6 +2024,8 @@ window.OUTLINE_ENGINE_UI = (function() {
           engine()?.applyInjection?.(); refresh();
         } else if (element?.dataset?.outlineAuthorFlag) {
           engine()?.abort?.(); const next = state(); next.authorFlags = { ...(next.authorFlags || {}), [element.dataset.outlineAuthorFlag]: element.checked }; data().saveState(next); engine()?.applyInjection?.(); refresh();
+        } else if (element?.id === 'we-outline-theme-select') {
+          applyOutlineTheme(element.value);
         } else if (['we-outline-text-file', 'we-outline-json-file', 'we-outline-snapshot-file', 'we-outline-history-file'].includes(element.id)) {
           await importFile(element.files?.[0], element.id === 'we-outline-text-file' ? 'text' : element.id === 'we-outline-snapshot-file' ? 'snapshot' : 'json');
           element.value = '';
@@ -1928,12 +2059,33 @@ window.OUTLINE_ENGINE_UI = (function() {
         catch (error) { notify(error?.message || error, true); }
         return;
       }
+      const sectionToggle = event.target?.closest?.('.we-section-toggle[data-section]');
+      if (sectionToggle && root.contains(sectionToggle)) {
+        const sectionId = sectionToggle.dataset.section;
+        const draft = draftFor();
+        if (!draft.collapsedSections) draft.collapsedSections = {};
+        if (!sectionToggle.onclick) {
+          draft.collapsedSections[sectionId] = !draft.collapsedSections[sectionId];
+          const secBody = typeof document !== 'undefined' ? document.getElementById('we-section-body-' + sectionId) : null;
+          const arrow = typeof document !== 'undefined' ? document.getElementById('we-section-arrow-' + sectionId) : null;
+          if (secBody) secBody.style.display = draft.collapsedSections[sectionId] ? 'none' : '';
+          if (arrow) arrow.textContent = draft.collapsedSections[sectionId] ? '▶' : '▼';
+        } else {
+          const arrow = typeof document !== 'undefined' ? document.getElementById('we-section-arrow-' + sectionId) : null;
+          draft.collapsedSections[sectionId] = arrow?.textContent === '▶';
+        }
+        return;
+      }
       const tabBtn = event.target?.closest?.('.we-settings-tab[data-tab]');
       if (tabBtn && root.contains(tabBtn) && !tabBtn.onclick) {
         const key = tabBtn.dataset.tab;
         draftFor().settingsTab = key;
         root.querySelectorAll('.we-settings-tab').forEach(t => t.classList.toggle('we-settings-tab--active', t.dataset.tab === key));
         root.querySelectorAll('.we-settings-panel').forEach(p => { p.style.display = p.dataset.tab === key ? '' : 'none'; });
+        if (key === 'debug' && typeof document !== 'undefined') {
+          const el = document.getElementById('we-outline-debug-render');
+          if (el) { el.innerHTML = renderDebugContent(); window.WORLD_ENGINE_UI?.bindPromptSegToggle?.(el); }
+        }
         return;
       }
       const draft = draftFor();
@@ -1973,7 +2125,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       openSettings: () => {
         const draft = draftFor();
         draft.settingsOpen = !draft.settingsOpen;
-        if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; }
+        if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; draft.coordinationMode = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || null; }
         if (!draft.settingsDraft) draft.settingsDraft = clone(settings());
       },
       isSettingsOpen: () => draftFor().settingsOpen,
@@ -2003,7 +2155,14 @@ window.OUTLINE_ENGINE_UI = (function() {
         }
         return { text: `${chapterName} · 模块未启用`, color: 'var(--we-text3)' };
       },
-      getTheme: () => { try { return localStorage.getItem('we-theme') || 'default'; } catch (_) { return 'default'; } },
+      getTheme: getStoredOutlineTheme,
+      refreshDebug: () => {
+        const el = typeof document !== 'undefined' ? document.getElementById('we-outline-debug-render') : null;
+        if (el) {
+          el.innerHTML = renderDebugContent();
+          window.WORLD_ENGINE_UI?.bindPromptSegToggle?.(el);
+        }
+      },
       getVersion: () => window.OUTLINE_ENGINE_SETTINGS?.VERSION || '2.0.0',
       getSettings: settings,
       setEnabled: enabled => { if (!enabled) engine()?.abort?.(); window.OUTLINE_ENGINE_SETTINGS.patchSettings({ engineEnabled: enabled }); if (draftFor().settingsDraft) draftFor().settingsDraft.engineEnabled = enabled; engine()?.applyInjection?.(); },

@@ -11,8 +11,9 @@ window.OUTLINE_ENGINE_PROMPT = (function() {
   }
   function buildOrganizePrompt(input) {
     const value = typeof input === 'string' ? input : input?.text;
+    const rosterOpts = typeof input === 'object' && input ? { includeWorld: input.includeWorld, includeMemory: input.includeMemory } : undefined;
     let roster = '';
-    try { roster = clean(window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.()); } catch (_) {}
+    try { roster = clean(window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.(rosterOpts)); } catch (_) {}
     return `你是剧情大纲整理员。仅整理用户原文为跨章节的主线/支线/暗线，不扩写、不续写、不创作新剧情，也不把计划声明为已经发生的世界事实。
 只做分类、拆分和同义整理。不得新增原文没有的人物、事件、转折、结局、因果、具体数值、依赖或揭露条件。没有明确完成条件时 completionCriteria 必须为空；不得自行发明可验证条件。需要条件但原文未给出时使用 {"type":"unconfigured","text":"待配置"}，不要猜测。建议拆分不确定时在 notes 标记“待配置”，不补剧情。
 章节只表示叙事阶段，不拥有节点。tracks 是独立跨章剧情线；nodes 为全局唯一的节点列表，用 trackId 和 chapterIds 引用。原文没写先后依赖时 dependencies 返回 []，不得凭排列次序制造依赖。旧式分章原文可以整理成一条跨章节主线。
@@ -48,7 +49,7 @@ ID 仅用于引用，不得指向不存在的章节、线或节点；本地会�
       completionSource: node.completionSource, actorKind: node.actorKind, visibility: node.visibility, currentStatus: data().getNodeStatus(state, node.id) }));
     const clues = (state.clues || []).filter(clue => clue.validity === 'valid' && clue.available).map(clue => ({ clueId: clue.id, publicHint: clue.publicHint, factIds: clue.factIds }));
     let roster = '';
-    try { roster = clean(window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.()); } catch (_) {}
+    try { roster = clean(window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.({ includeWorld: input.includeWorld, includeMemory: input.includeMemory })); } catch (_) {}
     return `你是跨章节剧情进度和实际接触核对员。这是隔离的后台检查，不是正文生成。计划是未来意图，不是历史事实；私密事实是作者/后台视图，均不能凭此认定角色已经知道。
 【硬性规则】
 1. 只检查下列全局合格 nodeId；不受当前章单列表限制。status 只能 active/completed/blocked，不能自动 skipped。completed 要求真实正文明确满足全部 completionCriteria；缺完成条件不能自动完成；blocked 必须有具体阻碍，不能因尚未完成就受阻。手动状态不得覆盖。

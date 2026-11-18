@@ -1,7 +1,7 @@
 // memory-engine-settings.js — 记忆引擎独立设置（只复用 API/调度等实现，不共享配置值）
 window.MEMORY_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'memory_engine_settings';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const DEFAULTS = Object.freeze({
     apiUrl: '',
     apiKey: '',
@@ -28,6 +28,9 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     injectIntoPrompt: true,
     injectIntoWorldEngine: false,
     worldEngineMemoryLimit: 5,
+    acceptWorldHint: true,
+    injectIntoOutlineEngine: true,
+    acceptOutlineSync: true,
     searchDepth: 5,
     maxPerCharacter: 20,
     memoryInjectMaxChars: 3500,
@@ -109,6 +112,9 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       enableFactAndArcExtraction: merged.enableFactAndArcExtraction !== false,
       worldLinkMode: merged.worldLinkMode === 'llm' ? 'llm' : 'lightweight',
       coordinationMode: merged.coordinationMode === 'independent' ? 'independent' : 'stagger-serial',
+      acceptWorldHint: merged.acceptWorldHint !== false,
+      injectIntoOutlineEngine: merged.injectIntoOutlineEngine !== false,
+      acceptOutlineSync: merged.acceptOutlineSync !== false,
       vectorEnabled: merged.vectorEnabled === true,
       vectorAutoMaintain: merged.vectorAutoMaintain !== false,
       embeddingApiUrl: String(merged.embeddingApiUrl ?? '').trim(),

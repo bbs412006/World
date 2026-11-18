@@ -308,8 +308,11 @@
 .we-outline-check input { accent-color: var(--we-accent); }
 .we-outline-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; align-items: center; }
 .we-outline-custom-api { border: 1px solid var(--we-border); border-radius: 7px; padding: 10px; margin: 10px 0 0; }
+.we-outline-custom-api.we-outline-custom-api-flat { border: none; padding: 0; margin: 8px 0 0; min-width: 0; }
 .we-outline-custom-api legend { color: var(--we-text3); font-size: 11px; padding: 0 6px; }
 .we-outline-custom-api:disabled { opacity: .55; }
+.we-outline-field-hint { font-size: 11px; color: var(--we-text3); margin-top: 3px; line-height: 1.5; }
+.we-outline-root .we-input-group input[type="checkbox"] { accent-color: var(--we-accent); }
 .we-outline-model-row { display: flex; align-items: flex-end; gap: 8px; }
 .we-outline-model-row .we-outline-field { flex: 1; margin-bottom: 8px; }
 .we-outline-model-row .we-btn { margin-bottom: 8px; white-space: nowrap; flex-shrink: 0; }

@@ -923,17 +923,22 @@ ${JSON.stringify(sample || [], null, 2)}
     // 蓝绿灯触发：扫描本扩展自己喂给推演的近期对话（解耦，不读酒馆的聊天扫描）
     const worldbookScanText = dialogueText || `${userMsg || ''}\n${aiMsg || ''}`;
     const worldbookSection = await window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection?.(worldbookScanText) || '';
+    const ws = (api.getSettings ? api.getSettings() : {}) || {};
     let outlineSection = '';
-    try { outlineSection = window.OUTLINE_ENGINE?.buildWorldGuidance?.(state) || ''; }
-    catch (error) { console.error('[世界引擎] 大纲指导读取失败（已隔离）', error); }
+    if (ws.acceptOutlineGuidance !== false) {
+      try { outlineSection = window.OUTLINE_ENGINE?.buildWorldGuidance?.(state) || ''; }
+      catch (error) { console.error('[世界引擎] 大纲指导读取失败（已隔离）', error); }
+    }
     let memoryEngineSection = '';
-    try {
-      memoryEngineSection = window.STORY_ENGINE_BRIDGE?.buildWorldMemorySection?.(state)
-        || window.MEMORY_ENGINE?.buildWorldEngineContext?.(state)
-        || '';
-    } catch (error) {
-      // 可选跨引擎上下文必须故障隔离：记忆引擎异常不能中断世界推演。
-      console.error('[世界引擎] 读取记忆引擎上下文失败（已隔离）', error);
+    if (ws.acceptMemoryContext !== false) {
+      try {
+        memoryEngineSection = window.STORY_ENGINE_BRIDGE?.buildWorldMemorySection?.(state)
+          || window.MEMORY_ENGINE?.buildWorldEngineContext?.(state)
+          || '';
+      } catch (error) {
+        // 可选跨引擎上下文必须故障隔离：记忆引擎异常不能中断世界推演。
+        console.error('[世界引擎] 读取记忆引擎上下文失败（已隔离）', error);
+      }
     }
     const tonePrompt = ((api.getSettings ? api.getSettings() : {}).tonePrompt || '').trim();
     const toneSection = tonePrompt

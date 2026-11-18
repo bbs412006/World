@@ -2,7 +2,7 @@
   "display_name": "🌍 世界引擎",
   "author": "Disnight",
   "description": "世界推演、长期记忆与跨章节剧情线：支持主线、支线、暗线联合调度，幕后事实与正文线索分层，消息版本关联的联合历史、重生成替换与大量删楼恢复，以及独立存档和同步。",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "license": "MIT",
   "type": "extension",
   "js": "world-engine.js",

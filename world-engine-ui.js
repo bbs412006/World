@@ -311,6 +311,24 @@ window.WORLD_ENGINE_UI = (function() {
     </span>`;
   }
 
+  function renderBridgeCoordinationCard(selectId, currentMode) {
+    const bridgeSummary = window.STORY_ENGINE_BRIDGE?.getStatusSummary?.() || null;
+    const bridgeHint = bridgeSummary
+      ? `当前已开启模块：${[bridgeSummary.worldEnabled && '世界', bridgeSummary.memoryEnabled && '记忆', bridgeSummary.outlineEnabled && '大纲'].filter(Boolean).join(' · ') || '无'} · 正文注入顺序：世界 → 记忆 → 大纲`
+      : '未加载协同桥（当前处于严格独立模式；仍可预存配置，停用任一模块不影响其余模块工作）';
+    const mode = currentMode === 'independent' ? 'independent' : 'stagger-serial';
+    return `
+      <div class="we-hint" style="margin-bottom:8px;">${h(bridgeHint)}</div>
+      <div class="we-input-group">
+        <label>同轮多模块 API 并发调度策略</label>
+        <select id="${h(selectId)}" style="width:100%;">
+          <option value="stagger-serial" ${mode === 'stagger-serial' ? 'selected' : ''}>串行错峰管道（推荐 · 保护 Vertex 等并发受限渠道）</option>
+          <option value="independent" ${mode === 'independent' ? 'selected' : ''}>各自独立并发（无排队，按各自原定时器直发）</option>
+        </select>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">启用 ≥2 个自动后台引擎且选择串行错峰时，固定按“世界推演 → 大纲核对 → 记忆提取”先后错峰排队，单并发执行并复用前置最新公开结果；仅启用单个引擎时始终立即直通。三个模块共享此调度策略。</div>
+      </div>`;
+  }
+
   function sectionBody(sectionId, content) {
     const collapsed = sectionCollapsed[sectionId] || false;
     return `<div class="we-section-body" id="we-section-body-${sectionId}" style="${collapsed ? 'display:none' : ''}">${content}</div>`;
@@ -1398,7 +1416,8 @@ window.WORLD_ENGINE_UI = (function() {
     const injectCharacterArcsLimit = Math.max(0, parseInt(settings.injectCharacterArcsLimit ?? 6) || 0);
     const enableFactAndArcExtraction = settings.enableFactAndArcExtraction !== false;
     const worldLinkMode = settings.worldLinkMode === 'llm' ? 'llm' : 'lightweight';
-    const coordinationMode = settings.coordinationMode === 'independent' ? 'independent' : 'stagger-serial';
+    const sharedCoordinationMode = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || settings.coordinationMode || 'stagger-serial';
+    const coordinationMode = sharedCoordinationMode === 'independent' ? 'independent' : 'stagger-serial';
     const backfillBatch = Math.max(1, parseInt(settings.backfillBatchSize) || 5);
     const backfillEnd = Math.max(0, parseInt(settings.backfillEndLayer) || 0);
     const backfillRetries = Math.max(0, parseInt(settings.backfillRetries) || 0);
@@ -1572,20 +1591,8 @@ window.WORLD_ENGINE_UI = (function() {
         <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">从所选纪要之前继续向前取不重叠的总述；0 表示不追加总述。参考顺序固定为“总述 → 纪要 → 正文 → 本轮”。</div>
       </div>`;
 
-    const bridgeSummary = window.STORY_ENGINE_BRIDGE?.getStatusSummary?.() || null;
-    const bridgeHint = bridgeSummary
-      ? `当前已开启模块：${[bridgeSummary.worldEnabled && '世界', bridgeSummary.memoryEnabled && '记忆', bridgeSummary.outlineEnabled && '大纲'].filter(Boolean).join(' · ') || '无'}（各模块可随时独立开关，停用任一模块不影响其余模块工作）`
-      : '未加载协同桥（当前处于严格独立模式）';
+    const memoryBridgeBody = renderBridgeCoordinationCard('we-memory-coordination-mode', coordinationMode);
     const linkBody = `
-      <div class="we-hint" style="margin-bottom:8px;">${h(bridgeHint)}</div>
-      <div class="we-input-group">
-        <label>三模块同轮 API 并发调度策略</label>
-        <select id="we-memory-coordination-mode" style="width:100%;">
-          <option value="stagger-serial" ${coordinationMode === 'stagger-serial' ? 'selected' : ''}>串行错峰管道（推荐 · 保护 Vertex 等并发受限渠道）</option>
-          <option value="independent" ${coordinationMode === 'independent' ? 'selected' : ''}>各自独立并发（无排队，按各自原定时器直发）</option>
-        </select>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">启用 ≥2 个自动后台引擎且选择串行错峰时，固定按“世界推演 → 大纲核对 → 记忆提取”先后错峰排队，单并发执行并自动复用前置最新公开结果；仅启用单个引擎时始终立即直通。</div>
-      </div>
       <div class="we-input-group">
         <label>世界推演 → 记忆联动处理方式</label>
         <select id="we-memory-world-link-mode" style="width:100%;">
@@ -1603,6 +1610,28 @@ window.WORLD_ENGINE_UI = (function() {
       <div class="we-input-group">
         <label>世界推演每个匹配条目最多注入（X）</label>
         <input type="number" id="we-memory-world-engine-limit" min="1" step="1" value="${worldEngineMemoryLimit}" style="width:100%;">
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-accept-world-hint" ${settings.acceptWorldHint !== false ? 'checked' : ''}>
+          提取记忆时参考世界公开摘要与活跃事件
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">向记忆提取附带只读的世界近期摘要、大势与事件列表协助实体/事实核对，绝不泄露黑盒隐私。</div>
+      </div>`;
+    const memoryOutlineLinkBody = `
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-inject-outline" ${settings.injectIntoOutlineEngine !== false ? 'checked' : ''}>
+          向剧情大纲提供记忆背景
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">大纲后台核对与整理时提供活跃持续事实、最新总述、近期纪要及人物弧光作只读参考（不会替代正文原文证据）。</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-accept-outline" ${settings.acceptOutlineSync !== false ? 'checked' : ''}>
+          接收剧情大纲焦距提示与已核实线索同步
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">提取与唤醒时优先覆盖大纲公开章节当前焦点与活跃人物，并自动安全写入大纲经正文原文核实的新增线索接触与揭露真相；未揭露私密事实始终隔离。</div>
       </div>`;
 
     const backfillBody = `
@@ -1723,14 +1752,22 @@ window.WORLD_ENGINE_UI = (function() {
       </div>
       <div style="font-size:11px;color:var(--we-text3);margin-top:5px;">完整导出同时包含 <b>state（最新当前数据）</b>和 <b>checkpoint（重新推演前的旧存档点）</b>，包含完整时间链与 known_by。</div>`;
 
-    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '1.2.0';
+    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '1.2.1';
     const memoryAboutBody = `
       <div class="we-about-current"><span class="we-changelog-cur">记忆引擎 v${h(memoryVersion)}</span></div>
       <div class="we-section" style="margin-top:10px;">
-        <div class="we-section-title">记忆引擎 1.2</div>
+        <div class="we-section-title">记忆引擎 ${h(memoryVersion)}</div>
         <div style="font-size:12px;color:var(--we-text2);line-height:1.7;">
           面向长篇对话的独立记忆系统。人物记忆保留知情人边界与角色弧光，持续事实跟踪长期约束，实体记忆维护组织、物件、能力与地点的当前状态和历史；支持关键词共振召回与 Embedding + Rerank 双阶段语义检索，并可选通过协同桥与世界、大纲联动。
         </div>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v1.2.1 · 三模块联动对称配置与协同调度解耦</div>
+        <ul class="we-changelog-items">
+          <li>「联动」选项卡升级为「三模块协同调度」「与世界引擎联动」「与剧情大纲联动」三张卡片，清晰管理记忆对另外两个模块的双向配合，同时保持单模块严格独立运行。</li>
+          <li>新增「与剧情大纲联动」独立开关（控制是否向大纲提供记忆背景、是否接收大纲焦距提示与已核实线索同步）及「提取记忆时参考世界公开动态」开关。</li>
+          <li>「同轮多模块 API 并发调度策略」升级为协同桥共用设置，三个模块任一页面均可统一切换并同步生效。</li>
+        </ul>
       </div>
       <div class="we-section" style="margin-top:10px;">
         <div class="we-section-title">v1.2.0 · 结构化总结、三模块协同与语义记忆检索</div>
@@ -1884,7 +1921,9 @@ window.WORLD_ENGINE_UI = (function() {
         + sec('set-memory-rerank', 'Rerank 重排模型与检索范围', rerankBody)
         + sec('set-memory-vector-ops', '向量索引维护与独立文件', recallMaintainBody),
       mechanics: sec('set-memory-mechanics', '正文保留与推演参考', mechanicsBody),
-      link: sec('set-memory-link', '向世界引擎联动', linkBody),
+      link: sec('set-memory-bridge', '三模块协同调度', memoryBridgeBody)
+        + sec('set-memory-link', '与世界引擎联动', linkBody)
+        + sec('set-memory-outline-link', '与剧情大纲联动', memoryOutlineLinkBody),
       advanced: sec('set-memory-retry', 'API 自动重试', retryBody)
         + sec('set-memory-blacklist', '人物与实体黑名单', blacklistBody)
         + sec('set-memory-backfill', '批量重填记忆推演', backfillBody)
@@ -2456,6 +2495,11 @@ window.WORLD_ENGINE_UI = (function() {
   //   date    —— 可选，日期不确定的留月份/年份；
   //   items   —— 该版本改动条目（每条一行，渲染时走 h() 转义）。
   const CHANGELOG = [
+    { version: '3.3.1', date: '2026-11-18', items: [
+      '三模块「联动」设置对称升级：世界、记忆、大纲三处的联动选项卡统一拆分为「三模块协同调度」「与模块 A 联动」「与模块 B 联动」，任一页面均可直接切换共用的同轮并发调度策略。',
+      '共用「同轮多模块 API 并发调度策略」独立存储于协同桥配置（story_engine_bridge_settings），即使仅同时开启世界与大纲、关闭或未启用记忆也能独立调度。',
+      '世界引擎补齐面向记忆与大纲的细粒度开关（可分别开关接收记忆上下文、接收大纲后台指导及向大纲开放世界状态），同时统一了剧情大纲设置页分栏、折叠交互与独立配色。'
+    ] },
     { version: '3.3.0', date: '2026-11-18', items: [
       '新增可选三模块协同桥（story-engine-bridge.js）：世界、记忆、大纲各保持完全独立运行能力，多开时共享统一人物与势力别名表、上下文互补、并支持正文 depth=1 注入顺序稳定对齐为「世界 → 记忆 → 大纲」。',
       '新增「串行错峰管道」并发协调调度：同轮触发多模块后台任务时按「世界推演 → 大纲核对 → 记忆提取」单并发依次执行，减少渠道并发限流并直接复用前置最新公开结果。',
@@ -4201,15 +4245,39 @@ window.WORLD_ENGINE_UI = (function() {
         <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">勾选后，事件链和风声的 Lv1–Lv4 全部注入正文；不勾选时，风声仅注入 Lv3/4，事件链注入 Lv3/4 以及 Lv1/2 中已爆发或已完成的事件。</div>
       </div>`;
 
+    const worldCoordMode = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || 'stagger-serial';
+    const worldBridgeBody = renderBridgeCoordinationCard('we-world-coordination-mode', worldCoordMode);
     const linkBody = `
       <div class="we-input-group">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
           <input type="checkbox" id="we-memory-link-enabled" ${settings.memoryLinkEnabled === true ? 'checked' : ''}>
           世界推演完成后联动记忆引擎
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后，世界 API 的本轮返回会交给记忆 API 更新人物与实体，并把世界摘要新增为一条纪要。同楼层重 roll 只撤销带联动标记的旧结果，不影响普通记忆与原有纪要。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后，世界 API 的本轮返回会同步至记忆引擎更新人物/实体并生成一条纪要（默认轻量零额外 API，亦可在记忆引擎切为深度 LLM 重整理）。同楼层重 roll 只撤销带联动标记的旧结果，不影响普通记忆。</div>
         <button class="we-btn we-btn-primary" id="we-memory-link-now" type="button" style="width:100%;margin-top:8px;"><i class="fa-solid fa-link"></i> 手动联动当前世界信息</button>
         <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">立即把当前世界状态交给记忆引擎处理，并把当前世界摘要新增为纪要；同楼层重复执行会替换上一次联动结果。</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-world-accept-memory" ${settings.acceptMemoryContext !== false ? 'checked' : ''}>
+          接收记忆引擎提供的人物与实体上下文
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">允许世界后台推演接收来自记忆引擎匹配到的角色及实体记忆作为参照（需记忆端同时开启“向世界引擎提供记忆”）；关闭后世界推演完全不使用记忆上下文。</div>
+      </div>`;
+    const worldOutlineLinkBody = `
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-world-accept-outline" ${settings.acceptOutlineGuidance !== false ? 'checked' : ''}>
+          接收剧情大纲的推演参考指导
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后，世界后台推演会接收剧情大纲精选的节点推进意图、线索触发条件与幕后布局参考；关闭后世界推演完全忽略大纲。</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-world-sync-outline" ${settings.syncToOutlineEnabled !== false ? 'checked' : ''}>
+          向剧情大纲开放世界公开状态与时间账本
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">允许剧情大纲的线索条件、总天数判断与后台核对参考当前世界公开摘要、大势与事件账本（绝不泄露未传播黑盒私密内容）。</div>
       </div>`;
 
     const displayMode = settings.displayMode === 'expand' ? 'expand' : 'mask';
@@ -4436,7 +4504,9 @@ window.WORLD_ENGINE_UI = (function() {
       display: sec('set-display', '界面显示', displayBody),
       chatcache: sec('set-chatcache', '酒馆缓存与存档', chatcacheBody),
       inject: sec('set-inject', '正文注入', injectBody),
-      link: sec('set-world-memory-link', '世界 → 记忆', linkBody)
+      link: sec('set-world-bridge', '三模块协同调度', worldBridgeBody)
+        + sec('set-world-memory-link', '与记忆引擎联动', linkBody)
+        + sec('set-world-outline-link', '与剧情大纲联动', worldOutlineLinkBody)
     };
   }
 
@@ -5515,6 +5585,9 @@ window.WORLD_ENGINE_UI = (function() {
           enableFactAndArcExtraction: document.getElementById('we-memory-enable-structured')?.checked !== false,
           coordinationMode: gv('we-memory-coordination-mode') === 'independent' ? 'independent' : 'stagger-serial',
           worldLinkMode: gv('we-memory-world-link-mode') === 'llm' ? 'llm' : 'lightweight',
+          acceptWorldHint: document.getElementById('we-memory-accept-world-hint')?.checked !== false,
+          injectIntoOutlineEngine: document.getElementById('we-memory-inject-outline')?.checked !== false,
+          acceptOutlineSync: document.getElementById('we-memory-accept-outline')?.checked !== false,
           ...collectRecallSettingsFromDom(),
           apiAutoRetries: Math.max(0, parseInt(gv('we-memory-api-auto-retries')) || 0),
           nameBlacklist: gv('we-memory-name-blacklist') || '',
@@ -5531,7 +5604,9 @@ window.WORLD_ENGINE_UI = (function() {
           backfillRetries: Math.max(0, parseInt(gv('we-memory-backfill-retries')) || 0)
         };
         window.MEMORY_ENGINE_SETTINGS?.saveSettings(memorySettings);
+        window.STORY_ENGINE_BRIDGE?.setCoordinationMode?.(memorySettings.coordinationMode);
         window.MEMORY_ENGINE?.applyInjection?.();
+        try { window.OUTLINE_ENGINE?.applyInjection?.(); } catch (_) {}
         showToast('设置已保存');
       };
     }
@@ -5846,6 +5921,9 @@ window.WORLD_ENGINE_UI = (function() {
           injectMaxChars: Math.max(0, parseInt(gv('we-inject-max-chars')) || 0),
           injectAllLevels: document.getElementById('we-inject-all-levels')?.checked === true,
           memoryLinkEnabled: document.getElementById('we-memory-link-enabled')?.checked === true,
+          acceptMemoryContext: document.getElementById('we-world-accept-memory')?.checked !== false,
+          acceptOutlineGuidance: document.getElementById('we-world-accept-outline')?.checked !== false,
+          syncToOutlineEnabled: document.getElementById('we-world-sync-outline')?.checked !== false,
           syncToChat: document.getElementById('we-sync-to-chat')?.checked === true,
           autoBackup: document.getElementById('we-auto-backup')?.checked === true,
           evolveMode: (_modeRaw === 'manual' || _modeRaw === 'time') ? _modeRaw : 'auto',
@@ -5913,6 +5991,10 @@ window.WORLD_ENGINE_UI = (function() {
         ns.evolveReadRounds = Math.min(ns.evolveReadRounds, ns.evolveEveryX);
         window.WORLD_ENGINE_STORE.setItem('world_engine_settings', JSON.stringify(ns));
         if (window.WORLD_ENGINE_API) window.WORLD_ENGINE_API.getSettings(true);
+        const worldCoordMode = document.getElementById('we-world-coordination-mode')?.value;
+        if (worldCoordMode === 'independent' || worldCoordMode === 'stagger-serial') {
+          window.STORY_ENGINE_BRIDGE?.setCoordinationMode?.(worldCoordMode);
+        }
 
         // [FIX] 保存后校验正则过滤：复用 core.validateFilterRegex。非法条目不阻止保存（与现有数值 clamp 范式一致），
         //   但在状态行展示生效/失败+原因，按是否有失败调整下方 toast。
@@ -5945,6 +6027,7 @@ window.WORLD_ENGINE_UI = (function() {
         }
 
         window.WORLD_ENGINE?.applyInjection?.();
+        try { window.OUTLINE_ENGINE?.applyInjection?.(); } catch (_) {}
         showToast(_filterBad > 0 ? `已保存，但有 ${_filterBad} 条正则无效` : '设置已保存', _filterBad > 0);
       };
     }

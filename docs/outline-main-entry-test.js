@@ -94,7 +94,7 @@ function runMainEntrySuite() {
     innerHeight: 800,
     addEventListener() {},
     MutationObserver: class { observe() {} disconnect() {} },
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: { getItem: k => storage.get('ls:' + k) ?? null, setItem: (k, v) => storage.set('ls:' + k, String(v)) },
     document: {
       documentElement: docEl,
       body: bodyEl,
@@ -218,13 +218,33 @@ function runMainEntrySuite() {
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
     const settingsHtml = sandbox.OUTLINE_ENGINE_UI.render();
     assert.ok(settingsHtml.includes('we-sub-topbar') && settingsHtml.includes('data-outline-action="close-settings"'), '设置页必须使用统一返回顶栏');
-    assert.ok(settingsHtml.includes('we-settings-tabs-shell') && settingsHtml.includes('data-tab="common"') && settingsHtml.includes('data-tab="api"') && settingsHtml.includes('聊天备份保存点'), '设置->存档选项卡应直接收纳保存点、导出与历史恢复');
+    assert.ok(settingsHtml.includes('we-settings-tabs-shell')
+      && settingsHtml.includes('data-tab="common"')
+      && settingsHtml.includes('data-tab="link"')
+      && settingsHtml.includes('data-tab="advanced"')
+      && settingsHtml.includes('data-tab="archive"')
+      && settingsHtml.includes('data-tab="debug"')
+      && settingsHtml.includes('data-tab="about"')
+      && !settingsHtml.includes('data-tab="api"')
+      && settingsHtml.includes('we-section-toggle')
+      && settingsHtml.includes('data-section="set-outline-api"')
+      && settingsHtml.includes('聊天备份保存点'),
+      '设置页选项卡与可折叠分区应与世界/记忆模块保持一致（API 归入常用，联动与高级独立分栏）');
     assert.ok(settingsHtml.includes('we-settings-save-sticky'), '设置页底部保存栏应常驻');
-    assert.ok(settingsHtml.includes('id="we-outline-fetch-models"') && settingsHtml.includes('id="we-outline-apiAutoRetries"'), '大纲独立 API 设置应支持拉取模型列表与自动重试配置');
+    assert.ok(settingsHtml.includes('id="we-outline-fetch-models"')
+      && settingsHtml.includes('id="we-outline-apiAutoRetries"')
+      && settingsHtml.includes('id="we-outline-firstLayerIsAiOpening"')
+      && settingsHtml.includes('id="we-outline-theme-select"')
+      && settingsHtml.includes('id="we-outline-coordinationMode"')
+      && settingsHtml.includes('id="we-outline-useWorldReference"')
+      && settingsHtml.includes('id="we-outline-injectIntoMemoryEngine"')
+      && settingsHtml.includes('id="we-outline-useMemoryReference"'),
+      '设置页应包含独立 API 拉取模型、自动重试、首楼 AI 开场白、主题配色与完整三模块联动开关');
     assert.ok(!/id="we-(?:api|model|fetch-models|save-settings)/.test(settingsHtml), '设置页不得使用世界/记忆冲突 ID');
 
     sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'apiSource' }, value: 'custom', type: 'select-one' });
     sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'apiAutoRetries' }, value: '2', type: 'number' });
+    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'firstLayerIsAiOpening' }, checked: false, type: 'checkbox' });
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('fetch-models');
     const afterFetchHtml = sandbox.OUTLINE_ENGINE_UI.render();
     assert.ok(afterFetchHtml.includes('id="we-outline-model-list"') && afterFetchHtml.includes('gpt-4o-mini'), '获取模型列表后应渲染模型下拉选框');
@@ -232,6 +252,23 @@ function runMainEntrySuite() {
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('save-settings');
     assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).model, 'gpt-4o-mini');
     assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).apiAutoRetries, 2);
+    assert.strictEqual(sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true).firstLayerIsAiOpening, false);
+
+    // 验证绑定设置区块折叠与独立主题配色
+    const mockToggle = { dataset: { section: 'set-outline-api' }, onclick: null };
+    const mockRoot = {
+      contains: () => true,
+      querySelectorAll: () => [],
+      oninput: null,
+      onchange: null,
+      onclick: null
+    };
+    sandbox.OUTLINE_ENGINE_UI.bind({ querySelector: () => mockRoot });
+    await mockRoot.onchange({ target: { id: 'we-outline-theme-select', value: 'deepsea', dataset: {}, type: 'select-one' } });
+    assert.strictEqual(docEl.getAttribute('data-we-theme'), 'deepsea', '切换剧情大纲主题应立即应用配色');
+    await mockRoot.onclick({ target: { closest: sel => sel.includes('we-section-toggle') ? mockToggle : null }, preventDefault() {} });
+    const collapsedHtml = sandbox.OUTLINE_ENGINE_UI.render();
+    assert.ok(collapsedHtml.includes('id="we-section-body-set-outline-api" style="display:none"') && collapsedHtml.includes('id="we-section-arrow-set-outline-api">▶<'), '点击设置区块标题应持久化折叠状态');
 
     // 同视图刷新应保持滚动条位置
     panelBody.scrollTop = 180;
@@ -241,6 +278,8 @@ function runMainEntrySuite() {
     const faces = sandbox.WORLD_ENGINE_UI.listEngineFaces();
     const outlineFace = faces.find(f => f.id === 'outline');
     assert.ok(outlineFace && typeof outlineFace.getHeaderMood === 'function', 'outline face 应提供 getHeaderMood');
+    assert.strictEqual(outlineFace.getTheme(), 'deepsea', 'outline face 应独立保存并返回自身主题配色');
+    assert.strictEqual(typeof outlineFace.refreshDebug, 'function', 'outline face 应提供 refreshDebug');
     assert.strictEqual(outlineFace.getHeaderText(), '尚未建纲');
     assert.ok(outlineFace.getHeaderMood().text.includes('尚未设置剧情大纲'));
     assert.strictEqual(typeof outlineFace.getScrollKey, 'function', 'outline face 应提供 getScrollKey');

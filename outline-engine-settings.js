@@ -1,7 +1,7 @@
 // 剧情大纲使用独立配置；复用世界 API 实现时不覆盖世界引擎的配置。
 window.OUTLINE_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'outline_engine_settings';
-  const VERSION = '2.1.0';
+  const VERSION = '2.1.1';
   const DEFAULTS = Object.freeze({
     engineEnabled: false,
     apiSource: 'world',
@@ -11,6 +11,9 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     firstLayerIsAiOpening: true,
     injectIntoPrompt: true,
     injectIntoWorldEngine: true,
+    useWorldReference: true,
+    injectIntoMemoryEngine: true,
+    useMemoryReference: true,
     injectMaxChars: 2500,
     narrativeLimit: 3,
     worldLimit: 3,
@@ -36,7 +39,7 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     const next = { ...DEFAULTS, ...source };
     next.engineEnabled = next.engineEnabled === true;
     next.apiSource = next.apiSource === 'custom' ? 'custom' : 'world';
-    for (const key of ['autoCheck', 'allowProposals', 'firstLayerIsAiOpening', 'injectIntoPrompt', 'injectIntoWorldEngine']) next[key] = next[key] !== false;
+    for (const key of ['autoCheck', 'allowProposals', 'firstLayerIsAiOpening', 'injectIntoPrompt', 'injectIntoWorldEngine', 'useWorldReference', 'injectIntoMemoryEngine', 'useMemoryReference']) next[key] = next[key] !== false;
     next.syncToChat = next.syncToChat === true;
     next.autoBackup = next.autoBackup === true;
     next.checkEveryX = integer(next.checkEveryX, 3, 1, 1000);

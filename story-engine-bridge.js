@@ -47,12 +47,49 @@ window.STORY_ENGINE_BRIDGE = (function() {
     return { worldEnabled, memoryEnabled, outlineEnabled, worldAuto, memoryAuto, outlineAuto, enabledCount, autoCount };
   }
 
+  const BRIDGE_STORAGE_KEY = 'story_engine_bridge_settings';
+
+  function readBridgeSettings() {
+    try {
+      const raw = window.WORLD_ENGINE_STORE?.getItem?.(BRIDGE_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function writeBridgeSettings(next) {
+    try {
+      const merged = { ...readBridgeSettings(), ...(next || {}) };
+      window.WORLD_ENGINE_STORE?.setItem?.(BRIDGE_STORAGE_KEY, JSON.stringify(merged));
+      return merged;
+    } catch (_) {
+      return next || {};
+    }
+  }
+
   function getCoordinationMode() {
     try {
+      const sharedMode = readBridgeSettings().coordinationMode;
+      if (sharedMode === 'independent' || sharedMode === 'stagger-serial') return sharedMode;
       const mode = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true)?.coordinationMode;
       if (mode === 'independent' || mode === 'stagger-serial') return mode;
     } catch (_) {}
     return 'stagger-serial';
+  }
+
+  function setCoordinationMode(mode) {
+    const normalizedMode = mode === 'independent' ? 'independent' : 'stagger-serial';
+    writeBridgeSettings({ coordinationMode: normalizedMode });
+    try {
+      const msApi = window.MEMORY_ENGINE_SETTINGS;
+      if (msApi?.patchSettings && msApi.getSettings?.(true)?.coordinationMode !== normalizedMode) {
+        msApi.patchSettings({ coordinationMode: normalizedMode });
+      }
+    } catch (_) {}
+    return normalizedMode;
   }
 
   function getWorldLinkMode() {
@@ -64,11 +101,14 @@ window.STORY_ENGINE_BRIDGE = (function() {
   }
 
   // —— 统一人物与实体别名映射 ——
-  function collectSharedRoster() {
+  function collectSharedRoster(options) {
+    const opts = options || {};
     const groups = [];
     const entities = [];
     try {
-      const mem = window.MEMORY_ENGINE?.getSnapshotSummaryForBridge?.();
+      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
+      const allowMemory = opts.includeMemory !== false && ms?.engineEnabled !== false;
+      const mem = allowMemory ? window.MEMORY_ENGINE?.getSnapshotSummaryForBridge?.() : null;
       if (mem) {
         for (const p of mem.peopleRoster || []) groups.push({ source: 'memory', id: p.id, names: unique(p.names) });
         for (const e of mem.entityRoster || []) entities.push({ source: 'memory', type: e.type, name: e.name, aliases: unique(e.aliases) });
@@ -76,7 +116,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
     } catch (_) {}
     try {
       const ws = window.WORLD_ENGINE_API?.getSettings?.(true);
-      if (ws?.engineEnabled !== false) {
+      const allowWorld = opts.includeWorld !== false && ws?.engineEnabled !== false;
+      if (allowWorld) {
         const rawWorld = window.WORLD_ENGINE_CORE?.loadState?.();
         const world = window.STORY_ENGINE_PROJECTION?.publicWorld?.(rawWorld) || rawWorld;
         if (world && typeof world === 'object') {
@@ -92,7 +133,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
     } catch (_) {}
     try {
       const os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true);
-      if (os?.engineEnabled === true) {
+      const allowOutline = opts.includeOutline !== false && os?.engineEnabled === true;
+      if (allowOutline) {
         const outline = window.OUTLINE_ENGINE_DATA?.loadState?.();
         for (const node of outline?.plan?.nodes || []) {
           for (const ref of node.entityRefs || []) {
@@ -106,11 +148,11 @@ window.STORY_ENGINE_BRIDGE = (function() {
     return { people: groups, entities };
   }
 
-  function resolveCharacterAliases(actorIdOrName) {
+  function resolveCharacterAliases(actorIdOrName, options) {
     const query = clean(actorIdOrName);
     if (!query) return [];
     const target = normalized(query);
-    const { people } = collectSharedRoster();
+    const { people } = collectSharedRoster(options);
     const matched = new Set([query]);
     for (const entry of people) {
       const hitId = entry.id && normalized(entry.id) === target;
@@ -122,9 +164,9 @@ window.STORY_ENGINE_BRIDGE = (function() {
     return [...matched];
   }
 
-  function formatIdentityRosterForPrompt() {
+  function formatIdentityRosterForPrompt(options) {
     try {
-      const { people, entities } = collectSharedRoster();
+      const { people, entities } = collectSharedRoster(options);
       const mergedPeople = new Map();
       for (const entry of people) {
         const list = unique(entry.names);
@@ -167,9 +209,11 @@ window.STORY_ENGINE_BRIDGE = (function() {
 
   function getMemoryExtractionHints() {
     const result = { outlineChapterTitle: '', outlineFocusHint: '', worldContextHint: '' };
+    let ms = {};
+    try { ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {}; } catch (_) {}
     try {
       const os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true);
-      if (os?.engineEnabled === true) {
+      if (os?.engineEnabled === true && os?.injectIntoMemoryEngine !== false && ms?.acceptOutlineSync !== false) {
         const outline = window.OUTLINE_ENGINE_DATA?.loadState?.();
         const chapter = (outline?.plan?.chapters || []).find(c => c.id === outline?.currentChapterId);
         if (chapter?.title) result.outlineChapterTitle = clean(chapter.title);
@@ -187,7 +231,7 @@ window.STORY_ENGINE_BRIDGE = (function() {
       }
     } catch (_) {}
     try {
-      const world = getPublicWorldSafeSnapshot();
+      const world = ms?.acceptWorldHint !== false ? getPublicWorldSafeSnapshot() : null;
       if (world) {
         const parts = [];
         if (clean(world.worldDigest)) parts.push(`世界近期摘要：${cut(world.worldDigest, 240)}`);
@@ -206,7 +250,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
   function getOutlineActiveActors() {
     try {
       const os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true);
-      if (os?.engineEnabled !== true) return [];
+      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
+      if (os?.engineEnabled !== true || os?.injectIntoMemoryEngine === false || ms?.acceptOutlineSync === false) return [];
       const outline = window.OUTLINE_ENGINE_DATA?.loadState?.();
       if (!outline) return [];
       const names = new Set();
@@ -233,10 +278,18 @@ window.STORY_ENGINE_BRIDGE = (function() {
     }
   }
 
-  function buildOutlineReferenceContext(outlineState) {
+  function buildOutlineReferenceContext(outlineState, options) {
+    const opts = options || {};
     const parts = [];
+    let ws = {};
+    let ms = {};
+    let os = {};
+    try { ws = window.WORLD_ENGINE_API?.getSettings?.(true) || {}; } catch (_) {}
+    try { ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {}; } catch (_) {}
+    try { os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true) || {}; } catch (_) {}
     try {
-      const world = getPublicWorldSafeSnapshot();
+      const useWorld = opts.useWorld !== false && ws?.syncToOutlineEnabled !== false && os?.useWorldReference !== false;
+      const world = useWorld ? getPublicWorldSafeSnapshot() : null;
       if (world) {
         const wLines = [];
         if (clean(world.worldDigest)) wLines.push(`摘要：${cut(world.worldDigest, 600)}`);
@@ -249,8 +302,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
       }
     } catch (_) {}
     try {
-      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
-      if (ms?.engineEnabled !== false && window.MEMORY_ENGINE?.getSnapshotSummaryForBridge) {
+      const useMemory = opts.useMemory !== false && ms?.engineEnabled !== false && ms?.injectIntoOutlineEngine !== false && os?.useMemoryReference !== false;
+      if (useMemory && window.MEMORY_ENGINE?.getSnapshotSummaryForBridge) {
         const mem = window.MEMORY_ENGINE.getSnapshotSummaryForBridge();
         if (mem) {
           const mLines = [];
@@ -279,7 +332,9 @@ window.STORY_ENGINE_BRIDGE = (function() {
 
   function buildWorldMemorySection(worldState) {
     try {
+      const ws = window.WORLD_ENGINE_API?.getSettings?.(true);
       const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
+      if (ws?.acceptMemoryContext === false) return '';
       if (!window.MEMORY_ENGINE || ms?.engineEnabled === false) return '';
       if (ms?.injectIntoWorldEngine === true && window.MEMORY_ENGINE.buildWorldEngineContext) {
         return window.MEMORY_ENGINE.buildWorldEngineContext(worldState) || '';
@@ -291,7 +346,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
   function getCrossInjectionHints() {
     try {
       const ws = window.WORLD_ENGINE_API?.getSettings?.(true);
-      if (!window.WORLD_ENGINE_CORE || ws?.engineEnabled === false || ws?.injectIntoPrompt === false) return {};
+      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
+      if (!window.WORLD_ENGINE_CORE || ws?.engineEnabled === false || ws?.injectIntoPrompt === false || ms?.acceptWorldHint === false) return {};
       const rawWorld = window.STORY_ENGINE_HISTORY?.isEnabled?.() && window.STORY_ENGINE_HISTORY?.getWorldState?.()
         ? window.STORY_ENGINE_HISTORY.getWorldState()
         : window.WORLD_ENGINE_CORE.loadState?.();
@@ -307,7 +363,8 @@ window.STORY_ENGINE_BRIDGE = (function() {
   function notifyOutlineCommitted(afterState, beforeState, selection) {
     try {
       const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
-      if (!window.MEMORY_ENGINE?.syncVerifiedOutlineKnowledge || ms?.engineEnabled === false) return { changed: 0 };
+      const os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true);
+      if (!window.MEMORY_ENGINE?.syncVerifiedOutlineKnowledge || ms?.engineEnabled === false || ms?.acceptOutlineSync === false || os?.injectIntoMemoryEngine === false) return { changed: 0 };
       const oldContactIds = new Set((beforeState?.contacts || []).filter(c => c.validity === 'valid').map(c => c.id));
       const oldKnowledgeIds = new Set((beforeState?.knowledge || []).filter(k => k.validity === 'valid').map(k => k.id));
       const newContacts = (afterState?.contacts || []).filter(c => c.validity === 'valid' && !oldContactIds.has(c.id));
@@ -464,6 +521,7 @@ window.STORY_ENGINE_BRIDGE = (function() {
   return {
     moduleStatus,
     getCoordinationMode,
+    setCoordinationMode,
     getWorldLinkMode,
     collectSharedRoster,
     resolveCharacterAliases,

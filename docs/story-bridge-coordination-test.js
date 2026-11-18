@@ -226,6 +226,42 @@ for (const file of [
     '正文 depth=1 注入顺序应协同为 世界 -> 记忆 -> 大纲'
   );
 
+  // 8. 双向细粒度联动开关与共享调度持久化测试
+  memorySettings.engineEnabled = false; // 即使关闭记忆引擎，世界+大纲双开仍可读写共享并发策略
+  bridge.setCoordinationMode('independent');
+  assert.strictEqual(bridge.getCoordinationMode(), 'independent', '关闭记忆模块时仍可独立保存共享调度策略');
+  assert.strictEqual(bridge.shouldCoordinateGeneration(), false, '切换为各自独立并发后不再排队');
+  bridge.setCoordinationMode('stagger-serial');
+  assert.strictEqual(bridge.getCoordinationMode(), 'stagger-serial');
+  memorySettings.engineEnabled = true;
+
+  worldSettings.acceptMemoryContext = false;
+  assert.strictEqual(bridge.buildWorldMemorySection({ events: [] }), '', '世界端关闭接收记忆后不得注入记忆上下文');
+  worldSettings.acceptMemoryContext = true;
+
+  outlineSettings.useWorldReference = false;
+  const noWorldOutlineRef = bridge.buildOutlineReferenceContext({ plan: { nodes: [] } });
+  assert.ok(!noWorldOutlineRef.includes('城南近日流民聚集') && noWorldOutlineRef.includes('随身携带半块焦黑木牌'), '仅关闭世界参考时应保留记忆参考并排除世界背景');
+  outlineSettings.useWorldReference = true;
+
+  memorySettings.injectIntoOutlineEngine = false;
+  const noMemOutlineRef = bridge.buildOutlineReferenceContext({ plan: { nodes: [] } });
+  assert.ok(noMemOutlineRef.includes('城南近日流民聚集') && !noMemOutlineRef.includes('随身携带半块焦黑木牌'), '记忆端关闭向大纲提供背景后应只保留世界参考');
+  memorySettings.injectIntoOutlineEngine = true;
+
+  assert.ok(Array.from(bridge.getOutlineActiveActors()).length > 0, '大纲启用于记忆同步时应返回公开活跃人物');
+  outlineSettings.injectIntoMemoryEngine = false;
+  assert.strictEqual(bridge.getMemoryExtractionHints().outlineFocusHint, '', '大纲端关闭同步焦距后不再向记忆提取传递焦距');
+  assert.deepStrictEqual(Array.from(bridge.getOutlineActiveActors()), [], '大纲端关闭同步后不再向记忆推送活跃人物');
+  const blockedSync = bridge.notifyOutlineCommitted({
+    clues: [{ id: 'cl2', validity: 'valid', publicHint: '新线索' }],
+    contacts: [{ id: 'ct2', clueId: 'cl2', actorId: '苏婉', validity: 'valid' }],
+    privateFacts: [],
+    knowledge: []
+  }, { contacts: [], knowledge: [] }, { refs: refs(2, 2) });
+  assert.strictEqual(blockedSync.changed, 0, '大纲端关闭同步后不得继续向记忆回写 contacts');
+  outlineSettings.injectIntoMemoryEngine = true;
+
   console.log('story bridge coordination tests passed');
 })().catch(error => {
   console.error(error);

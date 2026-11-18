@@ -152,11 +152,32 @@ window.OUTLINE_ENGINE = (function() {
     return { state, changed };
   }
 
+  function allowWorldLink() {
+    if (settings().useWorldReference === false) return false;
+    try {
+      const ws = window.WORLD_ENGINE_API?.getSettings?.();
+      if (ws && (ws.engineEnabled === false || ws.syncToOutlineEnabled === false)) return false;
+    } catch (_) {}
+    return true;
+  }
+  function allowMemoryLink() {
+    if (settings().useMemoryReference === false) return false;
+    try {
+      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.();
+      if (ms && (ms.engineEnabled === false || ms.injectIntoOutlineEngine === false)) return false;
+    } catch (_) {}
+    return true;
+  }
   function guidance(target, worldState) {
     ensureChat();
     injectionDebug[target] = { chars: 0 };
     const config = settings();
     if (config.engineEnabled !== true || (target === 'narrative' ? config.injectIntoPrompt === false : config.injectIntoWorldEngine === false)) return '';
+    if (target === 'world') {
+      try {
+        if (window.WORLD_ENGINE_API?.getSettings?.()?.acceptOutlineGuidance === false) return '';
+      } catch (_) {}
+    }
     const state = activate(auditHistory().state), chapter = chapterOf(state);
     if (!chapter || (target !== 'world' && isFinished(state)) || history()?.getStatus?.().blocked) return '';
     const selected = getSchedule(target === 'world' ? 'world' : 'narrative', { state, worldState });
@@ -207,7 +228,8 @@ window.OUTLINE_ENGINE = (function() {
   function getSchedule(channel = 'narrative', options = {}) {
     const state = clone(options.state || data().loadState());
     if (!scheduler()) return { selected: chapterNodes(state, chapterOf(state)).filter(node => !['completed', 'skipped'].includes(nodeStatus(state, node.id))), nodeIds: [], explanations: [], scheduler: state.scheduler || {} };
-    const worldState = options.worldState || history()?.getWorldState?.() || window.WORLD_ENGINE_CORE?.loadState?.();
+    const worldAllowed = allowWorldLink();
+    const worldState = options.worldState || (worldAllowed ? (history()?.getWorldState?.() || window.WORLD_ENGINE_CORE?.loadState?.()) : null);
     if (channel === 'world' && window.WORLD_ENGINE_API?.getSettings?.().engineEnabled === false) return { selected: [], nodeIds: [], explanations: [], scheduler: state.scheduler || {} };
     if (channel === 'world' && state.recovery?.status === 'rebuilding') state.recovery = { status: 'ready' };
     return scheduler().select(state, { ...options, channel, worldState });
@@ -282,7 +304,7 @@ window.OUTLINE_ENGINE = (function() {
     if (!clean(text)) throw new Error('请输入需要整理的大纲文本');
     const state = activate(data().loadState()), task = beginRequest('整理大纲', state, []);
     try {
-      const raw = await invoke(task, prompts().buildOrganizePrompt(clean(text)));
+      const raw = await invoke(task, prompts().buildOrganizePrompt({ text: clean(text), includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() }));
       if (!isCurrent(task, false)) throw new Error('聊天或大纲已变化，整理结果已丢弃');
       const parsed = prompts().parseOrganizeResponse(raw);
       setExternalStatus('剧情大纲整理完成');
@@ -309,21 +331,27 @@ window.OUTLINE_ENGINE = (function() {
       role: ref.role, name: clean(chat()[ref.layer]?.name), content: String(chat()[ref.layer]?.mes || '') })) };
   }
   function referenceContext() {
+    const useWorld = allowWorldLink();
+    const useMemory = allowMemoryLink();
     try {
-      const bridged = window.STORY_ENGINE_BRIDGE?.buildOutlineReferenceContext?.(data().loadState());
+      const bridged = window.STORY_ENGINE_BRIDGE?.buildOutlineReferenceContext?.(data().loadState(), { useWorld, useMemory });
       if (bridged) return bridged;
     } catch (_) { /* 桥接异常不阻塞独立运行。 */ }
     const parts = [];
-    try {
-      const world = window.WORLD_ENGINE_CORE?.loadState?.();
-      if (world?.worldDigest) parts.push('世界背景（不是节点完成证据）：' + clean(world.worldDigest).slice(0, 1400));
-    } catch (_) { /* 参考源可选。 */ }
-    try {
-      const memory = window.MEMORY_ENGINE_DATA?.loadState?.();
-      const summaries = memory?.event_memory?.big_summaries || [];
-      const latest = summaries.filter(item => item.status !== 'stale').slice(-1);
-      if (latest.length) parts.push('记忆背景（不得作为原文证据）：' + JSON.stringify(latest).slice(0, 1400));
-    } catch (_) { /* 不依赖记忆引擎运行。 */ }
+    if (useWorld) {
+      try {
+        const world = window.WORLD_ENGINE_CORE?.loadState?.();
+        if (world?.worldDigest) parts.push('世界背景（不是节点完成证据）：' + clean(world.worldDigest).slice(0, 1400));
+      } catch (_) { /* 参考源可选。 */ }
+    }
+    if (useMemory) {
+      try {
+        const memory = window.MEMORY_ENGINE_DATA?.loadState?.();
+        const summaries = memory?.event_memory?.big_summaries || [];
+        const latest = summaries.filter(item => item.status !== 'stale').slice(-1);
+        if (latest.length) parts.push('记忆背景（不得作为原文证据）：' + JSON.stringify(latest).slice(0, 1400));
+      } catch (_) { /* 不依赖记忆引擎运行。 */ }
+    }
     return parts.join('\n');
   }
   function verifiedEvidence(evidence, selection) {
@@ -481,7 +509,8 @@ window.OUTLINE_ENGINE = (function() {
       const schedule = getSchedule('narrative', { state, advanceTick: true });
       const nodes = schedule.selected.filter(node => node.visibility !== 'private' && node.completionSource !== 'world');
       const prompt = prompts().buildCheckPrompt({ state: clone(state), nodes, messages: selection.messages,
-        referenceContext: referenceContext(), allowProposals: settings().allowProposals !== false });
+        referenceContext: referenceContext(), allowProposals: settings().allowProposals !== false,
+        includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() });
       const raw = await invoke(task, prompt);
       if (!isCurrent(task, true)) return { ok: false, reason: 'stale-result' };
       const assessment = prompts().parseCheckResponse(raw, { state, nodes, messages: selection.messages, allowProposals: settings().allowProposals !== false });
@@ -507,7 +536,7 @@ window.OUTLINE_ENGINE = (function() {
         if (candidate.status === 'completed') completed.push(node.id);
       }
       if (!['flashback', 'dream', 'contradiction', 'in_world_rewind'].includes(assessment.timeAssessment?.kind)) applyContactsAndReveals(state, assessment, selection, stamp);
-      refreshClues(state, history()?.getWorldState?.());
+      refreshClues(state, allowWorldLink() ? history()?.getWorldState?.() : null);
       // 先应用真实进度和自动下章，再判断建议是否仍然指向未来，避免同轮完成后改写节点。
       state = data().advanceChapter(state);
       const proposals = [];
@@ -523,8 +552,10 @@ window.OUTLINE_ENGINE = (function() {
       state.tracking = { ...state.tracking, checkedLayer: currentLayer(), roundsSinceCheck: 0,
         lastDigest: `${state.revision}:${beforeChapterId}:${digest}`, pendingRecheck: false, recheckStartLayer: null };
       if (history()) history().recordOutlineCommit(beforeAutomatic, state, selection.refs); else data().saveState(state);
-      try { window.STORY_ENGINE_BRIDGE?.notifyOutlineCommitted?.(state, beforeAutomatic, selection); }
-      catch (bridgeErr) { console.warn('[剧情大纲] 同步已核实认知失败（已隔离）', bridgeErr); }
+      if (settings().injectIntoMemoryEngine !== false) {
+        try { window.STORY_ENGINE_BRIDGE?.notifyOutlineCommitted?.(state, beforeAutomatic, selection); }
+        catch (bridgeErr) { console.warn('[剧情大纲] 同步已核实认知失败（已隔离）', bridgeErr); }
+      }
       await window.WORLD_ENGINE_STORE?.flush?.();
       applyInjection(); refresh();
       setExternalStatus('剧情检查完成');
