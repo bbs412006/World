@@ -1162,6 +1162,7 @@ window.WORLD_ENGINE_UI = (function() {
 
   const MEMORY_SETTINGS_TABS = [
     { key: 'common', label: '常用' },
+    { key: 'recall', label: '记忆检索' },
     { key: 'link', label: '联动' },
     { key: 'advanced', label: '高级' },
     { key: 'mechanics', label: '本地机制' },
@@ -1354,6 +1355,22 @@ window.WORLD_ENGINE_UI = (function() {
     let timer;
     textarea.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(syncTags, 300); });
     syncTags();
+  }
+
+  function renderMemoryRecallResultsHtml(recall) {
+    if (!recall) return '<div class="we-empty">尚未运行语义召回；点击上方“测试本轮语义召回”或推进对话查看结果。</div>';
+    const hits = Array.isArray(recall.hits) ? recall.hits : [];
+    if (!hits.length) return `<div class="we-hint">最近一次检索（${h(recall.method || 'embedding')}）未达到阈值，无命中项。</div>`;
+    return `<div class="we-hint" style="margin-bottom:6px;">方式：<b>${h(recall.method)}</b> · 命中 ${hits.length} 条</div>`
+      + hits.map(hit => {
+        const scoreTag = hit.rerankScore != null
+          ? `Rerank ${(hit.rerankScore * 100).toFixed(1)}% · 余弦 ${(hit.cosineScore * 100).toFixed(1)}%`
+          : `余弦 ${(hit.cosineScore * 100).toFixed(1)}%`;
+        return `<div class="we-memory-recall-hit">
+          <div class="we-memory-recall-hit-head"><span>${h(hit.label)}</span><span class="we-memory-kw-tag">${h(scoreTag)}</span></div>
+          <div class="we-memory-recall-hit-text">${h(hit.text)}</div>
+        </div>`;
+      }).join('');
   }
 
   function renderMemorySettingsView() {
@@ -1706,14 +1723,23 @@ window.WORLD_ENGINE_UI = (function() {
       </div>
       <div style="font-size:11px;color:var(--we-text3);margin-top:5px;">完整导出同时包含 <b>state（最新当前数据）</b>和 <b>checkpoint（重新推演前的旧存档点）</b>，包含完整时间链与 known_by。</div>`;
 
-    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '0.1.0';
+    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '1.2.0';
     const memoryAboutBody = `
       <div class="we-about-current"><span class="we-changelog-cur">记忆引擎 v${h(memoryVersion)}</span></div>
       <div class="we-section" style="margin-top:10px;">
-        <div class="we-section-title">记忆引擎 1.1</div>
+        <div class="we-section-title">记忆引擎 1.2</div>
         <div style="font-size:12px;color:var(--we-text2);line-height:1.7;">
-          面向长篇对话的独立记忆系统。人物记忆保留知情人边界，实体记忆维护组织、物件、能力与地点的当前状态和历史；纪要按新增轮次记录阶段事件，总述再将多条纪要压缩为长期脉络。
+          面向长篇对话的独立记忆系统。人物记忆保留知情人边界与角色弧光，持续事实跟踪长期约束，实体记忆维护组织、物件、能力与地点的当前状态和历史；支持关键词共振召回与 Embedding + Rerank 双阶段语义检索，并可选通过协同桥与世界、大纲联动。
         </div>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v1.2.0 · 结构化总结、三模块协同与语义记忆检索</div>
+        <ul class="we-changelog-items">
+          <li>新增「持续事实」独立管理页与「角色弧光（0–100% 进度、关系与立场）」追踪，阶段纪要支持关键词、关联实体与关键转折标签提取，均接入时间链随改删楼层同步回滚。</li>
+          <li>新增「记忆检索」选项卡，支持配置兼容 OpenAI / 硅基流动 / Jina 的 Embedding 与 Rerank 双阶段语义召回、增量哈希缓存防重复计费、逐批落盘中断续算及无配置/异常自动回退本地关键词召回。</li>
+          <li>新增「延迟总结楼层」、解除纪要间隔轮数限制、记忆注入总字数预算分级裁剪，以及跨聊天纯净迁移的「总结记忆包」和独立「向量索引文件」导入导出。</li>
+          <li>接入三模块可选协同调度（串行错峰管道降低并发撞限流风险）与世界→记忆「零额外 API 轻同步」模式。</li>
+        </ul>
       </div>
       <div class="we-section" style="margin-top:10px;">
         <div class="we-section-title">v1.1.2 · 修复总述与纪要重复注入</div>
@@ -1755,6 +1781,98 @@ window.WORLD_ENGINE_UI = (function() {
         <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">默认关闭。开启后才会把下方选中的世界书条目作为人物与背景参考；世界书内容不会被直接当作新记忆。</div>
       </div>`;
 
+    const vecStats = window.MEMORY_ENGINE_VECTOR?.getStats?.() || null;
+    const vecEnabled = settings.vectorEnabled === true;
+    const vecAutoMaintain = settings.vectorAutoMaintain !== false;
+    const rerankEnabled = settings.rerankEnabled === true;
+    const vectorTopK = Math.max(1, parseInt(settings.vectorTopK, 10) || 12);
+    const vectorThreshold = Number.isFinite(Number(settings.vectorThreshold)) ? Number(settings.vectorThreshold) : 0.3;
+    const rerankTopK = Math.max(1, parseInt(settings.rerankTopK, 10) || 5);
+    const rerankThreshold = Number.isFinite(Number(settings.rerankThreshold)) ? Number(settings.rerankThreshold) : 0.2;
+
+    const embeddingBody = `
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-vector-enabled" ${vecEnabled ? 'checked' : ''}>
+          启用 Embedding 语义记忆召回
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">开启后可突破纯字面关键词匹配限制，凭语义相似度精准唤醒折叠历史纪要、持续事实、人物弧光与世界实体；未配置或网络异常时自动平滑退回本地关键词召回。</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-vector-auto-maintain" ${vecAutoMaintain ? 'checked' : ''}>
+          提取与回复后自动增量补全缺失向量
+        </label>
+      </div>
+      <div class="we-input-group">
+        <label>Embedding API Base URL（支持硅基流动 / OpenAI 兼容 /embeddings）</label>
+        <input type="text" id="we-memory-embedding-url" value="${u(settings.embeddingApiUrl || '')}" placeholder="例如：https://api.siliconflow.cn/v1">
+      </div>
+      <div class="we-input-group">
+        <label>Embedding API Key</label>
+        <input type="password" id="we-memory-embedding-key" value="${u(settings.embeddingApiKey || '')}">
+      </div>
+      <div class="we-input-group">
+        <label>Embedding 模型名</label>
+        <input type="text" id="we-memory-embedding-model" value="${u(settings.embeddingModel || 'BAAI/bge-m3')}" placeholder="例如：BAAI/bge-m3 或 text-embedding-3-small">
+      </div>
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        <div style="flex:1;"><label>初筛候选数（TopK）</label><input type="number" id="we-memory-vector-topk" min="1" max="50" step="1" value="${vectorTopK}" style="width:100%;"></div>
+        <div style="flex:1;"><label>余弦相似度阈值（0–1）</label><input type="number" id="we-memory-vector-threshold" min="0" max="1" step="0.05" value="${vectorThreshold}" style="width:100%;"></div>
+      </div>`;
+
+    const rerankBody = `
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-rerank-enabled" ${rerankEnabled ? 'checked' : ''}>
+          启用 Rerank 重排模型二次精排
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">在 Embedding 粗召回的 TopK 候选中再经交叉编码重排打分，显著过滤伪相关。若 Rerank URL/Key 与 Embedding 同服务商（如硅基流动），可留空自动复用。</div>
+      </div>
+      <div class="we-input-group">
+        <label>Rerank API Base URL（留空则复用上方 Embedding URL）</label>
+        <input type="text" id="we-memory-rerank-url" value="${u(settings.rerankApiUrl || '')}" placeholder="留空自动复用 Embedding URL；或填专用 /rerank 端点">
+      </div>
+      <div class="we-input-group">
+        <label>Rerank API Key（留空则复用 Embedding Key）</label>
+        <input type="password" id="we-memory-rerank-key" value="${u(settings.rerankApiKey || '')}">
+      </div>
+      <div class="we-input-group">
+        <label>Rerank 模型名</label>
+        <input type="text" id="we-memory-rerank-model" value="${u(settings.rerankModel || 'BAAI/bge-reranker-v2-m3')}" placeholder="例如：BAAI/bge-reranker-v2-m3 或 bge-reranker-large">
+      </div>
+      <div class="we-input-group" style="display:flex;gap:6px;">
+        <div style="flex:1;"><label>精排保留数（TopK）</label><input type="number" id="we-memory-rerank-topk" min="1" max="20" step="1" value="${rerankTopK}" style="width:100%;"></div>
+        <div style="flex:1;"><label>重排相关性阈值（0–1）</label><input type="number" id="we-memory-rerank-threshold" min="0" max="1" step="0.05" value="${rerankThreshold}" style="width:100%;"></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;font-size:12px;">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-vec-scope-small" ${settings.vectorIncludeArchivedSmall !== false ? 'checked' : ''}> 检索纪要</label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-vec-scope-facts" ${settings.vectorIncludeFacts !== false ? 'checked' : ''}> 检索持续事实</label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-vec-scope-entities" ${settings.vectorIncludePersonalAndEntity !== false ? 'checked' : ''}> 语义唤醒人物/实体</label>
+      </div>`;
+
+    const recallMaintainBody = `
+      <div class="we-hint" id="we-memory-vector-stats" style="margin-bottom:8px;">${
+        vecStats
+          ? `当前聊天已索引 <b>${vecStats.indexed}</b> / ${vecStats.totalItems} 条（缺 ${vecStats.missing} 条 · 模型：${h(vecStats.embeddingModel || '未设')} · 维度：${vecStats.dimensions || '-'}）`
+          : '向量模块未加载'
+      }</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+        <button class="we-btn we-btn-primary" id="we-memory-vector-maintain" type="button"><i class="fa-solid fa-bolt"></i> 补全缺失向量</button>
+        <button class="we-btn" id="we-memory-vector-rebuild" type="button">重建全部向量</button>
+        <button class="we-btn" id="we-memory-vector-stop" type="button">■ 停止</button>
+        <button class="we-btn" id="we-memory-vector-clear" type="button">清空向量</button>
+      </div>
+      <div class="we-hint" id="we-memory-vector-status" style="margin-bottom:8px;">${h(window.MEMORY_ENGINE_VECTOR?.getStatus?.().message || '')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;padding-top:6px;border-top:1px solid var(--we-border,#3a3a3a);">
+        <button class="we-btn we-btn-primary" id="we-memory-vector-test-recall" type="button"><i class="fa-solid fa-magnifying-glass"></i> 测试本轮语义召回</button>
+        <button class="we-btn" id="we-memory-vector-export" type="button">导出向量 JSON</button>
+        <button class="we-btn" id="we-memory-vector-import" type="button">导入向量 JSON</button>
+        <input type="file" id="we-memory-vector-import-file" accept=".json,application/json" style="display:none;">
+      </div>
+      <div id="we-memory-vector-preview">${renderMemoryRecallResultsHtml(vecStats?.lastRecall)}</div>
+      <div style="font-size:11px;color:var(--we-text3);margin-top:6px;">向量文件仅保存对应模型的高维向量索引并绑定聊天身份，不混入总结记忆包；按内容哈希复用已有缓存，中途停止已算完部分永久保留。</div>`;
+
     const worldbook = String(extra.worldbook || '')
       .replace(/后台推演世界书/g, '记忆推演世界书')
       .replace(/注入推演/g, '注入记忆推演');
@@ -1762,6 +1880,9 @@ window.WORLD_ENGINE_UI = (function() {
       common: sec('set-memory-api', '记忆引擎 API', apiBody)
         + sec('set-memory-evolve', '记忆提取与事件整理', modeBody)
         + sec('set-memory-inject', '记忆信息注入', injectBody),
+      recall: sec('set-memory-embedding', 'Embedding 向量模型配置', embeddingBody)
+        + sec('set-memory-rerank', 'Rerank 重排模型与检索范围', rerankBody)
+        + sec('set-memory-vector-ops', '向量索引维护与独立文件', recallMaintainBody),
       mechanics: sec('set-memory-mechanics', '正文保留与推演参考', mechanicsBody),
       link: sec('set-memory-link', '向世界引擎联动', linkBody),
       advanced: sec('set-memory-retry', 'API 自动重试', retryBody)
@@ -2335,6 +2456,11 @@ window.WORLD_ENGINE_UI = (function() {
   //   date    —— 可选，日期不确定的留月份/年份；
   //   items   —— 该版本改动条目（每条一行，渲染时走 h() 转义）。
   const CHANGELOG = [
+    { version: '3.3.0', date: '2026-11-18', items: [
+      '新增可选三模块协同桥（story-engine-bridge.js）：世界、记忆、大纲各保持完全独立运行能力，多开时共享统一人物与势力别名表、上下文互补、并支持正文 depth=1 注入顺序稳定对齐为「世界 → 记忆 → 大纲」。',
+      '新增「串行错峰管道」并发协调调度：同轮触发多模块后台任务时按「世界推演 → 大纲核对 → 记忆提取」单并发依次执行，减少渠道并发限流并直接复用前置最新公开结果。',
+      '世界→记忆联动默认提供「零额外 API 轻同步」模式，并支持保留原有深度 LLM 重整理切换；调试页支持查看上次正文生成的完整提示词链及三模块实际落点排序。'
+    ] },
     { version: '3.2.0', date: '2026-11-17', items: ['大纲升级为 v2：章节与跨章主线、支线、暗线分离，按条件、优先级与等待情况联合调度。', '新增幕后事实、可发现线索、实际接触与知情的分层；正文与记忆使用允许公开的投影。', '新增联合增量日志与周期快照；重生成先使用生成前基底，取消可恢复原分支，大量删楼按有效来源恢复并提示待重建范围。', 'v2 使用独立存档命名空间保留旧资料，支持联合备份和显式批量重建。'] },
     { version: '3.1.0', date: '2026-11-17', items: ['新增独立剧情大纲：手写章节节点，或将 txt/md 文本整理并预览确认后采用。', '当前大纲柔性引导正文与世界推演；按可配置的 N 轮检查进度，改纲建议需用户确认，必要节点完成后自动切章。', '剧情进度关联真实消息来源，重生成与删改正文会撤回失效判断；支持独立 JSON、聊天存档、同步、注入检查和诊断。'] },
     { version: '3.0.2', date: '2026-07-19', items: ['放宽事件链的早期创建条件：已有具体迹象的筹划、试探、调查起步或矛盾初现，可以在尚未成熟时进入事件链持续观察。', '放宽风声的传播起点：明确信息主题一旦开始公开发布、被他人听闻或转述、经渠道传递或形成小范围议论，即可创建，不再要求已影响其他持久状态。', '保留事件与风声的归并、去重和合法传播边界，避免放宽准入后产生重复条目或私密信息泄露。'] },
@@ -5323,6 +5449,29 @@ window.WORLD_ENGINE_UI = (function() {
       syncRawRetentionAvailability();
     }
 
+    const collectRecallSettingsFromDom = () => {
+      if (!document.getElementById('we-memory-vector-enabled')) return {};
+      const gv = id => document.getElementById(id)?.value;
+      return {
+        vectorEnabled: document.getElementById('we-memory-vector-enabled')?.checked === true,
+        vectorAutoMaintain: document.getElementById('we-memory-vector-auto-maintain')?.checked !== false,
+        embeddingApiUrl: gv('we-memory-embedding-url') || '',
+        embeddingApiKey: gv('we-memory-embedding-key') || '',
+        embeddingModel: gv('we-memory-embedding-model') || 'BAAI/bge-m3',
+        rerankEnabled: document.getElementById('we-memory-rerank-enabled')?.checked === true,
+        rerankApiUrl: gv('we-memory-rerank-url') || '',
+        rerankApiKey: gv('we-memory-rerank-key') || '',
+        rerankModel: gv('we-memory-rerank-model') || 'BAAI/bge-reranker-v2-m3',
+        vectorTopK: Math.max(1, parseInt(gv('we-memory-vector-topk'), 10) || 12),
+        vectorThreshold: Number.isFinite(parseFloat(gv('we-memory-vector-threshold'))) ? parseFloat(gv('we-memory-vector-threshold')) : 0.3,
+        rerankTopK: Math.max(1, parseInt(gv('we-memory-rerank-topk'), 10) || 5),
+        rerankThreshold: Number.isFinite(parseFloat(gv('we-memory-rerank-threshold'))) ? parseFloat(gv('we-memory-rerank-threshold')) : 0.2,
+        vectorIncludeArchivedSmall: document.getElementById('we-memory-vec-scope-small')?.checked !== false,
+        vectorIncludeFacts: document.getElementById('we-memory-vec-scope-facts')?.checked !== false,
+        vectorIncludePersonalAndEntity: document.getElementById('we-memory-vec-scope-entities')?.checked !== false
+      };
+    };
+
     const memorySaveBtn = document.getElementById('we-save-memory-settings');
     if (memorySaveBtn) {
       memorySaveBtn.onclick = () => {
@@ -5366,6 +5515,7 @@ window.WORLD_ENGINE_UI = (function() {
           enableFactAndArcExtraction: document.getElementById('we-memory-enable-structured')?.checked !== false,
           coordinationMode: gv('we-memory-coordination-mode') === 'independent' ? 'independent' : 'stagger-serial',
           worldLinkMode: gv('we-memory-world-link-mode') === 'llm' ? 'llm' : 'lightweight',
+          ...collectRecallSettingsFromDom(),
           apiAutoRetries: Math.max(0, parseInt(gv('we-memory-api-auto-retries')) || 0),
           nameBlacklist: gv('we-memory-name-blacklist') || '',
           filterRegex: gv('we-memory-filter-regex') || '',
@@ -5387,7 +5537,107 @@ window.WORLD_ENGINE_UI = (function() {
     }
 
     const memoryData = window.MEMORY_ENGINE_DATA;
+    const memoryVector = window.MEMORY_ENGINE_VECTOR;
     const memoryCache = window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory');
+    const syncRecallFromDom = () => {
+      const patch = collectRecallSettingsFromDom();
+      if (Object.keys(patch).length) window.MEMORY_ENGINE_SETTINGS?.patchSettings?.(patch);
+    };
+    const updateVecUi = message => {
+      const statsEl = document.getElementById('we-memory-vector-stats');
+      const statusEl = document.getElementById('we-memory-vector-status');
+      const previewEl = document.getElementById('we-memory-vector-preview');
+      const stats = memoryVector?.getStats?.();
+      if (statsEl && stats) {
+        statsEl.innerHTML = `当前聊天已索引 <b>${stats.indexed}</b> / ${stats.totalItems} 条（缺 ${stats.missing} 条 · 模型：${h(stats.embeddingModel || '未设')} · 维度：${stats.dimensions || '-'}）`;
+      }
+      if (statusEl && message !== undefined) statusEl.textContent = message;
+      if (previewEl && stats) previewEl.innerHTML = renderMemoryRecallResultsHtml(stats.lastRecall);
+    };
+    const runVectorMaintainBtn = async forceRebuild => {
+      if (!memoryVector) { showToast('向量检索模块未加载', true); return; }
+      syncRecallFromDom();
+      const statusEl = document.getElementById('we-memory-vector-status');
+      try {
+        const res = await memoryVector.maintainVectors({
+          forceRebuild,
+          onProgress: st => { if (statusEl) statusEl.textContent = st.message || ''; }
+        });
+        updateVecUi(res.skipped ? '全部向量已是最新' : `向量完成：新增/更新 ${res.updated} 条`);
+        showToast(res.skipped ? '全部向量均已是最新' : `完成 ${res.updated} 条向量计算`);
+      } catch (error) {
+        updateVecUi('向量维护失败：' + (error?.message || error));
+        showToast('向量维护失败：' + (error?.message || error), true);
+      }
+    };
+    const vecMaintainBtn = document.getElementById('we-memory-vector-maintain');
+    if (vecMaintainBtn) vecMaintainBtn.onclick = () => runVectorMaintainBtn(false);
+    const vecRebuildBtn = document.getElementById('we-memory-vector-rebuild');
+    if (vecRebuildBtn) vecRebuildBtn.onclick = () => {
+      if (!confirm('确认清空旧索引并全量重新计算当前聊天的全部记忆向量？')) return;
+      runVectorMaintainBtn(true);
+    };
+    const vecStopBtn = document.getElementById('we-memory-vector-stop');
+    if (vecStopBtn) vecStopBtn.onclick = () => { memoryVector?.abort?.(); showToast('正在停止向量任务…'); };
+    const vecClearBtn = document.getElementById('we-memory-vector-clear');
+    if (vecClearBtn) vecClearBtn.onclick = () => {
+      if (!confirm('确定清空当前聊天的本地向量索引缓存？')) return;
+      memoryVector?.clearVectorCache?.();
+      updateVecUi('向量缓存已清空');
+      window.MEMORY_ENGINE?.applyInjection?.();
+      showToast('已清空本聊天向量缓存');
+    };
+    const vecTestBtn = document.getElementById('we-memory-vector-test-recall');
+    if (vecTestBtn) vecTestBtn.onclick = async () => {
+      if (!memoryVector) { showToast('向量检索模块未加载', true); return; }
+      syncRecallFromDom();
+      window.MEMORY_ENGINE_SETTINGS?.patchSettings?.({ vectorEnabled: true });
+      const st = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {};
+      const all = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.()?.chat) || [];
+      const query = all.slice(-Math.max(1, parseInt(st.searchDepth, 10) || 5)).map(m => String(m?.mes || '').trim()).filter(Boolean).join('\n');
+      if (!query) { showToast('当前聊天正文为空，无法构造测试查询', true); return; }
+      vecTestBtn.disabled = true;
+      updateVecUi('正在运行 Embedding + Rerank 语义检索测试…');
+      try {
+        const res = await memoryVector.recallForQuery(query, { force: true });
+        updateVecUi(res ? `检索完成（${res.method}，命中 ${res.hits.length} 条）` : '未生成有效向量或无命中结果');
+        showToast(res ? `召回完成：命中 ${res.hits.length} 条` : '当前无可检索向量', !res);
+      } catch (error) {
+        updateVecUi('测试召回失败：' + (error?.message || error));
+        showToast('测试召回失败：' + (error?.message || error), true);
+      } finally {
+        vecTestBtn.disabled = false;
+      }
+    };
+    const vecExportBtn = document.getElementById('we-memory-vector-export');
+    if (vecExportBtn) vecExportBtn.onclick = () => {
+      if (!memoryVector) { showToast('向量模块未加载', true); return; }
+      const pkg = memoryVector.exportVectorData();
+      setupDownload(JSON.stringify(pkg, null, 2), 'memory-vectors-' + Date.now() + '.json');
+      showToast(`已导出独立向量文件（${pkg.count || 0} 条）`);
+    };
+    const vecImportBtn = document.getElementById('we-memory-vector-import');
+    const vecImportFile = document.getElementById('we-memory-vector-import-file');
+    if (vecImportBtn && vecImportFile) {
+      vecImportBtn.onclick = () => vecImportFile.click();
+      vecImportFile.onchange = async () => {
+        const file = vecImportFile.files?.[0];
+        if (!file) return;
+        const expectedChatId = memoryData?.getChatId?.();
+        try {
+          const saved = memoryVector.importVectorData(JSON.parse(await file.text()), {
+            expectedChatId,
+            isBusy: () => window.MEMORY_ENGINE?.isRunning?.() === true
+          });
+          updateVecUi(`向量导入成功，共 ${Object.keys(saved.records || {}).length} 条`);
+          showToast('向量索引文件导入成功');
+        } catch (error) {
+          showToast('导入向量文件失败：' + (error?.message || error), true);
+        } finally {
+          vecImportFile.value = '';
+        }
+      };
+    }
     const memoryExportPkg = document.getElementById('we-memory-export-package');
     if (memoryExportPkg) memoryExportPkg.onclick = () => {
       if (!memoryData?.exportMemoryPackage) { showToast('记忆包功能未就绪', true); return; }

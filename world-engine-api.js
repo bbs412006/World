@@ -121,11 +121,16 @@ window.WORLD_ENGINE_API = (function() {
   //   火山方舟等 OpenAI 兼容端点用自定义版本前缀（/api/v3、/api/coding/v3），旧逻辑会硬塞
   //   /v1 把 URL 拼成 .../v3/v1/chat/completions 而全部 404。版本前缀由用户在设置里填到完整，
   //   旁边有格式提示。三处调用点（getProxyBase / callApi / fetchModelList）语义一致受益。
+  function normalizeEndpointUrl(url, suffix) {
+    const raw = String(url || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    const cleaned = raw.replace(/\/(?:chat\/completions|embeddings|rerank)$/i, '');
+    if (raw.toLowerCase().endsWith(suffix.toLowerCase())) return raw;
+    return cleaned + suffix;
+  }
+
   function normalizeUrl(url) {
-    let u = url.trim().replace(/\/+$/, '');
-    if (!u) return '';
-    if (u.endsWith('/chat/completions')) return u;
-    return u + '/chat/completions';
+    return normalizeEndpointUrl(url, '/chat/completions');
   }
 
   // [FIX] 经酒馆代理用：从完整的 chat/completions URL 还原出 base（形如 https://host/v1），
@@ -446,5 +451,70 @@ window.WORLD_ENGINE_API = (function() {
     throw new Error('无法解析模型列表');
   }
 
-  return { callApi, parseJSON, getSettings, fetchModelList };
+  async function postJsonEndpoint(url, apiKey, payload, signal, timeoutMs, label) {
+    if (!url) throw new Error(`未配置 ${label} API URL`);
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+    const result = await fetchResponseWithTimeout(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload)
+    }, signal, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 60000);
+    if (!result.resp.ok) {
+      throw new Error(`${label} HTTP ${result.resp.status}: ${responseDetail(result)}`);
+    }
+    return requireJson(result, label);
+  }
+
+  async function callEmbeddingApi(texts, settingsOverride, signal) {
+    const input = Array.isArray(texts) ? texts.map(t => String(t ?? '')) : [String(texts ?? '')];
+    if (!input.length) return [];
+    const cfg = settingsOverride || {};
+    const url = normalizeEndpointUrl(cfg.apiUrl || cfg.embeddingApiUrl, '/embeddings');
+    const model = String(cfg.model || cfg.embeddingModel || '').trim();
+    if (!model) throw new Error('未配置 Embedding 模型名称');
+    const data = await postJsonEndpoint(
+      url,
+      String(cfg.apiKey ?? cfg.embeddingApiKey ?? '').trim(),
+      { model, input, encoding_format: 'float' },
+      signal,
+      cfg.apiTimeoutMs ?? 60000,
+      'Embedding API'
+    );
+    const rows = Array.isArray(data.data) ? data.data.slice() : null;
+    if (!rows || !rows.length) throw new Error('Embedding API 返回缺少 data 向量数组');
+    rows.sort((a, b) => (Number(a?.index) || 0) - (Number(b?.index) || 0));
+    const vectors = rows.map(row => Array.isArray(row?.embedding) ? row.embedding.map(Number) : null);
+    if (vectors.some(v => !v || !v.length)) throw new Error('Embedding API 返回包含无效向量');
+    return vectors;
+  }
+
+  async function callRerankApi(query, documents, settingsOverride, signal) {
+    const docs = Array.isArray(documents) ? documents.map(d => String(d ?? '')) : [];
+    if (!docs.length) return [];
+    const cfg = settingsOverride || {};
+    const url = normalizeEndpointUrl(cfg.apiUrl || cfg.rerankApiUrl, '/rerank');
+    const model = String(cfg.model || cfg.rerankModel || '').trim();
+    if (!model) throw new Error('未配置 Rerank 模型名称');
+    const topN = Math.max(1, Math.min(docs.length, parseInt(cfg.topN || cfg.rerankTopK) || docs.length));
+    const data = await postJsonEndpoint(
+      url,
+      String(cfg.apiKey ?? cfg.rerankApiKey ?? '').trim(),
+      { model, query: String(query ?? ''), documents: docs, top_n: topN, return_documents: false },
+      signal,
+      cfg.apiTimeoutMs ?? 60000,
+      'Rerank API'
+    );
+    const list = Array.isArray(data.results) ? data.results : (Array.isArray(data.data) ? data.data : null);
+    if (!list) throw new Error('Rerank API 返回缺少 results 数组');
+    return list
+      .map(item => ({
+        index: parseInt(item?.index, 10),
+        score: Number(item?.relevance_score ?? item?.score ?? 0)
+      }))
+      .filter(item => Number.isInteger(item.index) && item.index >= 0 && item.index < docs.length && Number.isFinite(item.score))
+      .sort((a, b) => b.score - a.score);
+  }
+
+  return { callApi, callEmbeddingApi, callRerankApi, parseJSON, getSettings, fetchModelList };
 })();

@@ -182,11 +182,13 @@
     try {
       await loadRequiredModules(baseUrl, SHARED_MODULES, '共用底座');
       validateContracts('共用底座', SHARED_CONTRACTS);
-      // 跨模块协同桥完全可选；加载失败不阻塞任何单引擎运行。
-      try {
-        await loadScript(baseUrl + '/story-engine-bridge.js');
-        if (window.STORY_ENGINE_BRIDGE) console.log('[跨模块协同桥] 已加载: story-engine-bridge.js');
-      } catch (_) {}
+      // 跨模块协同桥及可选向量记忆模块完全容错；加载失败不阻塞任何引擎运行。
+      for (const optMod of ['story-engine-bridge.js', 'memory-engine-vector.js']) {
+        try {
+          await loadScript(baseUrl + '/' + optMod);
+          console.log('[可选增强模块] 已加载:', optMod);
+        } catch (_) {}
+      }
       // 来源工具供记忆和大纲共用；加载失败不能拖垮不依赖它的世界引擎。
       await loadEngineGroup(baseUrl, {
         label: '共享消息来源', modules: ['memory-engine-timeline.js'],

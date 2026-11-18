@@ -450,6 +450,7 @@ window.MEMORY_ENGINE_DATA = (function() {
     rebased.timeline = newTimeline(rebased, { originChatId: getChatId(), migratedFromLegacy: false });
     clearCheckpoint();
     clearLinkCheckpoint();
+    try { window.MEMORY_ENGINE_VECTOR?.clearVectorCache?.(getChatId()); } catch (_) {}
     return saveState(rebased);
   }
   function exportData() {

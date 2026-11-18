@@ -4258,3 +4258,28 @@
 .we-memory-fact-resolved {
   opacity: 0.72;
 }
+
+.we-memory-recall-hit {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--we-text3) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--we-text3) 18%, transparent);
+  margin-bottom: 6px;
+}
+
+.we-memory-recall-hit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--we-text1);
+  margin-bottom: 3px;
+}
+
+.we-memory-recall-hit-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--we-text2);
+}

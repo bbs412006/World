@@ -1,7 +1,7 @@
 // memory-engine-settings.js — 记忆引擎独立设置（只复用 API/调度等实现，不共享配置值）
 window.MEMORY_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'memory_engine_settings';
-  const VERSION = '1.1.2';
+  const VERSION = '1.2.0';
   const DEFAULTS = Object.freeze({
     apiUrl: '',
     apiKey: '',
@@ -37,6 +37,22 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     enableFactAndArcExtraction: true,
     worldLinkMode: 'lightweight',
     coordinationMode: 'stagger-serial',
+    vectorEnabled: false,
+    vectorAutoMaintain: true,
+    embeddingApiUrl: '',
+    embeddingApiKey: '',
+    embeddingModel: 'BAAI/bge-m3',
+    rerankEnabled: false,
+    rerankApiUrl: '',
+    rerankApiKey: '',
+    rerankModel: 'BAAI/bge-reranker-v2-m3',
+    vectorTopK: 12,
+    vectorThreshold: 0.3,
+    rerankTopK: 5,
+    rerankThreshold: 0.2,
+    vectorIncludeArchivedSmall: true,
+    vectorIncludeFacts: true,
+    vectorIncludePersonalAndEntity: true,
     injectionDiceSides: 10000,
     apiAutoRetries: 0,
     nameBlacklist: '',
@@ -57,6 +73,12 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
 
   function clampInt(value, fallback, min, max) {
     const num = parseInt(value, 10);
+    const parsed = Number.isFinite(num) ? num : fallback;
+    return Math.min(max, Math.max(min, parsed));
+  }
+
+  function clampFloat(value, fallback, min, max) {
+    const num = Number(value);
     const parsed = Number.isFinite(num) ? num : fallback;
     return Math.min(max, Math.max(min, parsed));
   }
@@ -86,7 +108,23 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       injectCharacterArcsLimit: clampInt(merged.injectCharacterArcsLimit, 6, 0, 30),
       enableFactAndArcExtraction: merged.enableFactAndArcExtraction !== false,
       worldLinkMode: merged.worldLinkMode === 'llm' ? 'llm' : 'lightweight',
-      coordinationMode: merged.coordinationMode === 'independent' ? 'independent' : 'stagger-serial'
+      coordinationMode: merged.coordinationMode === 'independent' ? 'independent' : 'stagger-serial',
+      vectorEnabled: merged.vectorEnabled === true,
+      vectorAutoMaintain: merged.vectorAutoMaintain !== false,
+      embeddingApiUrl: String(merged.embeddingApiUrl ?? '').trim(),
+      embeddingApiKey: String(merged.embeddingApiKey ?? '').trim(),
+      embeddingModel: String(merged.embeddingModel || 'BAAI/bge-m3').trim(),
+      rerankEnabled: merged.rerankEnabled === true,
+      rerankApiUrl: String(merged.rerankApiUrl ?? '').trim(),
+      rerankApiKey: String(merged.rerankApiKey ?? '').trim(),
+      rerankModel: String(merged.rerankModel || 'BAAI/bge-reranker-v2-m3').trim(),
+      vectorTopK: clampInt(merged.vectorTopK, 12, 1, 50),
+      vectorThreshold: clampFloat(merged.vectorThreshold, 0.3, 0, 1),
+      rerankTopK: clampInt(merged.rerankTopK, 5, 1, 20),
+      rerankThreshold: clampFloat(merged.rerankThreshold, 0.2, 0, 1),
+      vectorIncludeArchivedSmall: merged.vectorIncludeArchivedSmall !== false,
+      vectorIncludeFacts: merged.vectorIncludeFacts !== false,
+      vectorIncludePersonalAndEntity: merged.vectorIncludePersonalAndEntity !== false
     };
   }
 

@@ -999,6 +999,21 @@ window.OUTLINE_ENGINE_UI = (function() {
           <div style="font-size:12px;color:var(--we-text2);line-height:1.75;">
             跨章节多线剧情引擎。主线、支线与暗线按前置条件、时间与剧情线索独立调度；幕后事实与正文公开线索分层投影，配合世界与记忆联合历史实现可回退、可审计的叙事推演。
           </div>
+        </div>
+        <div class="we-section" style="margin-top:10px;">
+          <div class="we-section-title">v2.1.0 · 界面精简与三模块协同联动</div>
+          <ul class="we-changelog-items">
+            <li>首页精简展示当前所处剧情位置，完整剧情看板收进纵轴「剧情」模块，存档与恢复整合进右上角设置。</li>
+            <li>接入跨模块协同桥：整理与核对融入已激活世界/记忆模块的人物及势力别名参考；核对只读上下文补充记忆持续事实、最新总述、近期纪要与人物弧光。</li>
+            <li>经逐字原文证据核实的新增线索接触（contacts）与揭露真相（reveals）可自动安全同步至对应人物主观记忆时间链；未揭露私密事实仍严密隔离。</li>
+            <li>支持同轮多模块并发「串行错峰管道」，紧随世界推演之后核对正文，减少重复重查并对齐正文注入顺序（世界 → 记忆 → 大纲）。</li>
+          </ul>
+        </div>
+        <div class="we-section" style="margin-top:10px;">
+          <div class="we-section-title">v2.0.0 · 跨章多线调度与联合事实日志</div>
+          <ul class="we-changelog-items">
+            <li>章节与主线、支线、暗线解耦；新增私密事实、可发现线索、实际接触与知情分层投影及联合历史增量快照恢复。</li>
+          </ul>
         </div>`
     };
     const tabBar = `<div class="we-settings-tabs-shell">

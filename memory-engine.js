@@ -1214,6 +1214,9 @@ window.MEMORY_ENGINE = (function() {
       window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
       applyInjection();
       refreshMemoryPanel();
+      if (!options?.allowWhileBackfill && !backfillRunning) {
+        refreshVectorRecallAsync(next);
+      }
       setExternalStatus(`${taskLabel}完成`);
       return {
         added: added + addedSmall + updatedBig,
@@ -1897,6 +1900,7 @@ window.MEMORY_ENGINE = (function() {
   function abort() {
     backfillRunning = false;
     abortController?.abort();
+    try { window.MEMORY_ENGINE_VECTOR?.abort?.(); } catch (_) {}
   }
 
   function clearInjection() {
@@ -2070,6 +2074,7 @@ window.MEMORY_ENGINE = (function() {
     const queryTokens = tokenizeSearchText(scan);
     let bridgeActors = [];
     let bridgeHints = {};
+    let vectorRecall = null;
     try {
       const bridge = window.STORY_ENGINE_BRIDGE;
       if (bridge) {
@@ -2077,24 +2082,32 @@ window.MEMORY_ENGINE = (function() {
         bridgeHints = bridge.getCrossInjectionHints?.() || {};
       }
     } catch (_) {}
+    try {
+      vectorRecall = st.vectorEnabled === true ? window.MEMORY_ENGINE_VECTOR?.getRecallScoresForInjection?.() : null;
+    } catch (_) {}
     const bridgeActorSet = new Set(bridgeActors.map(normalized).filter(Boolean));
     const appearsInScan = name => {
       if (!name) return false;
       if (bridgeActorSet.has(normalized(name))) return true;
       return new RegExp(String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u').test(scan);
     };
-    const matched = (state.personal_memory || []).filter(character => (character.names || []).some(appearsInScan));
+    const matched = (state.personal_memory || []).filter(character =>
+      (character.names || []).some(appearsInScan) || Number(vectorRecall?.personScores?.[character.id]) > 0
+    );
     const matchedEntities = ENTITY_TYPES.flatMap(type => state.entity_memory[type]
-      .filter(entity => unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan))
+      .filter(entity => unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan)
+        || Number(vectorRecall?.entityScores?.[`${type}:${entity.id}`]) > 0)
       .map(entity => ({ type, entity })));
     const blocks = [], globalSeen = new Set(), limit = Math.max(1, parseInt(st.maxPerCharacter) || 20);
 
-    // P0: 持续生效事实（与当前场景人物或扫描词元命中者优先排前）
+    // P0: 持续生效事实（与当前场景人物/扫描词元/语义向量命中者优先排前）
     const factsLimit = Math.max(0, parseInt(st.injectOngoingFactsLimit ?? 15) || 0);
     if (factsLimit > 0 && activeFacts.length) {
       const sortedFacts = activeFacts.map((fact, idx) => {
+        const vecScore = Number(vectorRecall?.factScores?.[fact.id]) || 0;
         const hit = (fact.subject && appearsInScan(fact.subject) ? 10 : 0)
-          + (Array.isArray(fact.keywords) ? fact.keywords.filter(kw => scanLower.includes(clean(kw).toLocaleLowerCase())).length * 4 : 0);
+          + (Array.isArray(fact.keywords) ? fact.keywords.filter(kw => scanLower.includes(clean(kw).toLocaleLowerCase())).length * 4 : 0)
+          + vecScore * 30;
         return { fact, hit, idx };
       }).sort((a, b) => (b.hit - a.hit) || (b.idx - a.idx)).slice(0, factsLimit);
       blocks.push({
@@ -2138,24 +2151,33 @@ window.MEMORY_ENGINE = (function() {
       });
     }
 
-    // P3: 对已折叠进总述的历史纪要，凭关键词/实体/上下文词元按需精准唤醒
+    // P3: 对已折叠进总述的历史纪要，综合本地关键词/词元重合与 Embedding/Rerank 语义召回精准唤醒
     const recallLimit = Math.max(0, parseInt(st.recallArchivedSmallLimit ?? 3) || 0);
     if (recallLimit > 0 && hasStructuredOverview) {
       const archivedSmall = eventMemory.small_summaries.filter(item =>
         item.status !== 'stale' && item.status !== 'failed' && coveredChildIds.has(item.id)
       );
       const recalled = archivedSmall
-        .map((item, idx) => ({ item, score: scoreArchivedSmallSummary(item, queryTokens, scanLower, idx, archivedSmall.length) }))
+        .map((item, idx) => {
+          const lexical = scoreArchivedSmallSummary(item, queryTokens, scanLower, idx, archivedSmall.length);
+          const vecScore = Number(vectorRecall?.smallScores?.[item.id]) || 0;
+          return { item, score: lexical + vecScore * 35, vecScore };
+        })
         .filter(entry => entry.score > 0)
         .sort((a, b) => b.score - a.score)
-        .slice(0, recallLimit)
-        .map(entry => entry.item);
+        .slice(0, recallLimit);
       if (recalled.length) {
+        const hasVectorHits = recalled.some(entry => entry.vecScore > 0);
+        const title = hasVectorHits ? '【语义与关键词召回历史细节】' : '【关键词召回历史细节】';
         blocks.push({
           priority: 65,
-          text: `【关键词召回历史细节】\n${recalled.map(item =>
-            `- [楼层 ${item.startLayer}-${item.endLayer}${item.keywords?.length ? ` · #${item.keywords.slice(0, 3).join(' #')}` : ''}] ${item.content}`
-          ).join('\n')}`
+          text: `${title}\n${recalled.map(({ item, vecScore }) => {
+            const tags = [
+              item.keywords?.length ? `#${item.keywords.slice(0, 3).join(' #')}` : '',
+              vecScore > 0 ? `语义 ${(vecScore * 100).toFixed(0)}%` : ''
+            ].filter(Boolean).join(' · ');
+            return `- [楼层 ${item.startLayer}-${item.endLayer}${tags ? ` · ${tags}` : ''}] ${item.content}`;
+          }).join('\n')}`
         });
       }
     }
@@ -2762,16 +2784,42 @@ window.MEMORY_ENGINE = (function() {
     setSummaryBackfillStatus(summaryBackfillStatus.current, summaryBackfillStatus.total, '正在停止…');
   }
 
+  function refreshVectorRecallAsync(stateOverride) {
+    try {
+      const st = settings();
+      if (st.engineEnabled === false || st.vectorEnabled !== true) return;
+      const vecApi = window.MEMORY_ENGINE_VECTOR;
+      if (!vecApi?.recallForQuery || vecApi.isRunning?.()) return;
+      const scan = chat().slice(-Math.max(1, parseInt(st.searchDepth) || 5)).map(message => clean(message?.mes)).join('\n');
+      if (!scan) return;
+      Promise.resolve(vecApi.recallForQuery(scan, { state: stateOverride })).catch(err =>
+        console.warn('[记忆引擎] 后台语义向量检索失败（已隔离）', err)
+      );
+    } catch (_) {}
+  }
+
   function onMessageReceived() {
     const key = `${currentLayer()}:${clean(chat().at(-1)?.mes).slice(-80)}`;
     if (key === lastEventKey) return;
     lastEventKey = key;
     clearTimeout(autoTimer);
     if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
-      window.STORY_ENGINE_BRIDGE.scheduleTurn?.({ scope: 'memory', layer: currentLayer(), key, run: autoExtract });
+      window.STORY_ENGINE_BRIDGE.scheduleTurn?.({ scope: 'memory', layer: currentLayer(), key, run: async () => {
+        const res = await autoExtract();
+        refreshVectorRecallAsync();
+        return res;
+      } });
       return;
     }
-    autoTimer = setTimeout(() => autoExtract().catch(error => console.error('[记忆引擎] 自动提取失败', error)), 1500);
+    autoTimer = setTimeout(async () => {
+      try {
+        await autoExtract();
+      } catch (error) {
+        console.error('[记忆引擎] 自动提取失败', error);
+      } finally {
+        refreshVectorRecallAsync();
+      }
+    }, 1500);
   }
 
   function schedulePreparation(delayMs = 50) {

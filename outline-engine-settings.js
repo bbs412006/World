@@ -1,7 +1,7 @@
 // 剧情大纲使用独立配置；复用世界 API 实现时不覆盖世界引擎的配置。
 window.OUTLINE_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'outline_engine_settings';
-  const VERSION = '2.0.0';
+  const VERSION = '2.1.0';
   const DEFAULTS = Object.freeze({
     engineEnabled: false,
     apiSource: 'world',
