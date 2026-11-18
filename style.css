@@ -3868,6 +3868,36 @@
   color: var(--we-green, #58e8b3);
   font-family: var(--we-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
 }
+.we-full-prompt-pre { max-height: 440px; }
+.we-last-prompt-viewer { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.we-last-prompt-order {
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--we-border);
+  background: var(--we-card);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--we-text2);
+}
+.we-last-prompt-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
+.we-mod-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 600;
+  border: 1px solid var(--we-border); color: var(--we-text3); background: var(--we-bg2);
+}
+.we-mod-chip.is-ok { color: #3fb950; border-color: rgba(63,185,80,0.45); background: rgba(63,185,80,0.10); }
+.we-mod-chip.is-fail { color: #f85149; border-color: rgba(248,81,73,0.50); background: rgba(248,81,73,0.10); }
+.we-hit-tag {
+  display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600;
+  border: 1px solid currentColor; flex-shrink: 0;
+}
+.we-hit-tag.is-world { color: #58a6ff; }
+.we-hit-tag.is-memory { color: #3fb950; }
+.we-hit-tag.is-outline { color: var(--we-gold, #d29922); }
+.we-prompt-inline-btn {
+  padding: 2px 7px !important; font-size: 10px !important; line-height: 1.4 !important;
+  flex-shrink: 0; margin: 0 !important;
+}
 
 /* [MAP] 引擎预设管理（调试卡内，可编辑推演 prompt 硬编码段） */
 .we-preset-section { margin-top: 14px; }

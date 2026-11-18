@@ -193,16 +193,20 @@ function runMainEntrySuite() {
   // 3. 剧情大纲瘦身首页与分页结构检查（统一视觉语言 + 职责一目了然）
   const outlineHtml = sandbox.OUTLINE_ENGINE_UI.render();
   assert.ok(outlineHtml.includes('we-outline-core-section') && outlineHtml.includes('剧情脉络'), '剧情大纲首页应包含核心环形仪表盘');
-  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"') && outlineHtml.includes('data-outline-nav="transfer"'), '剧情大纲首页应包含瘦身后的 3 条清晰纵轴导航');
-  assert.ok(!outlineHtml.includes('data-outline-nav="tracks"') && !outlineHtml.includes('data-outline-nav="recovery"'), '首页纵轴导航应已去重合并为 3 项');
+  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="tracks"') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"'), '剧情大纲首页纵轴导航应保留剧情、注入、线索 3 项高频入口');
+  assert.ok(!outlineHtml.includes('data-outline-nav="transfer"') && !outlineHtml.includes('data-outline-nav="recovery"'), '低频存档与恢复已收进设置页，不应占首页纵轴导航');
   assert.ok(outlineHtml.includes('we-outline-home-chapter') && outlineHtml.includes('剧情看板'), '剧情大纲首页应包含统一剧情看板');
-  assert.ok(outlineHtml.includes('data-outline-action="board-mode-chapter"') && outlineHtml.includes('data-outline-action="board-mode-track"'), '首页剧情看板应支持按章节/按剧情线切换');
+  assert.ok(outlineHtml.includes('data-outline-action="board-mode-chapter"') && outlineHtml.includes('data-outline-action="board-mode-track"'), '剧情看板应支持按章节/按剧情线切换');
 
   // 4. 二级分页、设置选项卡与编辑器均使用统一的 we-sub-topbar 与 we-settings-tabs-shell
   return (async () => {
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
     assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('正文注入实时预览'), '首页应支持展开注入预览看作用内容');
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
+
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-tracks');
+    const tracksHtml = sandbox.OUTLINE_ENGINE_UI.render();
+    assert.ok(tracksHtml.includes('we-outline-home-chapter') && tracksHtml.includes('we-outline-board-toolbar'), '剧情分页应复用同一套剧情看板卡片与工具栏样式');
 
     for (const view of ['tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
       await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-' + view);
@@ -214,7 +218,7 @@ function runMainEntrySuite() {
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
     const settingsHtml = sandbox.OUTLINE_ENGINE_UI.render();
     assert.ok(settingsHtml.includes('we-sub-topbar') && settingsHtml.includes('data-outline-action="close-settings"'), '设置页必须使用统一返回顶栏');
-    assert.ok(settingsHtml.includes('we-settings-tabs-shell') && settingsHtml.includes('data-tab="common"') && settingsHtml.includes('data-tab="api"'), '设置页必须使用统一选项卡结构');
+    assert.ok(settingsHtml.includes('we-settings-tabs-shell') && settingsHtml.includes('data-tab="common"') && settingsHtml.includes('data-tab="api"') && settingsHtml.includes('聊天备份保存点'), '设置->存档选项卡应直接收纳保存点、导出与历史恢复');
     assert.ok(settingsHtml.includes('we-settings-save-sticky'), '设置页底部保存栏应常驻');
     assert.ok(settingsHtml.includes('id="we-outline-fetch-models"') && settingsHtml.includes('id="we-outline-apiAutoRetries"'), '大纲独立 API 设置应支持拉取模型列表与自动重试配置');
     assert.ok(!/id="we-(?:api|model|fetch-models|save-settings)/.test(settingsHtml), '设置页不得使用世界/记忆冲突 ID');

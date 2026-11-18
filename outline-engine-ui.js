@@ -36,7 +36,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   function draftFor(id) {
     id = id || chatId();
     if (!drafts.has(id)) drafts.set(id, {
-      view: 'home', boardMode: 'chapter', selectedNavView: null, settingsOpen: false, settingsTab: 'common', settingsDraft: null,
+      view: 'home', boardMode: 'chapter', tracksBoardMode: 'track', selectedNavView: null, settingsOpen: false, settingsTab: 'common', settingsDraft: null,
       editorOpen: false, textOpen: false, injectionPreviewOpen: false,
       expandedNodes: {}, expandedEditorNodes: {}, expandedEditorAdv: {}, inlineEdit: null,
       confirmDeleteTrackId: null, confirmBatchDeleteTrackId: null,
@@ -465,9 +465,14 @@ window.OUTLINE_ENGINE_UI = (function() {
           ? `【本轮拟进入正文的公开内容】\n${publicChosen.map(n => `- ${n.trackId === 'legacy-main' ? n.title : (n.publicHint || n.title)}`).join('\n')}${clues.length ? `\n可发现线索：${clues.map(c => c.publicHint).join('；')}` : ''}`
           : '本轮暂无满足前置条件的公开节点或可发现线索需要注入正文。';
       }
+      const lastFull = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
+      const orderLine = lastFull
+        ? `上次正文三模块实际顺序：${(lastFull.order || []).map(item => item.label).join(' → ') || '均未注入'}（共 ${lastFull.promptLength || 0} 字）`
+        : '尚未捕获上次正文生成；生成一次正文后可在“查看完整提示词与调度”中核对三模块全文与顺序。';
       previewDrawer = `<div class="we-outline-inject-preview">
-        <div class="we-outline-section-head"><strong>正文注入实时预览</strong>${button('view-schedule', '查看完整调度与原文')}</div>
+        <div class="we-outline-section-head"><strong>正文注入实时预览</strong>${button('view-schedule', '查看完整提示词与调度')}</div>
         <p class="we-outline-hint">大纲以【剧情指导】柔性插入对话末端（system），只提供公开线索与方向，绝不直接剧透私密真相。</p>
+        <p class="we-outline-hint">${h(orderLine)}</p>
         <pre>${h(guidanceText)}</pre>
       </div>`;
     }
@@ -504,9 +509,9 @@ window.OUTLINE_ENGINE_UI = (function() {
 
   function renderOutlineNavList(draft) {
     const rows = [
-      { view: 'schedule', label: '注入', sub: '本轮哪些节点入选或被拦 · 正文收到的指导原文', poem: '运筹帷幄之中' },
-      { view: 'facts', label: '线索', sub: '管理私密事实 · 可发现线索 · 接触与作者标记', poem: '明察秋毫，洞若观火' },
-      { view: 'transfer', label: '存档', sub: '保存点快照 · 导入导出 · 历史恢复与诊断调试', poem: '鉴往知来，藏诸名山' }
+      { view: 'tracks', label: '剧情', sub: '主线 · 支线 · 暗线跨章看板与随手增删改', poem: '草蛇灰线，伏脉千里' },
+      { view: 'schedule', label: '注入', sub: '本轮哪些节点入选或被拦 · 上次正文完整提示词', poem: '运筹帷幄之中' },
+      { view: 'facts', label: '线索', sub: '私密事实 · 可发现线索 · 接触与作者标记', poem: '明察秋毫，洞若观火' }
     ];
     const html = rows.map((row, index) => {
       const selected = draft.selectedNavView === row.view ? ' we-nav-row--selected' : '';
@@ -614,9 +619,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       }).join('') || (addingTrack || orphanAddingNode ? '' : '<div class="we-outline-empty-box"><p class="we-outline-empty">尚未建立剧情线，可点击上方“+ 剧情线”新建，或使用“整理文本”一键生成。</p></div>')}`;
   }
 
-  function renderHome(current, draft, running, enabled) {
+  function renderStoryBoard(current, draft, schedContext, mode, sectionTitle, sectionMotto) {
     const plan = current.plan || {}, chapters = chaptersOf(plan), tracks = tracksOf(plan), allNodes = nodesOf(plan);
-    const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
     if (draft.lastCurrentChapterId !== current.currentChapterId && draft.selectedChapterId === draft.lastCurrentChapterId) draft.selectedChapterId = '';
     draft.lastCurrentChapterId = current.currentChapterId;
     const selected = chapters.find(ch => ch.id === draft.selectedChapterId) || chapters.find(ch => ch.id === current.currentChapterId) || chapters[0];
@@ -631,7 +635,6 @@ window.OUTLINE_ENGINE_UI = (function() {
     }).join('');
     const nodes = selected ? chapterNodes(plan, selected.id) : [];
     const unchaptered = allNodes.filter(node => !Array.isArray(node.chapterIds) || !node.chapterIds.length);
-    const mode = draft.boardMode === 'track' ? 'track' : 'chapter';
     const editingPlan = !draft.editorOpen && draft.inlineEdit?.kind === 'plan';
     const addingChapter = !draft.editorOpen && draft.inlineEdit?.kind === 'chapter' && draft.inlineEdit.isNew;
     const editingChapter = !draft.editorOpen && draft.inlineEdit?.kind === 'chapter' && !draft.inlineEdit.isNew && draft.inlineEdit.id === selected?.id;
@@ -670,8 +673,8 @@ window.OUTLINE_ENGINE_UI = (function() {
         ${unchaptered.length ? `<div class="we-outline-unchaptered"><div class="we-outline-section-head"><strong>跨章常驻节点（未绑定特定章节）</strong></div>${unchaptered.map((node, idx) => renderNodeCard(current, node, idx, draft, schedContext)).join('')}</div>` : ''}`;
     }
 
-    const chapterSection = `<section class="we-section we-outline-home-chapter">
-      <div class="we-section-title we-outline-sec-title">剧情看板<span class="we-section-motto">— 章回多线，随增随改</span></div>
+    return `<section class="we-section we-outline-home-chapter">
+      <div class="we-section-title we-outline-sec-title">${h(sectionTitle || '剧情看板')}<span class="we-section-motto">— ${h(sectionMotto || '章回多线，随增随改')}</span></div>
       <div class="we-outline-plan-heading">
         <div class="we-outline-section-head">
           <div class="we-outline-plan-title">${h(plan.title || '还没有剧情大纲')}</div>
@@ -698,24 +701,26 @@ window.OUTLINE_ENGINE_UI = (function() {
       </div>
       ${boardBody}
     </section>`;
+  }
 
+  function renderHome(current, draft, running, enabled) {
+    const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
+    const mode = draft.boardMode === 'track' ? 'track' : 'chapter';
     return `<div class="we-outline-home">
       ${renderOutlineCore(current, draft, running, enabled, schedContext.narrative)}
       ${renderOutlineNavList(draft)}
-      ${chapterSection}
+      ${renderStoryBoard(current, draft, schedContext, mode, '剧情看板', '章回多线，随增随改')}
       ${renderSuggestions(current)}
     </div>`;
   }
 
   function renderTracks(current, draft) {
+    const uiDraft = draft || draftFor();
     const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
+    const mode = uiDraft.tracksBoardMode === 'chapter' ? 'chapter' : 'track';
     return `${subTopbar('跨章剧情线', VIEW_META.tracks.poem)}
-      <section class="we-outline-track-board">
-        <div class="we-outline-intro-banner">每条剧情线（主线 / 支线 / 暗线）可独立跨章并行推进、暂停、编辑和增删节点。</div>
-        <div class="we-outline-actions" style="margin-bottom:8px;">${button('quick-add-track', '+ 新增剧情线', '', 'primary')}${button('quick-add-node', '+ 新增节点')}</div>
-        ${renderTrackBoardInner(current, draft || draftFor(), schedContext)}
-        ${renderSuggestions(current)}
-      </section>`;
+      ${renderStoryBoard(current, uiDraft, schedContext, mode, '跨章剧情看板', '草蛇灰线，伏脉千里')}
+      ${renderSuggestions(current)}`;
   }
 
   function displayDiff(value) {
@@ -824,7 +829,43 @@ window.OUTLINE_ENGINE_UI = (function() {
       ${draft.preview ? `<section class="we-section we-outline-preview">${renderPlanPreview(draft.preview)}<div class="we-outline-actions">${button('adopt-preview', '确认采用整理结果', '', 'primary')}${button('edit-preview', '先进入全量编排')}${button('discard-preview', '丢弃预览', '', 'danger')}</div></section>` : ''}`;
   }
 
-  function renderSettings(draft) {
+  function renderArchiveBody(current, draft) {
+    let cc, status, snapshots = [];
+    try { cc = cache(); status = cc?.getStatus?.(); snapshots = cc?.listSnapshots?.() || []; } catch (_) {}
+    const hasPlan = Boolean(clean(current.plan?.title) || chaptersOf(current.plan).length || tracksOf(current.plan).length || nodesOf(current.plan).length);
+    return `<section class="we-section we-outline-transfer">
+        <div class="we-section-title">聊天备份保存点</div>
+        <p class="we-outline-hint">${status ? `实时同步${status.syncEnabled ? '已开启' : '已关闭'} · 本地修订 ${h(status.localRev ?? 0)} / 聊天修订 ${h(status.liveRev ?? 0)} · ${snapshots.length} 份保存点` : '当前聊天存档接口尚未就绪。'}</p>
+        <div class="we-outline-actions we-outline-snap-create"><input id="we-outline-snapshot-name" value="${h(draft.snapshotName)}" placeholder="保存点名称">${button('snapshot-create', '新建命名保存点', cc ? '' : ' disabled', 'primary')}</div>
+        <div class="we-chatcache-list">${snapshots.map(snap => `<div class="we-snapshot-row">
+          <div class="we-snapshot-main">
+            <div class="we-snapshot-name"><span class="we-snapshot-badge${snap.auto ? ' is-auto' : ''}">${snap.auto ? '自动' : '手动'}</span>${h(snap.name || '未命名保存点')}</div>
+            <div class="we-snapshot-meta">${h(snap.createdAt ? new Date(snap.createdAt).toLocaleString() : '')}</div>
+          </div>
+          <div class="we-snapshot-actions">${button('snapshot-restore', '恢复', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-rename', '重命名', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-export', '导出', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-delete', '删除', ` data-outline-snapshot="${h(snap.id)}"`, 'danger')}</div>
+        </div>`).join('') || '<div class="we-empty" style="padding:10px;">暂无剧情保存点</div>'}</div>
+        <label class="we-outline-field" style="margin-top:10px;"><span>导入聊天保存点 JSON</span><input id="we-outline-snapshot-file" type="file" accept=".json,application/json"></label>
+      </section>
+      <section class="we-section we-outline-transfer">
+        <div class="we-section-title">计划、联动数据导出与清空</div>
+        <div class="we-outline-actions">
+          ${button('export-plan', '导出作者计划 JSON')}
+          ${button('export-full', '导出完整联动 JSON')}
+          ${button('history-export', '导出联合历史')}
+          ${hasPlan ? button('clear-outline', '清空当前大纲', '', 'danger') : ''}
+        </div>
+        <label class="we-outline-field"><span>导入计划、剧情完整 JSON 或联合历史（先预览再写入）</span><input id="we-outline-json-file" type="file" accept=".json,application/json"></label>
+        <p class="we-outline-hint">清空前会自动为你保存一份聊天快照以便后悔恢复；跨聊天导入会清除旧聊天的运行游标。</p>
+      </section>
+      <section class="we-section">
+        <details class="we-outline-adv-fold">
+          <summary>联合历史恢复与审计（世界 / 记忆 / 剧情回退重建）</summary>
+          <div class="we-outline-adv-body" style="margin-top:8px;">${renderQuarantineNotice()}${renderRecoveryDetails()}</div>
+        </details>
+      </section>`;
+  }
+
+  function renderSettings(current, draft) {
     const value = draft.settingsDraft || settings();
     const activeTab = OUTLINE_SETTINGS_TABS.some(t => t.key === draft.settingsTab) ? draft.settingsTab : 'common';
     draft.settingsTab = activeTab;
@@ -877,12 +918,11 @@ window.OUTLINE_ENGINE_UI = (function() {
           </fieldset>
         </div>`,
       archive: `<div class="we-section">
-          <div class="we-section-title">当前聊天存档</div>
+          <div class="we-section-title">当前聊天同步设置</div>
           ${field('实时同步到酒馆聊天', 'syncToChat', value.syncToChat, { type: 'checkbox' })}
           ${field('自动备份', 'autoBackup', value.autoBackup, { type: 'checkbox' })}
           <p class="we-outline-hint">开启同步后，大纲计划与进度会随酒馆聊天保存；API Key 等全局设置不会写入聊天。</p>
-          <div class="we-outline-actions">${button('view-transfer', '打开存档与恢复')}${button('clear-outline', '清空当前大纲', '', 'danger')}</div>
-        </div>`,
+        </div>${renderArchiveBody(current, draft)}`,
       debug: renderDebugBody(),
       about: `<div class="we-section">
           <div class="we-changelog-top"><span class="we-changelog-cur">剧情大纲 v${h(outlineVersion)}</span></div>
@@ -922,47 +962,33 @@ window.OUTLINE_ENGINE_UI = (function() {
   }
 
   function renderTransfer(current, draft) {
-    let cc, status, snapshots = [];
-    try { cc = cache(); status = cc?.getStatus?.(); snapshots = cc?.listSnapshots?.() || []; } catch (_) {}
-    const hasPlan = Boolean(clean(current.plan?.title) || chaptersOf(current.plan).length || tracksOf(current.plan).length || nodesOf(current.plan).length);
     return `${subTopbar('存档与恢复', VIEW_META.transfer.poem)}
       <div class="we-outline-intro-banner">此处集中管理当前聊天的快照保存点、大纲文件导入导出、联合历史回退重建与 API 调试包。</div>
-      <section class="we-section we-outline-transfer">
-        <div class="we-section-title">聊天备份保存点</div>
-        <p class="we-outline-hint">${status ? `实时同步${status.syncEnabled ? '已开启' : '已关闭'} · 本地修订 ${h(status.localRev ?? 0)} / 聊天修订 ${h(status.liveRev ?? 0)} · ${snapshots.length} 份保存点` : '当前聊天存档接口尚未就绪。'}</p>
-        <div class="we-outline-actions we-outline-snap-create"><input id="we-outline-snapshot-name" value="${h(draft.snapshotName)}" placeholder="保存点名称">${button('snapshot-create', '新建命名保存点', cc ? '' : ' disabled', 'primary')}</div>
-        <div class="we-chatcache-list">${snapshots.map(snap => `<div class="we-snapshot-row">
-          <div class="we-snapshot-main">
-            <div class="we-snapshot-name"><span class="we-snapshot-badge${snap.auto ? ' is-auto' : ''}">${snap.auto ? '自动' : '手动'}</span>${h(snap.name || '未命名保存点')}</div>
-            <div class="we-snapshot-meta">${h(snap.createdAt ? new Date(snap.createdAt).toLocaleString() : '')}</div>
-          </div>
-          <div class="we-snapshot-actions">${button('snapshot-restore', '恢复', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-rename', '重命名', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-export', '导出', ` data-outline-snapshot="${h(snap.id)}"`)}${button('snapshot-delete', '删除', ` data-outline-snapshot="${h(snap.id)}"`, 'danger')}</div>
-        </div>`).join('') || '<div class="we-empty" style="padding:10px;">暂无剧情保存点</div>'}</div>
-        <label class="we-outline-field" style="margin-top:10px;"><span>导入聊天保存点 JSON</span><input id="we-outline-snapshot-file" type="file" accept=".json,application/json"></label>
-      </section>
-      <section class="we-section we-outline-transfer">
-        <div class="we-section-title">计划、联动数据导出与清空</div>
-        <div class="we-outline-actions">
-          ${button('export-plan', '导出作者计划 JSON')}
-          ${button('export-full', '导出完整联动 JSON')}
-          ${button('history-export', '导出联合历史')}
-          ${hasPlan ? button('clear-outline', '清空当前大纲', '', 'danger') : ''}
-        </div>
-        <label class="we-outline-field"><span>导入计划、剧情完整 JSON 或联合历史（先预览再写入）</span><input id="we-outline-json-file" type="file" accept=".json,application/json"></label>
-        <p class="we-outline-hint">清空前会自动为你保存一份聊天快照以便后悔恢复；跨聊天导入会清除旧聊天的运行游标。</p>
-      </section>
-      <section class="we-section">
-        <details class="we-outline-adv-fold">
-          <summary>联合历史恢复与审计（世界 / 记忆 / 剧情回退重建）</summary>
-          <div class="we-outline-adv-body" style="margin-top:8px;">${renderQuarantineNotice()}${renderRecoveryDetails()}</div>
-        </details>
-      </section>
+      ${renderArchiveBody(current, draft)}
       <section class="we-section">
         <details class="we-outline-adv-fold">
           <summary>运行与注入调试（最近请求、响应及诊断包）</summary>
           <div class="we-outline-adv-body" style="margin-top:8px;">${renderDebugBody()}</div>
         </details>
       </section>`;
+  }
+
+  function renderLastPromptSummaryCard() {
+    const sharedHtml = window.WORLD_ENGINE_UI?.renderLastPromptViewer?.({ focus: 'outline' });
+    if (sharedHtml) {
+      return `<section class="we-section we-outline-last-prompt">
+        <div class="we-section-title">上次正文生成完整提示词（含三模块顺序）</div>
+        <p class="we-outline-hint">世界、记忆、大纲三者均通过酒馆 position=1、depth=1（system）注入，按模块写入顺序排列（默认通常为 世界信息 → 记忆信息 → 剧情指导）。</p>
+        ${sharedHtml}
+      </section>`;
+    }
+    const full = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
+    if (!full) return '';
+    return `<section class="we-section we-outline-last-prompt">
+      <div class="we-section-title">上次正文生成完整提示词</div>
+      <p class="we-outline-hint">实际先后顺序：${h((full.order || []).map(item => item.label).join(' → ') || '本轮均未命中')}</p>
+      <details><summary>展开上次完整提示词（${h(String(full.promptLength || 0))} 字）</summary><pre>${h(full.fullText || '')}</pre></details>
+    </section>`;
   }
 
   function renderScheduleView(current) {
@@ -981,7 +1007,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       </section>`;
     };
     return `${subTopbar('注入与调度', VIEW_META.schedule.poem)}
-      <div class="we-outline-intro-banner">下方展示本轮每个节点为何入选或被条件拦截，以及真正注入【正文前台】和【世界后台】的原文。作者私密内容绝不会漏入正文。</div>
+      <div class="we-outline-intro-banner">下方展示本轮每个节点为何入选或被条件拦截、即将注入的原文，以及最近一次发往正文模型的完整提示词与三大模块顺序。</div>
+      ${renderLastPromptSummaryCard()}
       ${pane('narrative', '正文前台')}
       ${pane('world', '世界后台')}`;
   }
@@ -1085,15 +1112,17 @@ window.OUTLINE_ENGINE_UI = (function() {
     const debug = engine()?.getLastDebug?.() || {};
     let injection = null;
     try { injection = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastSnapshot?.('outline'); } catch (_) {}
+    const sharedViewer = window.WORLD_ENGINE_UI?.renderLastPromptViewer?.({ focus: 'outline' }) || '';
     return `<section class="we-section we-outline-debug">
       <div class="we-section-title">剧情运行与注入调试</div>
       <p>运行状态：${h(engine()?.getRunningLabel?.() || (engine()?.isRunning?.() ? '运行中' : '空闲'))}</p>
       <p>最近错误：${h(engine()?.getLastError?.() || '无')}</p>
       <p>最终提示词注入：${h(injection?.status || '尚无记录')}</p>
       <div class="we-outline-actions">${button('export-diag', '导出剧情诊断包')}</div>
-      <details><summary>最近请求</summary><pre>${h(debug.prompt || debug.requestPrompt || '暂无请求')}</pre></details>
-      <details><summary>最近响应</summary><pre>${h(debug.rawResult || debug.response || debug.apiResponse || '暂无响应')}</pre></details>
-      ${injection ? `<details><summary>最近注入检查</summary><pre>${h(JSON.stringify(injection, null, 2))}</pre></details>` : ''}
+      ${sharedViewer ? `<div style="margin-top:8px;">${sharedViewer}</div>` : ''}
+      <details><summary>最近大纲后台请求</summary><pre>${h(debug.prompt || debug.requestPrompt || '暂无请求')}</pre></details>
+      <details><summary>最近大纲后台响应</summary><pre>${h(debug.rawResult || debug.response || debug.apiResponse || '暂无响应')}</pre></details>
+      ${injection ? `<details><summary>最近注入检查原始摘要</summary><pre>${h(JSON.stringify(injection, null, 2))}</pre></details>` : ''}
     </section>`;
   }
 
@@ -1113,7 +1142,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       debug: () => renderDebug()
     };
     const body = draft.settingsOpen
-      ? renderSettings(draft)
+      ? renderSettings(current, draft)
       : draft.editorOpen
         ? renderEditor(draft)
         : draft.textOpen
@@ -1260,7 +1289,9 @@ window.OUTLINE_ENGINE_UI = (function() {
     const draft = draftFor(), ds = element?.dataset || {}, current = state();
     const ci = Number(ds.outlineCi);
     if (['home', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug'].some(view => action === 'view-' + view)) {
-      draft.view = action.slice(5);
+      const nextView = action.slice(5);
+      draft.view = nextView;
+      if (nextView === 'tracks') draft.tracksBoardMode = 'track';
       draft.selectedNavView = null;
       draft.settingsOpen = false;
       draft.editorOpen = false;
@@ -1271,8 +1302,8 @@ window.OUTLINE_ENGINE_UI = (function() {
     else if (action === 'toggle-settings') { draft.settingsOpen = !draft.settingsOpen; if (draft.settingsOpen) { draft.editorOpen = false; draft.textOpen = false; draft.inlineEdit = null; } if (!draft.settingsDraft) draft.settingsDraft = clone(settings()); }
     else if (action === 'close-settings') draft.settingsOpen = false;
     else if (action === 'toggle-injection-preview') draft.injectionPreviewOpen = !draft.injectionPreviewOpen;
-    else if (action === 'board-mode-chapter') { draft.boardMode = 'chapter'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
-    else if (action === 'board-mode-track') { draft.boardMode = 'track'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
+    else if (action === 'board-mode-chapter') { if (draft.view === 'tracks') draft.tracksBoardMode = 'chapter'; else draft.boardMode = 'chapter'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
+    else if (action === 'board-mode-track') { if (draft.view === 'tracks') draft.tracksBoardMode = 'track'; else draft.boardMode = 'track'; draft.inlineEdit = null; draft.confirmDeleteTrackId = null; }
     else if (action === 'toggle-node') { draft.expandedNodes[ds.outlineNid] = !draft.expandedNodes[ds.outlineNid]; }
     else if (action === 'toggle-adv-fold') {
       if (draft.inlineEdit?.kind === 'node' && draft.inlineEdit.data?.id === ds.outlineNid) draft.inlineEdit.showAdvanced = !draft.inlineEdit.showAdvanced;
@@ -1298,7 +1329,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'quick-add-chapter') {
       if (!canCommitSavedPlan(draft)) return;
-      draft.boardMode = 'chapter';
+      if (draft.view === 'tracks') draft.tracksBoardMode = 'chapter'; else draft.boardMode = 'chapter';
       const cid = uid('chapter');
       draft.inlineEdit = { kind: 'chapter', id: cid, isNew: true, data: { id: cid, title: `第 ${chaptersOf(current.plan).length + 1} 章`, goal: '', exitNodeIds: [] } };
     }
@@ -1341,7 +1372,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'quick-add-track') {
       if (!canCommitSavedPlan(draft)) return;
-      draft.boardMode = 'track';
+      if (draft.view === 'tracks') draft.tracksBoardMode = 'track'; else draft.boardMode = 'track';
       const tid = uid('track');
       draft.inlineEdit = { kind: 'track', id: tid, isNew: true, data: { id: tid, kind: tracksOf(current.plan).length ? 'side' : 'main', title: '', goal: '', priority: 0, paused: false } };
     }
@@ -1397,7 +1428,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       const track = tracksOf(plan).find(t => t.id === ds.outlineTrack) || tracksOf(plan)[0] || { id: 'main', kind: 'main' };
       const resolvedChapterId = chs.find(c => c.id === draft.selectedChapterId)?.id || chs.find(c => c.id === current.currentChapterId)?.id || chs[0]?.id || '';
       const chId = ds.outlineChapter || resolvedChapterId;
-      const node = blankNodeFor(track, (draft.boardMode === 'track' || draft.view === 'tracks') ? '' : chId);
+      const activeMode = draft.view === 'tracks' ? (draft.tracksBoardMode || 'track') : (draft.boardMode || 'chapter');
+      const node = blankNodeFor(track, activeMode === 'track' ? '' : chId);
       draft.confirmDeleteTrackId = null;
       draft.inlineEdit = { kind: 'node', id: node.id, isNew: true, showAdvanced: false, data: node, entityPicks: {} };
     }
@@ -1840,6 +1872,7 @@ window.OUTLINE_ENGINE_UI = (function() {
         }
       });
     }
+    window.WORLD_ENGINE_UI?.bindPromptSegToggle?.(root);
   }
 
   function init() {

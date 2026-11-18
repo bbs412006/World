@@ -28,6 +28,11 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   const MEMORY_SENTINEL = '【记忆信息】';
   const OUTLINE_SENTINEL = '【剧情指导】';
   const sentinelOf = scope => scope === 'outline' ? OUTLINE_SENTINEL : scope === 'memory' ? MEMORY_SENTINEL : SENTINEL;
+  const MODULE_DEFS = [
+    { scope: 'world',   label: '世界信息', short: '世界', sentinel: SENTINEL,         injName: INJECTION_NAME },
+    { scope: 'memory',  label: '记忆信息', short: '记忆', sentinel: MEMORY_SENTINEL,  injName: MEMORY_INJECTION_NAME },
+    { scope: 'outline', label: '剧情指导', short: '大纲', sentinel: OUTLINE_SENTINEL, injName: OUTLINE_INJECTION_NAME }
+  ];
 
   // 事件名（字面量；运行时优先用 ctx.event_types 的常量，取不到再回退字面量）。
   const EV_TEXT = 'generate_after_combine_prompts';   // 文本补全/经典 API：eventData={prompt,dryRun}
@@ -37,6 +42,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   let _last = null;  // 只留最后一份快照
   let _lastMemory = null;
   let _lastOutline = null;
+  let _lastFull = null;
 
   function getCtx() {
     try { return (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null; }
@@ -54,7 +60,9 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
     try {
       const settings = outlineScope ? window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true)
         : memoryScope ? window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) : (api && api.getSettings ? api.getSettings(true) : {});
-      injectEnabled = settings?.injectIntoPrompt !== false && (!outlineScope || settings?.engineEnabled === true);
+      injectEnabled = settings?.injectIntoPrompt !== false
+        && (!outlineScope || settings?.engineEnabled === true)
+        && (!memoryScope || settings?.engineEnabled !== false);
     } catch (e) {}
 
     // 独立确认「我们这轮到底注册没注册」——区分「注册了没着陆=真bug」与「我们自己没注册=按设计跳过」。
@@ -146,15 +154,74 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
 
   function nowTs() { try { return Date.now(); } catch (e) { return 0; } }
 
+  // —— 全文汇总与三模块实际顺序列举（供查看上次完整正文提示词） ——
+  function findModuleHitsInText(text) {
+    return MODULE_DEFS
+      .map(def => ({ scope: def.scope, label: def.label, short: def.short, offset: text.indexOf(def.sentinel) }))
+      .filter(item => item.offset >= 0)
+      .sort((a, b) => a.offset - b.offset);
+  }
+  function buildModuleInfo(def, env, landed, messageIndex, role, offset) {
+    const status = deriveStatus(env, landed);
+    return {
+      scope: def.scope, label: def.label, short: def.short, sentinel: def.sentinel,
+      injectEnabled: env.injectEnabled, registeredAtSend: env.registeredAtSend, sameLayerReroll: env.sameLayerReroll,
+      landed, status, statusText: statusText(status, def.scope),
+      messageIndex, role, offset
+    };
+  }
+  function captureFullChat(chat, envs) {
+    const richMessages = chat.map((m, index) => {
+      const content = (m && m.content != null) ? String(m.content) : '';
+      return { index, role: (m && m.role) || '?', length: content.length, hits: findModuleHitsInText(content), content };
+    });
+    const modules = {}, order = [];
+    for (const def of MODULE_DEFS) {
+      const sysHit = richMessages.find(m => m.role === 'system' && m.hits.some(item => item.scope === def.scope));
+      const hitMsg = sysHit || richMessages.find(m => m.hits.some(item => item.scope === def.scope));
+      const hitItem = hitMsg ? hitMsg.hits.find(item => item.scope === def.scope) : null;
+      const info = buildModuleInfo(def, envs[def.scope], Boolean(hitMsg), hitMsg ? hitMsg.index : -1, hitMsg ? hitMsg.role : '', hitItem ? hitItem.offset : -1);
+      modules[def.scope] = info;
+      if (info.landed) order.push(info);
+    }
+    order.sort((a, b) => (a.messageIndex - b.messageIndex) || (a.offset - b.offset));
+    const fullText = richMessages.map(m => {
+      const tags = m.hits.length ? ` · 命中：${m.hits.map(item => item.label).join(' → ')}` : '';
+      return `===== [第 ${m.index + 1}/${richMessages.length} 条 · ${m.role} · ${m.length} 字${tags}] =====\n${m.content}`;
+    }).join('\n\n');
+    return {
+      apiType: 'chat', ts: nowTs(), messageCount: richMessages.length,
+      promptLength: richMessages.reduce((sum, m) => sum + m.length, 0),
+      modules, order, messages: richMessages, fullText
+    };
+  }
+  function captureFullText(prompt, envs) {
+    const text = String(prompt || '');
+    const modules = {}, order = [];
+    for (const def of MODULE_DEFS) {
+      const pos = text.indexOf(def.sentinel);
+      const info = buildModuleInfo(def, envs[def.scope], pos >= 0, pos >= 0 ? 0 : -1, 'text', pos);
+      modules[def.scope] = info;
+      if (info.landed) order.push(info);
+    }
+    order.sort((a, b) => a.offset - b.offset);
+    return {
+      apiType: 'text', ts: nowTs(), messageCount: 1, promptLength: text.length,
+      modules, order, messages: null, fullText: text
+    };
+  }
+
   // —— 事件处理：共用骨架，全程 try/catch，dryRun 一律忽略，绝不改 eventData ——
   function onChatPromptReady(eventData) {
     try {
       if (!eventData || eventData.dryRun) return;            // 忽略算 token 的预热轮
       if (!Array.isArray(eventData.chat)) return;            // 形状防御
       const ctx = getCtx();
-      _last = snapChat(eventData.chat, snapEnv(ctx, 'world'), 'world');
-      _lastMemory = snapChat(eventData.chat, snapEnv(ctx, 'memory'), 'memory');
-      _lastOutline = snapChat(eventData.chat, snapEnv(ctx, 'outline'), 'outline');
+      const envs = { world: snapEnv(ctx, 'world'), memory: snapEnv(ctx, 'memory'), outline: snapEnv(ctx, 'outline') };
+      _last = snapChat(eventData.chat, envs.world, 'world');
+      _lastMemory = snapChat(eventData.chat, envs.memory, 'memory');
+      _lastOutline = snapChat(eventData.chat, envs.outline, 'outline');
+      _lastFull = captureFullChat(eventData.chat, envs);
     } catch (e) { /* 只读自检绝不影响生成 */ }
   }
 
@@ -163,9 +230,11 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       if (!eventData || eventData.dryRun) return;
       if (typeof eventData.prompt !== 'string') return;
       const ctx = getCtx();
-      _last = snapText(eventData.prompt, snapEnv(ctx, 'world'), 'world');
-      _lastMemory = snapText(eventData.prompt, snapEnv(ctx, 'memory'), 'memory');
-      _lastOutline = snapText(eventData.prompt, snapEnv(ctx, 'outline'), 'outline');
+      const envs = { world: snapEnv(ctx, 'world'), memory: snapEnv(ctx, 'memory'), outline: snapEnv(ctx, 'outline') };
+      _last = snapText(eventData.prompt, envs.world, 'world');
+      _lastMemory = snapText(eventData.prompt, envs.memory, 'memory');
+      _lastOutline = snapText(eventData.prompt, envs.outline, 'outline');
+      _lastFull = captureFullText(eventData.prompt, envs);
     } catch (e) {}
   }
 
@@ -181,7 +250,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
       const et = ctx.event_types || {};
       ctx.eventSource.on(et.CHAT_COMPLETION_PROMPT_READY || EV_CHAT, onChatPromptReady);
       ctx.eventSource.on(et.GENERATE_AFTER_COMBINE_PROMPTS || EV_TEXT, onTextPromptReady);
-      ctx.eventSource.on(et.CHAT_LOADED || 'chat_loaded', () => { _last = null; _lastMemory = null; _lastOutline = null; });
+      ctx.eventSource.on(et.CHAT_LOADED || 'chat_loaded', () => { _last = null; _lastMemory = null; _lastOutline = null; _lastFull = null; });
       _subscribed = true;
       console.log('[世界引擎] 注入自检查看器就绪（只读订阅 prompt-ready 事件）');
     } catch (e) {
@@ -195,6 +264,9 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
     if (scope === 'memory') return _lastMemory;
     if (scope == null || scope === '' || scope === 'world') return _last;
     throw new Error(`未知注入检查 scope: ${scope}`);
+  }
+  function getLastFullPrompt() {
+    return _lastFull ? { ..._lastFull, order: [..._lastFull.order], modules: { ..._lastFull.modules }, messages: _lastFull.messages ? [..._lastFull.messages] : null } : null;
   }
 
   // 状态码 → 大白话（UI 与 diag 共用，单一真相源）。
@@ -212,5 +284,5 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
     return scope === 'memory' ? text.replace(/世界状态/g, '记忆信息').replace(/无世界状态/g, '无记忆信息') : text;
   }
 
-  return { init, getLastSnapshot, statusText, SENTINEL, MEMORY_SENTINEL, OUTLINE_SENTINEL };
+  return { init, getLastSnapshot, getLastFullPrompt, statusText, SENTINEL, MEMORY_SENTINEL, OUTLINE_SENTINEL };
 })();

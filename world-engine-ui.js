@@ -3025,10 +3025,53 @@ window.WORLD_ENGINE_UI = (function() {
     });
   }
 
-  // [FIX] 推演 prompt 分段卡片折叠绑定（模块级，供装配 + 局部刷新复用）。事件委托。
+  // [FIX] 推演 prompt 分段卡片折叠 + 上次完整正文提示词复制/导出（事件委托，带防重绑守卫）。
+  function copyTextToClipboard(text) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(text).catch(() => copyTextFallback(text));
+    }
+    return copyTextFallback(text);
+  }
+  function copyTextFallback(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    } catch (_) {}
+    return Promise.resolve();
+  }
   function bindPromptSegToggle(root) {
-    if (!root) return;
+    if (!root || root.__wePromptSegBound || typeof root.addEventListener !== 'function') return;
+    root.__wePromptSegBound = true;
     root.addEventListener('click', function(e) {
+      const copyBtn = e.target.closest('[data-we-prompt-copy]');
+      if (copyBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.()?.fullText || '';
+        if (!text) { showToast('暂无可复制的完整提示词', true); return; }
+        copyTextToClipboard(text);
+        showToast('已复制上次完整正文提示词');
+        return;
+      }
+      const exportBtn = e.target.closest('[data-we-prompt-export]');
+      if (exportBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.()?.fullText || '';
+        if (!text) { showToast('暂无可导出的完整提示词', true); return; }
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'last-story-prompt-' + Date.now() + '.txt'; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+        showToast('已导出上次完整正文提示词');
+        return;
+      }
       const head = e.target.closest('[data-we-seg-toggle]');
       if (!head) return;
       const card = head.parentElement;
@@ -3357,30 +3400,90 @@ window.WORLD_ENGINE_UI = (function() {
   }
 
 
-  // ── 注入自检卡（只读）：读 WORLD_ENGINE_INJECT_INSPECTOR 最后一份快照，
-  //    用大白话+role 分好的消息链回答「世界状态到底有没有真进发给大模型的 prompt」。
-  //    数据全来自 inspector 只读快照；本函数纯拼 HTML，不触发任何副作用。
-  //    返回的是 .we-prompt-debug 内部片段（折叠头复用 data-we-seg-toggle，由 bindPromptSegToggle 统一接管）。
-  function renderInjectInspector(scope) {
-    const memoryScope = scope === 'memory';
-    const engine = window.MEMORY_ENGINE;
+  // ── 完整正文提示词 & 三模块顺序查看器（纯只读，供世界/记忆/大纲共用） ──
+  function renderLastPromptViewer(options) {
+    const opts = options || {};
     const insp = window.WORLD_ENGINE_INJECT_INSPECTOR;
-    const snap = insp?.getLastSnapshot?.(memoryScope ? 'memory' : 'world')
-      || (memoryScope ? engine?.getLastInjectionDebug?.() : null)
-      || (memoryScope ? engine?.getLastDebug?.()?.injection : null)
+    const full = insp?.getLastFullPrompt?.() || null;
+    if (!full) {
+      return '<div class="we-last-prompt-viewer"><div style="font-size:11px;color:var(--we-text3);">发一条消息生成一次正文后，这里会捕获真实发给模型的完整提示词，并标明「世界 / 记忆 / 大纲」实际注入顺序。</div></div>';
+    }
+    const defs = ['world', 'memory', 'outline'].map(key => full.modules?.[key]).filter(Boolean);
+    const chips = defs.map(mod => {
+      const cls = mod.landed ? 'is-ok' : (mod.status === 'MISSING' ? 'is-fail' : '');
+      const icon = mod.landed ? '✅' : (mod.status === 'MISSING' ? '❌' : '⏸');
+      const pos = mod.landed
+        ? (full.apiType === 'chat' ? `第${mod.messageIndex + 1}条 ${mod.role}` : `${mod.offset}字处`)
+        : (mod.status === 'SKIPPED_REROLL' ? '重roll跳过' : mod.status === 'SKIPPED_DISABLED' ? '未启用' : mod.status === 'MISSING' ? '未进正文' : '无内容');
+      return `<span class="we-mod-chip ${cls}">${icon} ${h(mod.label)}（${h(pos)}）</span>`;
+    }).join('');
+    const orderText = full.order?.length
+      ? full.order.map(item => `${h(item.label)}${full.apiType === 'chat' ? `(第${item.messageIndex + 1}条)` : ''}`).join(' → ')
+      : '本轮三大模块均未注入正文';
+    const apiLabel = full.apiType === 'chat' ? '对话补全' : '文本补全';
+    let when = '';
+    try { when = full.ts ? new Date(full.ts).toLocaleTimeString() : ''; } catch (_) {}
+    const roleColor = { system: '#a371f7', user: '#58a6ff', assistant: '#3fb950', tool: '#d29922' };
+    const roleBadge = role => {
+      const c = roleColor[role] || 'var(--we-text3)';
+      return '<span style="display:inline-block;min-width:58px;text-align:center;font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid ' + c + ';color:' + c + ';flex-shrink:0;">' + h(role || '?') + '</span>';
+    };
+
+    let html = '<div class="we-last-prompt-viewer">';
+    html += '<div class="we-last-prompt-order">';
+    html += '<div class="we-last-prompt-chips">' + chips + '</div>';
+    html += '<div><strong>实际先后顺序：</strong>' + orderText + '</div>';
+    html += '<div style="font-size:10px;color:var(--we-text3);margin-top:2px;">API：' + apiLabel + ' · 总长：' + h(String(full.promptLength || 0)) + ' 字' + (full.apiType === 'chat' ? ' · 共 ' + h(String(full.messageCount || 0)) + ' 条消息' : '') + (when ? ' · ' + h(when) : '') + '</div>';
+    html += '</div>';
+
+    // 上次完整提示词全文折叠卡（支持一键复制 & 导出）
+    html += '<div class="we-prompt-seg-card we-prompt-seg-card-raw">'
+      + '<div class="we-prompt-seg-head" data-we-seg-toggle style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">'
+      + '<span class="we-prompt-seg-arrow">▶</span>'
+      + '<span class="we-prompt-seg-label">📄 上次正文生成完整提示词全文</span>'
+      + '<span class="we-prompt-seg-meta">' + h(String(full.promptLength || 0)) + ' 字</span>'
+      + '<button type="button" class="we-btn we-prompt-inline-btn" data-we-prompt-copy>复制全文</button>'
+      + '<button type="button" class="we-btn we-prompt-inline-btn" data-we-prompt-export>导出 TXT</button>'
+      + '</div>'
+      + '<div class="we-prompt-seg-body" style="display:none;"><pre class="we-prompt-seg-pre we-full-prompt-pre">' + h(full.fullText || '') + '</pre></div>'
+      + '</div>';
+
+    if (full.apiType === 'chat' && Array.isArray(full.messages)) {
+      html += '<div style="font-size:11px;color:var(--we-text2);margin-top:2px;">按消息逐条展开（已标出每条命中的扩展模块）：</div>';
+      html += full.messages.map((m, idx) => {
+        const hitsHtml = (m.hits || []).map(item => `<span class="we-hit-tag is-${h(item.scope)}">${h(item.short)}</span>`).join('');
+        const meta = (m.length != null ? m.length + ' 字' : '');
+        const hasBody = (m.content != null && m.content.length > 0);
+        if (!hasBody) {
+          return '<div style="display:flex;align-items:center;gap:6px;padding:2px 4px;font-size:11px;color:var(--we-text3);">'
+            + '<span style="font-size:10px;">#' + (idx + 1) + '</span>' + roleBadge(m.role) + hitsHtml + '<span>' + meta + '</span></div>';
+        }
+        return '<div class="we-prompt-seg-card" style="margin:2px 0;">'
+          + '<div class="we-prompt-seg-head" data-we-seg-toggle style="display:flex;align-items:center;gap:6px;">'
+          + '<span class="we-prompt-seg-arrow">▶</span>'
+          + '<span style="font-size:10px;color:var(--we-text3);flex-shrink:0;">#' + (idx + 1) + '</span>'
+          + roleBadge(m.role) + hitsHtml
+          + '<span class="we-prompt-seg-label" style="font-size:11px;color:var(--we-text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + h((m.content || '').slice(0, 60).replace(/\s+/g, ' ')) + '</span>'
+          + '<span class="we-prompt-seg-meta">' + meta + '</span>'
+          + '</div>'
+          + '<div class="we-prompt-seg-body" style="display:none;"><pre class="we-prompt-seg-pre">' + h(m.content) + '</pre></div>'
+          + '</div>';
+      }).join('');
+    } else if (opts.focus === 'standalone') {
+      html += '<div style="font-size:11px;color:var(--we-text3);">当前使用文本补全 API，所有模块均拼接在上方完整文本中。</div>';
+    }
+    return html + '</div>';
+  }
+
+  // ── 注入自检卡（只读）：读 WORLD_ENGINE_INJECT_INSPECTOR 最后一份快照 ──
+  function renderInjectInspector(scope) {
+    const targetScope = scope === 'memory' ? 'memory' : scope === 'outline' ? 'outline' : 'world';
+    const insp = window.WORLD_ENGINE_INJECT_INSPECTOR;
+    const snap = insp?.getLastSnapshot?.(targetScope)
+      || (targetScope === 'memory' ? (window.MEMORY_ENGINE?.getLastInjectionDebug?.() || window.MEMORY_ENGINE?.getLastDebug?.()?.injection) : null)
       || null;
     const status = snap ? snap.status : 'NOT_YET';
-    const fallbackText = memoryScope ? {
-      NOT_YET: '尚未生成，暂无记忆注入记录',
-      SKIPPED_DISABLED: '本轮未注入：记忆注入已关闭',
-      SKIPPED_REROLL: '本轮按设计未注入：同层重 roll',
-      SKIPPED_OTHER: '本轮未注入：没有匹配到相关记忆',
-      SUCCESS: '✅ 本轮记忆信息已进入正文',
-      MISSING: '❌ 已注册却没进最终 prompt'
-    } : {};
-    const text = insp?.statusText ? insp.statusText(status, memoryScope ? 'memory' : 'world') : (fallbackText[status] || fallbackText.NOT_YET || '');
-    const subject = memoryScope ? '人物记忆' : '世界状态';
-
+    const text = insp?.statusText ? insp.statusText(status, targetScope) : '尚未生成，暂无注入记录';
     const palette = {
       SUCCESS:          { icon: '✅', color: '#3fb950', bg: 'rgba(63,185,80,0.10)' },
       MISSING:          { icon: '❌', color: '#f85149', bg: 'rgba(248,81,73,0.10)' },
@@ -3393,80 +3496,13 @@ window.WORLD_ENGINE_UI = (function() {
 
     let html = '<div class="we-inject-inspector" style="border:1px solid var(--we-border);border-radius:8px;padding:10px;margin-bottom:12px;background:' + p.bg + ';">';
     html += '<div style="font-weight:600;color:' + p.color + ';margin-bottom:4px;">' + p.icon + ' 注入自检 · ' + h(text) + '</div>';
-
-    if (!snap) {
-      html += '<div style="font-size:11px;color:var(--we-text3);">发一条消息触发生成后，这里会显示「' + subject + '」有没有真正进入发给大模型的正文 prompt。</div>';
-      return html + '</div>';
+    if (insp?.getLastFullPrompt?.()) {
+      html += renderLastPromptViewer({ focus: targetScope, embedded: true });
+    } else if (!snap) {
+      html += '<div style="font-size:11px;color:var(--we-text3);">发一条消息触发生成后，这里会显示完整提示词以及世界 / 记忆 / 大纲三个模块的实际注入情况。</div>';
+    } else {
+      html += '<div style="font-size:11px;color:var(--we-text3);">已注册：' + (snap.registeredAtSend ? '是' : '否') + ' · 进正文：' + (snap.landed ? '是' : '否') + '</div>';
     }
-
-    // 元信息行
-    const apiLabel = snap.apiType === 'chat' ? '对话补全' : '文本补全';
-    let when = '';
-    try { when = snap.ts ? new Date(snap.ts).toLocaleTimeString() : ''; } catch (e) {}
-    html += '<div style="font-size:11px;color:var(--we-text3);margin-bottom:6px;">'
-      + 'API：' + apiLabel + ' · 轮次：' + (snap.round != null ? h(String(snap.round)) : '?')
-      + ' · 已注册：' + (snap.registeredAtSend ? '是' : '否')
-      + ' · 进正文：' + (snap.landed ? '是' : '否')
-      + (when ? ' · ' + h(when) : '')
-      + '</div>';
-
-    // role 徽标
-    const roleColor = { system: '#a371f7', user: '#58a6ff', assistant: '#3fb950', tool: '#d29922' };
-    const roleBadge = (role) => {
-      const c = roleColor[role] || 'var(--we-text3)';
-      return '<span style="display:inline-block;min-width:62px;text-align:center;font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid ' + c + ';color:' + c + ';">' + h(role || '?') + '</span>';
-    };
-
-    if (snap.apiType === 'chat' && Array.isArray(snap.messages)) {
-      html += '<div style="font-size:11px;color:var(--we-text2);margin-bottom:4px;">实际发出的消息链（共 ' + h(String(snap.messageCount)) + ' 条，按 role 分；点击任意条展开看完整内容）：</div>';
-      html += snap.messages.map((m) => {
-        const meta = (m.length != null ? m.length + ' 字' : '');
-        const hasBody = (m.content != null && m.content.length > 0);
-        if (m.isOurs) {
-          // 本扩展注入那条：可折叠，展开看完整注入内容。
-          const body = '<pre class="we-prompt-seg-pre">' + u(m.content || snap.ourContent || '') + '</pre>';
-          return '<div class="we-prompt-seg-card" style="margin:3px 0;">'
-            + '<div class="we-prompt-seg-head" data-we-seg-toggle style="display:flex;align-items:center;gap:6px;">'
-            + '<span class="we-prompt-seg-arrow">▶</span>'
-            + roleBadge(m.role)
-            + '<span class="we-prompt-seg-label" style="color:#3fb950;">✅ 含本扩展注入</span>'
-            + '<span class="we-prompt-seg-meta">' + meta + '</span>'
-            + '</div>'
-            + '<div class="we-prompt-seg-body" style="display:none;">' + body + '</div>'
-            + '</div>';
-        }
-        // 其它消息：也可折叠展开看完整内容（只读，不写任何存储）
-        if (hasBody) {
-          const body = '<pre class="we-prompt-seg-pre">' + u(m.content) + '</pre>';
-          return '<div class="we-prompt-seg-card" style="margin:3px 0;">'
-            + '<div class="we-prompt-seg-head" data-we-seg-toggle style="display:flex;align-items:center;gap:6px;">'
-            + '<span class="we-prompt-seg-arrow">▶</span>'
-            + roleBadge(m.role)
-            + '<span class="we-prompt-seg-meta">' + meta + '</span>'
-            + '</div>'
-            + '<div class="we-prompt-seg-body" style="display:none;">' + body + '</div>'
-            + '</div>';
-        }
-        // 空内容：只读一行
-        return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:11px;color:var(--we-text3);">'
-          + roleBadge(m.role)
-          + '<span>' + meta + '</span>'
-          + '</div>';
-      }).join('');
-    } else if (snap.apiType === 'text') {
-      html += '<div style="font-size:11px;color:var(--we-text2);margin-bottom:4px;">文本补全 prompt 共 ' + h(String(snap.promptLength || 0)) + ' 字（已 flatten 成单串，无 role 之分）：</div>';
-      if (snap.landed && snap.ourExcerpt) {
-        const body = '<pre class="we-prompt-seg-pre">' + u(snap.ourExcerpt) + '</pre>';
-        html += '<div class="we-prompt-seg-card" style="margin:3px 0;">'
-          + '<div class="we-prompt-seg-head" data-we-seg-toggle style="display:flex;align-items:center;gap:6px;">'
-          + '<span class="we-prompt-seg-arrow">▶</span>'
-          + '<span class="we-prompt-seg-label" style="color:#3fb950;">✅ 哨兵命中处摘录</span>'
-          + '</div>'
-          + '<div class="we-prompt-seg-body" style="display:none;">' + body + '</div>'
-          + '</div>';
-      }
-    }
-
     return html + '</div>';
   }
 
@@ -6821,7 +6857,7 @@ window.WORLD_ENGINE_UI = (function() {
   return {
     buildPanel, buildInputButton, showPanel, hidePanel, togglePanel, refresh, setStatus,
     setEvolvingUI, setMemoryEvolvingUI, setInjectedScope, updateBallControls,
-    registerEngineFace,
+    registerEngineFace, renderLastPromptViewer, bindPromptSegToggle,
     listEngineFaces: () => { ensureBuiltinEngineFaces(); return _engineFaceOrder.map(id => ({ ...getEngineFace(id) })); },
     advanceEngineFace
   };
