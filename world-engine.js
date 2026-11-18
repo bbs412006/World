@@ -182,6 +182,11 @@
     try {
       await loadRequiredModules(baseUrl, SHARED_MODULES, '共用底座');
       validateContracts('共用底座', SHARED_CONTRACTS);
+      // 跨模块协同桥完全可选；加载失败不阻塞任何单引擎运行。
+      try {
+        await loadScript(baseUrl + '/story-engine-bridge.js');
+        if (window.STORY_ENGINE_BRIDGE) console.log('[跨模块协同桥] 已加载: story-engine-bridge.js');
+      } catch (_) {}
       // 来源工具供记忆和大纲共用；加载失败不能拖垮不依赖它的世界引擎。
       await loadEngineGroup(baseUrl, {
         label: '共享消息来源', modules: ['memory-engine-timeline.js'],
@@ -447,6 +452,16 @@
         if (!ctx || chat.length <= 2 || !lastMsg || lastMsg.is_user || !aiMsg) return;
 
         const messageKey = getMessageKey(ctx, chat, lastMsg);
+        if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
+          window.STORY_ENGINE_BRIDGE.scheduleTurn?.({
+            scope: 'world',
+            layer: core.getChatLayer(),
+            key: messageKey,
+            delayMs: AUTO_EVOLVE_DELAY,
+            run: () => runAutoEvolution(messageKey, aiMsg)
+          });
+          return;
+        }
         autoEvolveTimer = setTimeout(
           () => runAutoEvolution(messageKey, aiMsg),
           AUTO_EVOLVE_DELAY
@@ -628,6 +643,10 @@
             worldUiPhaseFinished = true;
             if (settings.memoryLinkEnabled === true) {
               try {
+                const linkMode = window.STORY_ENGINE_BRIDGE?.getWorldLinkMode?.()
+                  || window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true)?.worldLinkMode
+                  || 'lightweight';
+                const useLightweight = opts.mode !== 'redo' && linkMode !== 'llm';
                 await window.MEMORY_ENGINE?.ingestWorldEvolution?.({
                   layer: core.getChatLayer(),
                   worldRound: state.round,
@@ -635,7 +654,8 @@
                   worldUpdate: window.STORY_ENGINE_PROJECTION?.active?.()
                     ? window.STORY_ENGINE_PROJECTION.forMemory(state.lastEvolveResult || state) : state.lastEvolveResult,
                   worldCommitId: evolution.getLastWorldCommitId?.() || '',
-                  replace: !isNewRound
+                  replace: !isNewRound,
+                  ...(useLightweight ? { lightweight: true } : {})
                 });
               } catch (linkError) {
                 console.error('[世界引擎] 世界→记忆联动失败（世界推演结果已保留）', linkError);
@@ -829,6 +849,7 @@
 
       async function onChatLoaded() {
         clearAutoEvolveTimer();
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         // 切聊天时，若仍有进行中的推演/批量回填，立即中止——
         // 回填捕获的是旧聊天的对话数组引用，继续跑会把旧聊天内容写进新聊天（跨聊天污染 + 旧存档已 clearState 丢失）。
         if (evolution && evolution.isRunning && evolution.isRunning()) {
@@ -889,6 +910,7 @@
 
       function onMessageSwiped() {
         clearAutoEvolveTimer();
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         // swipe（消息下方左右箭头）：明确的重 roll，注入存档点。
         applyInjectionForCurrentRound({ isReroll: true });
       }
@@ -900,6 +922,7 @@
       //   dryRun（数据库类插件的预热/算 token 生成）→ 不动注入，避免「生成完又注入一遍」。
       function onGenerationStarted(type, _opts, dryRun) {
         if (dryRun) return; // 预热轮不重判注入
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         if (window.STORY_ENGINE_PROJECTION?.active?.()) {
           clearAutoEvolveTimer();
           evolution.abort?.();
@@ -907,6 +930,7 @@
         }
         const isReroll = (type === 'swipe' || type === 'regenerate');
         applyInjectionForCurrentRound({ isReroll });
+        setTimeout(() => window.STORY_ENGINE_BRIDGE?.ensureInjectionOrder?.(), 0);
       }
 
       // ========== 事件绑定 ==========
@@ -920,12 +944,14 @@
         ctx.eventSource.on(ctx.event_types?.GENERATION_STARTED || 'generation_started', guard('世界引擎', '生成开始', onGenerationStarted));
         for (const event of new Set([ctx.event_types?.MESSAGE_DELETED || 'message_deleted', ctx.event_types?.MESSAGE_EDITED || 'message_edited'])) {
           ctx.eventSource.on(event, guard('联合存档', '正文变化', () => {
+            window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
             if (!window.STORY_ENGINE_PROJECTION?.active?.()) return;
             clearAutoEvolveTimer(); evolution.abort?.();
             window.STORY_ENGINE_HISTORY.reconcile(); applyInjectionForCurrentRound();
           }));
         }
         ctx.eventSource.on(ctx.event_types?.GENERATION_STOPPED || 'generation_stopped', guard('联合存档', '取消生成', async () => {
+          window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
           if (!window.STORY_ENGINE_PROJECTION?.active?.()) return;
           clearAutoEvolveTimer(); evolution.abort?.();
           window.STORY_ENGINE_HISTORY.cancelGeneration?.(); applyInjectionForCurrentRound();

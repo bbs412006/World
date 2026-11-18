@@ -17,4 +17,10 @@ assert.match(ui, /we-memory-record-head" data-memory-collapse-key=/, '记忆卡�
 assert.match(ui, /默认展开最新一条/, '纪要和总述应提示默认展开最新数据');
 assert.match(css, /\.we-memory-entity-group > \.we-memory-record-body/, '实体分类需要独立布局样式');
 
+assert.ok(ui.includes('持续事实') && ui.includes('角色弧光'), '记忆界面应集成持续事实与角色弧光视图');
+assert.ok(ui.includes('we-memory-export-package') && ui.includes('we-memory-import-package'), '记忆设置应支持总结记忆包导入导出');
+assert.ok(ui.includes('we-memory-delay-floors') && ui.includes('we-memory-coordination-mode'), '记忆设置应开放延迟楼层与三模块并发调度策略');
+assert.match(css, /\.we-memory-arc-card/, 'CSS 应包含角色弧光卡片样式');
+assert.match(css, /\.we-memory-kw-tag/, 'CSS 应包含记忆关键词标签样式');
+
 console.log('memory UI layout tests passed');

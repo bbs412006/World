@@ -4161,3 +4161,100 @@
 :root[data-we-theme] #we-sec-cp-blackbox > .we-section-title .we-section-arrow { color: var(--we-section-blackbox); }
 
 
+
+/* 三模块协同提示与记忆总结增强样式 */
+.we-bridge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--we-accent);
+  background: color-mix(in srgb, var(--we-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--we-accent) 28%, transparent);
+}
+
+.we-memory-arc-card {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--we-accent) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--we-accent) 20%, transparent);
+}
+
+.we-memory-arc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.we-memory-arc-rel {
+  font-size: 11px;
+  color: var(--we-text2);
+}
+
+.we-memory-arc-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--we-text3) 20%, transparent);
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+
+.we-memory-arc-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--we-accent);
+  transition: width 0.25s ease;
+}
+
+.we-memory-arc-stance-text,
+.we-memory-arc-summary-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--we-text2);
+}
+
+.we-memory-kw-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.we-memory-kw-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--we-text2);
+  background: color-mix(in srgb, var(--we-text3) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--we-text3) 22%, transparent);
+}
+
+.we-memory-fact-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.we-memory-fact-badge.is-active {
+  color: var(--we-accent);
+  background: color-mix(in srgb, var(--we-accent) 14%, transparent);
+}
+
+.we-memory-fact-badge.is-resolved {
+  color: var(--we-text3);
+  background: color-mix(in srgb, var(--we-text3) 14%, transparent);
+}
+
+.we-memory-fact-resolved {
+  opacity: 0.72;
+}

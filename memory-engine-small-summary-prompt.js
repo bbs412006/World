@@ -13,7 +13,10 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
 使用紧凑、客观、可独立理解的中文正文，不加标题或列表。输出正文 50—200 字，汉字、数字、字母均计入字数；内容过多时先压缩措辞，再按“结果与后续影响高于过程细节”的顺序取舍，不得用残句生硬截断。
 
 【本任务输出字段】
-返回 small_summary 字符串字段。`;
+返回 small_summary 字符串字段；若联合模板同时要求 small_summary_keywords、small_summary_entities 与 small_summary_impact，请一并提取：
+- small_summary_keywords：3 至 6 个高辨识度检索关键词（核心地点、关键道具、协议/秘辛名词、核心事件词），用于在历史长文压缩后按关键词精准唤醒本段细节。
+- small_summary_entities：本段直接出场或关键提及的人物主名与重要实体名称数组。
+- small_summary_impact：若本段发生关系质变、不可逆损失、重要揭秘或重大转折填 "key"，常规推进填 "normal"。`;
 
   const clean = value => String(value == null ? '' : value).trim();
 
@@ -33,10 +36,11 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
       ).join('\n')}` : ''
     ].filter(Boolean).join('\n\n');
     const reference = referenceContext || history;
+    const outlineFocus = clean(input.outlineFocusHint);
     const conversation = input.reuseConversation === true
       ? '沿用同一请求前文人物/实体任务中的【待提取对话】；该对话即为本次总结范围，不再重复附录。'
       : (clean(input.conversation) || '（空）');
-    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}【总结范围】\n楼层 ${startLayer} 至 ${endLayer}\n\n【待总结对话】\n${conversation}`;
+    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}${outlineFocus ? `【当前公开章节与焦距提示（仅作主题对齐，未在正文中发生的内容不得写进纪要）】\n${outlineFocus}\n\n` : ''}【总结范围】\n楼层 ${startLayer} 至 ${endLayer}\n\n【待总结对话】\n${conversation}`;
   }
 
   return { SYSTEM_PROMPT, buildUserPrompt };

@@ -928,7 +928,9 @@ ${JSON.stringify(sample || [], null, 2)}
     catch (error) { console.error('[世界引擎] 大纲指导读取失败（已隔离）', error); }
     let memoryEngineSection = '';
     try {
-      memoryEngineSection = window.MEMORY_ENGINE?.buildWorldEngineContext?.(state) || '';
+      memoryEngineSection = window.STORY_ENGINE_BRIDGE?.buildWorldMemorySection?.(state)
+        || window.MEMORY_ENGINE?.buildWorldEngineContext?.(state)
+        || '';
     } catch (error) {
       // 可选跨引擎上下文必须故障隔离：记忆引擎异常不能中断世界推演。
       console.error('[世界引擎] 读取记忆引擎上下文失败（已隔离）', error);

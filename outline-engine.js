@@ -309,6 +309,10 @@ window.OUTLINE_ENGINE = (function() {
       role: ref.role, name: clean(chat()[ref.layer]?.name), content: String(chat()[ref.layer]?.mes || '') })) };
   }
   function referenceContext() {
+    try {
+      const bridged = window.STORY_ENGINE_BRIDGE?.buildOutlineReferenceContext?.(data().loadState());
+      if (bridged) return bridged;
+    } catch (_) { /* 桥接异常不阻塞独立运行。 */ }
     const parts = [];
     try {
       const world = window.WORLD_ENGINE_CORE?.loadState?.();
@@ -519,6 +523,8 @@ window.OUTLINE_ENGINE = (function() {
       state.tracking = { ...state.tracking, checkedLayer: currentLayer(), roundsSinceCheck: 0,
         lastDigest: `${state.revision}:${beforeChapterId}:${digest}`, pendingRecheck: false, recheckStartLayer: null };
       if (history()) history().recordOutlineCommit(beforeAutomatic, state, selection.refs); else data().saveState(state);
+      try { window.STORY_ENGINE_BRIDGE?.notifyOutlineCommitted?.(state, beforeAutomatic, selection); }
+      catch (bridgeErr) { console.warn('[剧情大纲] 同步已核实认知失败（已隔离）', bridgeErr); }
       await window.WORLD_ENGINE_STORE?.flush?.();
       applyInjection(); refresh();
       setExternalStatus('剧情检查完成');
@@ -609,6 +615,7 @@ window.OUTLINE_ENGINE = (function() {
     const types = ctx.event_types || {};
     ctx.eventSource.on(types.GENERATION_STARTED || 'generation_started', guard('生成开始', (type, _options, dryRun) => {
       if (dryRun) return;
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
       abort(); ensureChat(); generationType = clean(type); generationInProgress = true;
       if (settings().engineEnabled) { history()?.prepareForGeneration?.({ type }); auditHistory(); applyInjection(); }
     }));
@@ -616,20 +623,34 @@ window.OUTLINE_ENGINE = (function() {
       generationInProgress = false;
       history()?.finishGeneration?.();
       if (autoTimer) clearTimeout(autoTimer);
+      if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
+        const layer = Math.max(0, (chat().length || 1) - 1);
+        window.STORY_ENGINE_BRIDGE.scheduleTurn?.({
+          scope: 'outline',
+          layer,
+          key: `${chatId()}:${layer}`,
+          delayMs: 80,
+          run: () => afterGeneration()
+        });
+        return;
+      }
       autoTimer = setTimeout(guard('自动检查', () => { autoTimer = null; return afterGeneration(); }), 80);
     }));
     const onLoaded = guard('加载聊天', () => {
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
       abort(); currentChatId = chatId(); generationInProgress = false; generationType = ''; lastAutoAttemptKey = '';
       if (settings().engineEnabled) history()?.reconcile?.(); applyInjection(); refresh();
     });
     for (const event of new Set([types.CHAT_CHANGED || 'chat_id_changed', types.CHAT_LOADED || 'chat_loaded'])) ctx.eventSource.on(event, onLoaded);
     for (const [name, fallback] of [['MESSAGE_SWIPED', 'message_swiped'], ['MESSAGE_DELETED', 'message_deleted'], ['MESSAGE_EDITED', 'message_edited']]) {
       ctx.eventSource.on(types[name] || fallback, guard('原文变化', () => {
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         abort(); if (name === 'MESSAGE_SWIPED') generationType = 'swipe';
         if (settings().engineEnabled) { if (name !== 'MESSAGE_SWIPED' || !generationInProgress) history()?.reconcile?.(); auditHistory(); applyInjection(); }
       }));
     }
     ctx.eventSource.on(types.GENERATION_STOPPED || 'generation_stopped', guard('取消生成', () => {
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
       abort(); generationInProgress = false; generationType = ''; history()?.cancelGeneration?.(); applyInjection(); refresh();
     }));
     applyInjection();

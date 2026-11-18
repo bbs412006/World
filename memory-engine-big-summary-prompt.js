@@ -13,7 +13,7 @@ window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT = (function() {
 严格遵守用户消息给出的【本次篇幅】：正文至少 500 字，最多不超过本批全部纪要正文总字数的一半；若计算所得的一半少于 500 字，则本次上下限都按 500 字执行。汉字、数字、字母均计入字数。先组织完整内容再输出，不得靠重复、空话凑字，也不得生硬截断。
 
 【本任务输出字段】
-返回 big_summary 字符串字段。`;
+返回 big_summary 字符串字段；若联合模板同时要求 big_summary_keywords，请输出 5 至 10 个本阶段最重要的检索关键词数组。`;
 
   const clean = value => String(value == null ? '' : value).trim();
 

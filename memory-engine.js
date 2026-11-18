@@ -179,8 +179,15 @@ window.MEMORY_ENGINE = (function() {
     };
   }
 
+  function buildRequestPrompt_hints() {
+    try { return window.STORY_ENGINE_BRIDGE?.getMemoryExtractionHints?.() || {}; }
+    catch (_) { return {}; }
+  }
+
   async function buildRequestPrompt(tasks, state, st) {
     const segments = [];
+    const hints = buildRequestPrompt_hints();
+    const enableStructured = st?.enableFactAndArcExtraction !== false;
     const memoryReference = tasks.memory ? buildTaskReferenceContext(state, tasks.memory, st) : null;
     const sharesReference = Boolean(tasks.memory && tasks.small
       && Number(tasks.memory.startLayer) === Number(tasks.small.startLayer)
@@ -193,12 +200,18 @@ window.MEMORY_ENGINE = (function() {
       if (st.worldbookEnabled && window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection) {
         worldbook = await window.WORLD_ENGINE_WORLDBOOK.buildPromptSection(filtered, 'memory');
       }
+      const activeOngoingFacts = (state.ongoing_facts || []).filter(item => item?.status !== 'resolved' && item?.status !== 'superseded').slice(-20);
+      const knownCharacterArcs = Array.isArray(state.character_arcs) ? state.character_arcs.slice(0, 20) : [];
       const user = window.MEMORY_ENGINE_PROMPT.buildUserPrompt({
         currentStoryTime: extractStoryTime(filtered),
         knownPeople: (state.personal_memory || []).map(character => unique(character.names)),
         knownEntities: ENTITY_TYPES.flatMap(type => (state.entity_memory?.[type] || []).map(entity => ({
           type: ENTITY_LABELS[type], name: entity.name, aliases: unique(entity.aliases), description: entity.description
         }))),
+        activeOngoingFacts: enableStructured ? activeOngoingFacts : [],
+        knownCharacterArcs: enableStructured ? knownCharacterArcs : [],
+        outlineFocusHint: clean(hints.outlineFocusHint),
+        worldContextHint: clean(hints.worldContextHint),
         worldbook,
         referenceContext: memoryReference?.text || '',
         conversation: filtered
@@ -209,6 +222,7 @@ window.MEMORY_ENGINE = (function() {
       segments.push(`【任务说明】\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.SYSTEM_PROMPT}\n\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.buildUserPrompt({
         ...tasks.small,
         reuseConversation: sharesReference,
+        outlineFocusHint: clean(hints.outlineFocusHint),
         referenceContext: sharesReference && memoryReference?.text
           ? '沿用同一请求前文人物/实体任务中的【只读辅助参考】，不得把其中旧内容写成本段新增事件。'
           : (smallReference?.text || ''),
@@ -221,7 +235,8 @@ window.MEMORY_ENGINE = (function() {
       })}`);
     }
     const fields = [];
-    if (tasks.memory) fields.push(`"personal_memory": [
+    if (tasks.memory) {
+      fields.push(`"personal_memory": [
     {
       "name": ["人物名或别名"],
       "known_by": ["其他知情人物名"],
@@ -238,11 +253,42 @@ window.MEMORY_ENGINE = (function() {
       "time": "这条事件对应的绝对故事时间或空字符串"
     }
   ]`);
-    if (tasks.small) fields.push('"small_summary": ""');
-    if (tasks.big) fields.push('"big_summary": ""');
+      if (enableStructured) {
+        fields.push(`"ongoing_fact_updates": [
+    {
+      "action": "upsert 或 resolve",
+      "id": "修订/完结已有事实时填 fact_xxxxxx，新增填空字符串",
+      "category": "状态、契约、设定、持有、伤病、关系定性、环境 之一",
+      "subject": "事实主体（角色/物品/地点/全局）",
+      "fact": "当前生效的简明持续事实（不超过120字）",
+      "keywords": ["检索关键词"]
+    }
+  ]`, `"character_arc_updates": [
+    {
+      "name": "人物规范名称",
+      "current_stance": "当前态度/立场（不超过60字）",
+      "arc_summary": "近期心理转变与关系弧光摘要（不超过120字）",
+      "relationship": "当前关系定性标签",
+      "progress_pct": 0
+    }
+  ]`);
+      }
+    }
+    if (tasks.small) {
+      fields.push('"small_summary": ""');
+      if (enableStructured) {
+        fields.push('"small_summary_keywords": []', '"small_summary_entities": []', '"small_summary_impact": "normal"');
+      }
+    }
+    if (tasks.big) {
+      fields.push('"big_summary": ""');
+      if (enableStructured) fields.push('"big_summary_keywords": []');
+    }
     const tone = clean(st.tonePrompt);
     const emptyMemory = tasks.memory
-      ? '\n\n没有对应内容时分别使用 "personal_memory": [] 和 "entity_updates": []；不得省略字段。'
+      ? '\n\n没有对应内容时分别使用 "personal_memory": [] 和 "entity_updates": []'
+        + (enableStructured ? '、"ongoing_fact_updates": []、"character_arc_updates": []' : '')
+        + '；不得省略字段。'
       : '';
     return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
@@ -311,14 +357,70 @@ window.MEMORY_ENGINE = (function() {
       entityUpdateCount++;
     }
     let smallSummary = '';
-    if (tasks.small) {
-      smallSummary = Array.isArray(value) ? '' : clean(value?.small_summary);
+    let smallSummaryKeywords = [];
+    let smallSummaryEntities = [];
+    let smallSummaryImpact = 'normal';
+    if (tasks.small && !Array.isArray(value)) {
+      if (value?.small_summary && typeof value.small_summary === 'object') {
+        smallSummary = clean(value.small_summary.content || value.small_summary.text);
+        smallSummaryKeywords = unique(value.small_summary.keywords).slice(0, 8);
+        smallSummaryEntities = unique(value.small_summary.entity_names || value.small_summary.entityNames).slice(0, 12);
+        smallSummaryImpact = value.small_summary.impact === 'key' ? 'key' : 'normal';
+      } else {
+        smallSummary = clean(value?.small_summary);
+      }
+      if (!smallSummaryKeywords.length) smallSummaryKeywords = unique(value?.small_summary_keywords).slice(0, 8);
+      if (!smallSummaryEntities.length) smallSummaryEntities = unique(value?.small_summary_entities).slice(0, 12);
+      if (value?.small_summary_impact === 'key') smallSummaryImpact = 'key';
     }
     let bigSummary = '';
-    if (tasks.big) {
-      bigSummary = Array.isArray(value) ? '' : clean(value?.big_summary);
+    let bigSummaryKeywords = [];
+    if (tasks.big && !Array.isArray(value)) {
+      bigSummary = clean(value?.big_summary);
+      bigSummaryKeywords = unique(value?.big_summary_keywords).slice(0, 12);
     }
-    return { personal, entities, smallSummary, bigSummary };
+    const factUpdates = [];
+    const factSource = tasks.memory && !Array.isArray(value) && Array.isArray(value?.ongoing_fact_updates) ? value.ongoing_fact_updates : [];
+    for (const item of factSource) {
+      if (!item || typeof item !== 'object') continue;
+      const action = clean(item.action) === 'resolve' ? 'resolve' : 'upsert';
+      const subject = clean(item.subject) || '全局';
+      const category = clean(item.category) || '状态';
+      const fact = Array.from(clean(item.fact || item.content)).slice(0, 120).join('');
+      const id = clean(item.id);
+      if (action === 'upsert' && !fact) continue;
+      if (action === 'resolve' && !id && !fact && !subject) continue;
+      if (nameIsBlacklisted([subject], nameBlacklist)) continue;
+      factUpdates.push({
+        action,
+        id,
+        category,
+        subject,
+        fact,
+        keywords: unique(item.keywords).slice(0, 8)
+      });
+      if (factUpdates.length >= 10) break;
+    }
+    const arcUpdates = [];
+    const arcSource = tasks.memory && !Array.isArray(value) && Array.isArray(value?.character_arc_updates) ? value.character_arc_updates : [];
+    for (const item of arcSource) {
+      if (!item || typeof item !== 'object') continue;
+      const name = clean(item.name);
+      if (!name || nameIsBlacklisted([name], nameBlacklist)) continue;
+      const currentStance = Array.from(clean(item.current_stance ?? item.currentStance)).slice(0, 60).join('');
+      const arcSummary = Array.from(clean(item.arc_summary ?? item.arcSummary)).slice(0, 120).join('');
+      const relationship = Array.from(clean(item.relationship)).slice(0, 40).join('');
+      const pctNum = Number(item.progress_pct ?? item.progressPct);
+      const progressPct = Number.isFinite(pctNum) ? Math.max(0, Math.min(100, Math.round(pctNum))) : null;
+      if (!currentStance && !arcSummary && !relationship && progressPct === null) continue;
+      arcUpdates.push({ name, currentStance, arcSummary, relationship, progressPct });
+      if (arcUpdates.length >= 6) break;
+    }
+    return {
+      personal, entities, factUpdates, arcUpdates,
+      smallSummary, smallSummaryKeywords, smallSummaryEntities, smallSummaryImpact,
+      bigSummary, bigSummaryKeywords
+    };
   }
 
   function sanitizeTime(value) {
@@ -538,6 +640,153 @@ window.MEMORY_ENGINE = (function() {
     return state;
   }
 
+  function ensureStructuredMemoryState(state) {
+    if (!state || typeof state !== 'object') return state;
+    if (!Array.isArray(state.ongoing_facts)) state.ongoing_facts = [];
+    if (!Array.isArray(state.character_arcs)) state.character_arcs = [];
+    return state;
+  }
+
+  function nextOngoingFactId(state) {
+    const max = (state.ongoing_facts || []).reduce((n, item) => {
+      const match = /^fact_(\d+)$/.exec(clean(item?.id));
+      return Math.max(n, match ? Number(match[1]) : 0);
+    }, 0);
+    return `fact_${String(max + 1).padStart(6, '0')}`;
+  }
+
+  function nextCharacterArcId(state) {
+    const max = (state.character_arcs || []).reduce((n, item) => {
+      const match = /^arc_(\d+)$/.exec(clean(item?.id));
+      return Math.max(n, match ? Number(match[1]) : 0);
+    }, 0);
+    return `arc_${String(max + 1).padStart(6, '0')}`;
+  }
+
+  function clampProgressPct(value, fallback = 0) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.max(0, Math.min(100, Math.round(num)));
+  }
+
+  function mergeOngoingFacts(state, factUpdates, layer, sourceRefs, worldCommitId) {
+    ensureStructuredMemoryState(state);
+    let changed = 0;
+    const targetLayer = Number.isFinite(Number(layer)) ? Number(layer) : currentLayer();
+    const originChatId = data()?.getChatId?.() || 'default';
+    for (const item of Array.isArray(factUpdates) ? factUpdates : []) {
+      if (!item || typeof item !== 'object') continue;
+      const action = clean(item.action) === 'resolve' ? 'resolve' : 'upsert';
+      const itemId = clean(item.id);
+      const subject = clean(item.subject) || '全局';
+      const category = clean(item.category) || '状态';
+      const factText = Array.from(clean(item.fact || item.content)).slice(0, 120).join('');
+      const keywords = unique(item.keywords);
+      if (action === 'resolve') {
+        for (const existing of state.ongoing_facts) {
+          if (existing.status === 'resolved') continue;
+          const matchById = itemId && existing.id === itemId;
+          const matchByKey = !itemId
+            && normalized(existing.subject) === normalized(subject)
+            && normalized(existing.category) === normalized(category)
+            && (!factText || normalized(existing.fact) === normalized(factText) || existing.fact.includes(factText));
+          if (matchById || matchByKey) {
+            existing.status = 'resolved';
+            existing.updatedLayer = targetLayer;
+            changed++;
+          }
+        }
+        continue;
+      }
+      if (!factText) continue;
+      const byId = itemId ? state.ongoing_facts.find(entry => entry.id === itemId) : null;
+      const exactSame = state.ongoing_facts.find(entry =>
+        entry.status === 'active'
+        && normalized(entry.category) === normalized(category)
+        && normalized(entry.subject) === normalized(subject)
+        && normalized(entry.fact) === normalized(factText)
+      );
+      if (byId) {
+        byId.category = category;
+        byId.subject = subject;
+        byId.fact = factText;
+        byId.keywords = unique([...(byId.keywords || []), ...keywords]);
+        byId.status = 'active';
+        byId.updatedLayer = targetLayer;
+        changed++;
+      } else if (exactSame) {
+        exactSame.keywords = unique([...(exactSame.keywords || []), ...keywords]);
+        exactSame.updatedLayer = targetLayer;
+      } else {
+        state.ongoing_facts.push({
+          id: nextOngoingFactId(state),
+          category,
+          subject,
+          fact: factText,
+          keywords,
+          status: 'active',
+          startLayer: targetLayer,
+          updatedLayer: targetLayer,
+          ...(worldCommitId ? { worldCommitId: clean(worldCommitId), source: 'world_engine' } : {}),
+          sourceRefs: Array.isArray(sourceRefs) ? clone(sourceRefs) : [],
+          originChatId
+        });
+        changed++;
+      }
+    }
+    return changed;
+  }
+
+  function mergeCharacterArcs(state, arcUpdates, layer) {
+    ensureStructuredMemoryState(state);
+    if (!Array.isArray(state.personal_memory)) state.personal_memory = [];
+    let updated = 0;
+    const targetLayer = Number.isFinite(Number(layer)) ? Number(layer) : currentLayer();
+    const originChatId = data()?.getChatId?.() || 'default';
+    for (const item of Array.isArray(arcUpdates) ? arcUpdates : []) {
+      if (!item || typeof item !== 'object') continue;
+      const name = clean(item.name);
+      if (!name) continue;
+      let character = findCharacter(state, [name]);
+      if (!character) {
+        character = { id: nextCharacterId(state), names: [name], memory: {} };
+        state.personal_memory.push(character);
+      }
+      let arc = state.character_arcs.find(entry =>
+        (entry.characterId && entry.characterId === character.id)
+        || (entry.names || []).some(n => (character.names || []).some(cn => normalized(cn) === normalized(n)))
+      );
+      if (!arc) {
+        arc = {
+          id: nextCharacterArcId(state),
+          characterId: character.id,
+          names: unique(character.names),
+          currentStance: '',
+          arcSummary: '',
+          relationship: '',
+          progressPct: 0,
+          updatedLayer: targetLayer,
+          originChatId
+        };
+        state.character_arcs.push(arc);
+      }
+      arc.characterId = character.id;
+      arc.names = unique([...(arc.names || []), ...(character.names || []), name]);
+      const stance = clean(item.currentStance ?? item.current_stance);
+      const summary = clean(item.arcSummary ?? item.arc_summary);
+      const relation = clean(item.relationship);
+      if (stance) arc.currentStance = Array.from(stance).slice(0, 60).join('');
+      if (summary) arc.arcSummary = Array.from(summary).slice(0, 120).join('');
+      if (relation) arc.relationship = Array.from(relation).slice(0, 40).join('');
+      if (item.progressPct != null || item.progress_pct != null) {
+        arc.progressPct = clampProgressPct(item.progressPct ?? item.progress_pct, arc.progressPct);
+      }
+      arc.updatedLayer = targetLayer;
+      updated++;
+    }
+    return updated;
+  }
+
   function ensureEventState(state) {
     if (!state.event_memory || typeof state.event_memory !== 'object' || Array.isArray(state.event_memory)) state.event_memory = {};
     if (!Array.isArray(state.event_memory.small_summaries)) state.event_memory.small_summaries = [];
@@ -568,6 +817,8 @@ window.MEMORY_ENGINE = (function() {
             knowledge_index: clone(state.knowledge_index || {}),
             entity_memory: clone(state.entity_memory || {}),
             entity_index: clone(state.entity_index || {}),
+            ongoing_facts: clone(state.ongoing_facts || []),
+            character_arcs: clone(state.character_arcs || []),
             round: Math.max(0, Number(state.round) || 0),
             chatLayer: state.chatLayer ?? null
           }
@@ -634,6 +885,8 @@ window.MEMORY_ENGINE = (function() {
       sourceDigest: digest,
       personal: clone(extracted?.personal || []),
       entities: clone(extracted?.entities || {}),
+      factUpdates: clone(extracted?.factUpdates || []),
+      arcUpdates: clone(extracted?.arcUpdates || []),
       status: 'valid',
       revision: 1,
       createdAt: Date.now(),
@@ -703,6 +956,8 @@ window.MEMORY_ENGINE = (function() {
       knowledge_index: clone(root.knowledge_index || {}),
       entity_memory: clone(root.entity_memory || {}),
       entity_index: clone(root.entity_index || {}),
+      ongoing_facts: clone(root.ongoing_facts || []),
+      character_arcs: clone(root.character_arcs || []),
       round: Math.max(0, Number(root.round) || 0),
       chatLayer: root.chatLayer ?? null,
       event_memory: clone(state.event_memory || {}),
@@ -710,6 +965,7 @@ window.MEMORY_ENGINE = (function() {
       timeline: clone(timeline)
     };
     ensureEntityState(derived);
+    ensureStructuredMemoryState(derived);
     for (const node of timeline.nodes) {
       if (stopBeforeId && node.id === stopBeforeId) break;
       if (node.status !== 'valid') continue;
@@ -718,13 +974,22 @@ window.MEMORY_ENGINE = (function() {
         derived.knowledge_index = clone(node.snapshot.knowledge_index || {});
         derived.entity_memory = clone(node.snapshot.entity_memory || {});
         derived.entity_index = clone(node.snapshot.entity_index || {});
+        if (Array.isArray(node.snapshot.ongoing_facts)) derived.ongoing_facts = clone(node.snapshot.ongoing_facts);
+        if (Array.isArray(node.snapshot.character_arcs)) derived.character_arcs = clone(node.snapshot.character_arcs);
         derived.round = Math.max(derived.round, Number(node.snapshot.round) || 0);
         derived.chatLayer = node.snapshot.chatLayer ?? derived.chatLayer;
         ensureEntityState(derived);
+        ensureStructuredMemoryState(derived);
         continue;
       }
       mergeMemories(derived, clone(node.personal || []));
       mergeEntityMemories(derived, clone(node.entities || {}));
+      if (Array.isArray(node.factUpdates) && node.factUpdates.length) {
+        mergeOngoingFacts(derived, clone(node.factUpdates), node.endLayer, node.sourceRefs, node.worldCommitId);
+      }
+      if (Array.isArray(node.arcUpdates) && node.arcUpdates.length) {
+        mergeCharacterArcs(derived, clone(node.arcUpdates), node.endLayer);
+      }
       derived.round += 1;
       if (Number.isFinite(Number(node.endLayer))) derived.chatLayer = Number(node.endLayer);
     }
@@ -738,7 +1003,9 @@ window.MEMORY_ENGINE = (function() {
       personal_memory: state.personal_memory || [],
       knowledge_index: state.knowledge_index || {},
       entity_memory: state.entity_memory || {},
-      entity_index: state.entity_index || {}
+      entity_index: state.entity_index || {},
+      ongoing_facts: state.ongoing_facts || [],
+      character_arcs: state.character_arcs || []
     });
     if (memoryView(nextState) === memoryView(previousState)) return nextState;
     const timeline = ensureTimelineState(previousState), api = timelineApi();
@@ -748,6 +1015,8 @@ window.MEMORY_ENGINE = (function() {
       knowledge_index: clone(nextState.knowledge_index || {}),
       entity_memory: clone(nextState.entity_memory || {}),
       entity_index: clone(nextState.entity_index || {}),
+      ongoing_facts: clone(nextState.ongoing_facts || []),
+      character_arcs: clone(nextState.character_arcs || []),
       round: Math.max(0, Number(nextState.round) || 0),
       chatLayer: nextState.chatLayer ?? layer
     };
@@ -857,12 +1126,20 @@ window.MEMORY_ENGINE = (function() {
         node.kind === 'memory' && node.status === 'valid' && clean(node.sourceDigest) === memorySourceDigest
       );
       const applyMemory = Boolean(tasks.memory && !memoryAlreadyStored);
+      const targetLayer = Number.isFinite(Number(options?.layer)) ? Number(options.layer) : (Number(tasks.memory?.endLayer) || currentLayer());
       const addedPersonal = applyMemory ? mergeMemories(next, extracted.personal) : 0;
       const entityChanges = applyMemory
         ? mergeEntityMemories(next, extracted.entities)
         : { entities: 0, history: 0, descriptions: 0 };
+      const factChanges = applyMemory && Array.isArray(extracted.factUpdates) && extracted.factUpdates.length
+        ? mergeOngoingFacts(next, extracted.factUpdates, targetLayer, tasks.memory?.sourceRefs, tasks.memory?.worldCommitId)
+        : 0;
+      const arcChanges = applyMemory && Array.isArray(extracted.arcUpdates) && extracted.arcUpdates.length
+        ? mergeCharacterArcs(next, extracted.arcUpdates, targetLayer)
+        : 0;
       if (applyMemory) appendTimelineNode(next, extracted, tasks.memory, options);
       const eventMemory = ensureEventState(next);
+      const outlineHints = tasks.small ? buildRequestPrompt_hints() : {};
       let addedSmall = 0, updatedBig = 0;
       if (tasks.small && extracted.smallSummary) {
         const sourceRefs = clone(tasks.small.sourceRefs || timelineApi()?.captureRange?.(tasks.small.startLayer, tasks.small.endLayer) || []);
@@ -876,6 +1153,10 @@ window.MEMORY_ENGINE = (function() {
             startLayer: Number(tasks.small.startLayer) || 0,
             endLayer: Number(tasks.small.endLayer) || 0,
             content: extracted.smallSummary,
+            keywords: unique(extracted.smallSummaryKeywords),
+            entityNames: unique(extracted.smallSummaryEntities),
+            impactLevel: extracted.smallSummaryImpact === 'key' ? 'key' : 'normal',
+            ...(clean(outlineHints.outlineChapterTitle) ? { outlineChapterTitle: clean(outlineHints.outlineChapterTitle) } : {}),
             sourceRefs,
             sourceDigest,
             originChatId: data()?.getChatId?.() || 'default',
@@ -893,6 +1174,9 @@ window.MEMORY_ENGINE = (function() {
           startLayer: Number(linked.layer) || 0,
           endLayer: Number(linked.layer) || 0,
           content: Array.from(clean(linked.content)).slice(0, 200).join(''),
+          keywords: unique(linked.keywords),
+          entityNames: unique(linked.entityNames),
+          impactLevel: linked.impactLevel === 'key' ? 'key' : 'normal',
           source: 'world_engine',
           sourceKey: clean(linked.sourceKey),
           ...(linked.worldCommitId ? { worldCommitId: clean(linked.worldCommitId) } : {}),
@@ -907,6 +1191,7 @@ window.MEMORY_ENGINE = (function() {
           startLayer: Number(tasks.big.startLayer) || 0,
           endLayer: Number(tasks.big.endLayer) || 0,
           content: extracted.bigSummary,
+          keywords: unique(extracted.bigSummaryKeywords),
           childIds: clone(tasks.big.childIds || []),
           childDigest: clean(tasks.big.childDigest),
           sourceRefs: clone(tasks.big.sourceRefs || []),
@@ -920,7 +1205,7 @@ window.MEMORY_ENGINE = (function() {
         );
         updatedBig = 1;
       }
-      const added = addedPersonal + entityChanges.entities + entityChanges.history + entityChanges.descriptions;
+      const added = addedPersonal + entityChanges.entities + entityChanges.history + entityChanges.descriptions + factChanges + arcChanges;
       if (tasks.memory) {
         if (applyMemory) next.round = Math.max(0, Number(next.round) || 0) + 1;
         next.chatLayer = Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer();
@@ -935,6 +1220,8 @@ window.MEMORY_ENGINE = (function() {
         extracted: extracted.personal.length + ENTITY_TYPES.reduce((sum, type) => sum + extracted.entities[type].length, 0),
         addedPersonal,
         entityChanges,
+        factChanges,
+        arcChanges,
         addedSmall,
         updatedBig,
         state: next
@@ -961,12 +1248,24 @@ window.MEMORY_ENGINE = (function() {
     } }, options);
   }
 
-  function countAiSince(layer, st) {
+  function countAiSince(layer, st, endLayer) {
     const anchor = layer !== null && layer !== '' && Number.isFinite(Number(layer)) ? Number(layer) : -1;
     const all = chat(), skipOpening = anchor < 0 && ignoreFirstLayer(st || settings());
+    const end = endLayer !== undefined && Number.isFinite(Number(endLayer)) ? Number(endLayer) : all.length - 1;
     return all.reduce((count, message, index) => count + (
-      index > anchor && !(skipOpening && index === 0) && message && !message.is_user ? 1 : 0
+      index > anchor && index <= end && !(skipOpening && index === 0) && message && !message.is_user ? 1 : 0
     ), 0);
+  }
+
+  function stableAutoEndLayer(st) {
+    const delayFloors = Math.max(0, parseInt(st?.summaryDelayFloors) || 0);
+    if (!delayFloors) return undefined;
+    const all = chat(), skipOpening = ignoreFirstLayer(st);
+    const aiLayers = all.map((message, index) => (
+      !(skipOpening && index === 0) && message && !message.is_user ? index : -1
+    )).filter(index => index >= 0);
+    if (aiLayers.length <= delayFloors) return -1;
+    return aiLayers[aiLayers.length - 1 - delayFloors];
   }
 
   function getAiBatchAfter(layer, maxAi, endLayer, settingsOverride) {
@@ -1046,14 +1345,17 @@ window.MEMORY_ENGINE = (function() {
     const state = data().loadState();
     const anchor = state.chatLayer !== null && state.chatLayer !== '' && Number.isFinite(Number(state.chatLayer))
       ? Number(state.chatLayer) : -1;
+    const stableEnd = stableAutoEndLayer(st);
     const tasks = {};
-    if (countAiSince(anchor) >= Math.max(1, parseInt(st.evolveEveryX) || 1)) {
-      tasks.memory = recentConversationBatch(st.evolveReadRounds);
+    if (stableEnd !== -1 && countAiSince(anchor, st, stableEnd) >= Math.max(1, parseInt(st.evolveEveryX) || 1)) {
+      tasks.memory = stableEnd === undefined
+        ? recentConversationBatch(st.evolveReadRounds)
+        : getAiBatchAfter(anchor, st.evolveReadRounds, stableEnd, st);
     }
     const eventMemory = ensureEventState(state);
-    const smallEvery = Math.max(1, parseInt(st.smallSummaryEveryX) || 5);
-    const smallBatch = countAiSince(eventMemory.small_summary_layer) >= smallEvery
-      ? getAiBatchAfter(eventMemory.small_summary_layer, smallEvery) : null;
+    const smallEvery = Math.max(1, parseInt(st.smallSummaryEveryX) || 1);
+    const smallBatch = stableEnd !== -1 && countAiSince(eventMemory.small_summary_layer, st, stableEnd) >= smallEvery
+      ? getAiBatchAfter(eventMemory.small_summary_layer, smallEvery, stableEnd, st) : null;
     if (smallBatch) tasks.small = smallBatch;
     const bigTask = buildBigTask(state, false);
     if (!tasks.memory && !tasks.small) {
@@ -1065,9 +1367,12 @@ window.MEMORY_ENGINE = (function() {
       }
       return result;
     }
-    const result = await runTasksThenDueBig(tasks, { layer: currentLayer(), baseState: state });
+    const targetLayer = stableEnd !== undefined ? stableEnd : currentLayer();
+    const result = await runTasksThenDueBig(tasks, { layer: targetLayer, baseState: state });
     const after = data().loadState(), afterEvent = ensureEventState(after);
-    if (countAiSince(afterEvent.small_summary_layer) >= smallEvery || buildBigTask(after, false)) {
+    const nextStableEnd = stableAutoEndLayer(st);
+    if ((nextStableEnd !== -1 && countAiSince(afterEvent.small_summary_layer, st, nextStableEnd) >= smallEvery)
+        || buildBigTask(after, false)) {
       clearTimeout(autoTimer);
       autoTimer = setTimeout(() => autoExtract().catch(error => console.error('[记忆引擎] 自动纪要补进度失败', error)), 0);
     }
@@ -1659,6 +1964,82 @@ window.MEMORY_ENGINE = (function() {
     return hiddenSyncPromise;
   }
 
+  function collectCharacterCandidates(state, character, globalSeen) {
+    const records = [];
+    for (const name of character?.names || []) records.push(...(state.knowledge_index?.[normalized(name)] || []));
+    return records.filter(record => {
+      const key = `${record.ownerId}\u0000${record.time}\u0000${record.memory}`;
+      return !globalSeen.has(key);
+    }).filter((record, index, list) => list.findIndex(other =>
+      other.ownerId === record.ownerId && other.time === record.time && other.memory === record.memory
+    ) === index);
+  }
+
+  function tokenizeSearchText(text) {
+    const raw = clean(text).toLocaleLowerCase();
+    const tokens = new Set();
+    if (!raw) return tokens;
+    for (const word of raw.match(/[a-z0-9_]{2,}/g) || []) tokens.add(word);
+    for (const seg of raw.match(/[\u4e00-\u9fff]+/g) || []) {
+      if (seg.length === 1) { tokens.add(seg); continue; }
+      for (let i = 0; i < seg.length - 1; i++) tokens.add(seg.slice(i, i + 2));
+    }
+    return tokens;
+  }
+
+  function scoreArchivedSmallSummary(item, queryTokens, scanLower, index, total) {
+    if (!item || item.status === 'stale' || item.status === 'failed' || !clean(item.content)) return 0;
+    let score = 0;
+    for (const kw of Array.isArray(item.keywords) ? item.keywords : []) {
+      const low = clean(kw).toLocaleLowerCase();
+      if (!low) continue;
+      if (scanLower.includes(low)) score += 12;
+      else {
+        for (const t of tokenizeSearchText(low)) if (queryTokens.has(t)) score += 4;
+      }
+    }
+    for (const ent of Array.isArray(item.entityNames) ? item.entityNames : []) {
+      const low = clean(ent).toLocaleLowerCase();
+      if (low && scanLower.includes(low)) score += 8;
+    }
+    const contentTokens = tokenizeSearchText(item.content);
+    let overlap = 0;
+    for (const token of contentTokens) if (queryTokens.has(token)) overlap++;
+    if (contentTokens.size > 0 && overlap > 0) {
+      score += Math.min(8, overlap * 1.5);
+    }
+    if (score <= 0) return 0;
+    if (item.impactLevel === 'key') score += 2;
+    score += total > 1 ? (index / total) * 2 : 0;
+    return score;
+  }
+
+  function buildBudgetedSections(blocks, maxChars) {
+    const budget = Math.max(500, parseInt(maxChars) || 3500);
+    const active = blocks.filter(block => block && clean(block.text)).map(block => ({ ...block }));
+    const join = list => list.map(item => item.text).filter(Boolean).join('\n\n');
+    if (join(active).length <= budget) return join(active);
+    // 预算超出时优先逐行裁剪低优先级区块（碎记忆/实体历史 → 历史唤醒 → 旧总述 → 弧光 → 持续事实），保留主干和标题头。
+    const sortedIndexes = active
+      .map((item, idx) => ({ idx, priority: Number(item.priority) || 0 }))
+      .sort((a, b) => a.priority - b.priority)
+      .map(entry => entry.idx);
+    for (const idx of sortedIndexes) {
+      if (join(active).length <= budget) break;
+      const lines = active[idx].text.split('\n');
+      while (lines.length > 2 && join(active).length > budget) {
+        lines.pop();
+        active[idx].text = lines.join('\n');
+      }
+      if (join(active).length > budget) {
+        const overflow = join(active).length - budget;
+        if (active[idx].text.length <= overflow + 24) active[idx].text = '';
+        else active[idx].text = Array.from(active[idx].text).slice(0, Math.max(0, Array.from(active[idx].text).length - overflow - 3)).join('') + '…';
+      }
+    }
+    return join(active);
+  }
+
   function applyInjection(options) {
     const st = settings();
     const unsafeStoryBase = window.STORY_ENGINE_PROJECTION?.active?.() === true && window.STORY_ENGINE_HISTORY?.getStatus?.().blocked === true;
@@ -1671,33 +2052,69 @@ window.MEMORY_ENGINE = (function() {
     const legacyReroll = options?.isReroll && window.STORY_ENGINE_PROJECTION?.active?.() !== true;
     const state = (legacyReroll && data().loadCheckpoint()) || data().loadState();
     ensureEntityState(state);
+    ensureStructuredMemoryState(state);
     const eventMemory = ensureEventState(state);
+    const activeFacts = (state.ongoing_facts || []).filter(item => item.status === 'active');
+    const arcs = Array.isArray(state.character_arcs) ? state.character_arcs : [];
     const hasPeople = Boolean(state?.personal_memory?.length);
     const hasEntities = ENTITY_TYPES.some(type => state.entity_memory[type].length);
     const hasEvents = Boolean(eventMemory.big_summaries.length || eventMemory.small_summaries.length);
-    if (!hasPeople && !hasEntities && !hasEvents) {
+    if (!hasPeople && !hasEntities && !hasEvents && !activeFacts.length && !arcs.length) {
       clearInjection();
       syncHiddenMessages(new Set(), '恢复正文失败');
       return '';
     }
     if (!state.knowledge_index || !Object.keys(state.knowledge_index).length) rebuildKnowledgeIndex(state);
     const scan = chat().slice(-Math.max(1, parseInt(st.searchDepth) || 5)).map(message => clean(message?.mes)).join('\n');
+    const scanLower = scan.toLocaleLowerCase();
+    const queryTokens = tokenizeSearchText(scan);
+    let bridgeActors = [];
+    let bridgeHints = {};
+    try {
+      const bridge = window.STORY_ENGINE_BRIDGE;
+      if (bridge) {
+        bridgeActors = bridge.getOutlineActiveActors?.() || [];
+        bridgeHints = bridge.getCrossInjectionHints?.() || {};
+      }
+    } catch (_) {}
+    const bridgeActorSet = new Set(bridgeActors.map(normalized).filter(Boolean));
     const appearsInScan = name => {
       if (!name) return false;
+      if (bridgeActorSet.has(normalized(name))) return true;
       return new RegExp(String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u').test(scan);
     };
     const matched = (state.personal_memory || []).filter(character => (character.names || []).some(appearsInScan));
     const matchedEntities = ENTITY_TYPES.flatMap(type => state.entity_memory[type]
       .filter(entity => unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan))
       .map(entity => ({ type, entity })));
-    const sections = [], globalSeen = new Set(), limit = Math.max(1, parseInt(st.maxPerCharacter) || 20);
+    const blocks = [], globalSeen = new Set(), limit = Math.max(1, parseInt(st.maxPerCharacter) || 20);
+
+    // P0: 持续生效事实（与当前场景人物或扫描词元命中者优先排前）
+    const factsLimit = Math.max(0, parseInt(st.injectOngoingFactsLimit ?? 15) || 0);
+    if (factsLimit > 0 && activeFacts.length) {
+      const sortedFacts = activeFacts.map((fact, idx) => {
+        const hit = (fact.subject && appearsInScan(fact.subject) ? 10 : 0)
+          + (Array.isArray(fact.keywords) ? fact.keywords.filter(kw => scanLower.includes(clean(kw).toLocaleLowerCase())).length * 4 : 0);
+        return { fact, hit, idx };
+      }).sort((a, b) => (b.hit - a.hit) || (b.idx - a.idx)).slice(0, factsLimit);
+      blocks.push({
+        priority: 90,
+        text: `【长期持续事实】\n${sortedFacts.map(({ fact }) =>
+          `- [${fact.category || '状态'} · ${fact.subject || '全局'}] ${fact.fact}`
+        ).join('\n')}`
+      });
+    }
+
     const bigLimit = Math.max(1, parseInt(st.bigSummaryInjectLimit) || 3);
     const validBig = eventMemory.big_summaries.filter(item => item.status !== 'stale' && item.status !== 'failed');
     const recentBig = validBig.slice(-bigLimit);
     if (recentBig.length) {
-      sections.push(`【故事总述】\n${recentBig.map(item =>
-        `- [楼层 ${item.startLayer}-${item.endLayer}] ${item.content}`
-      ).join('\n')}`);
+      blocks.push({
+        priority: 80,
+        text: `【故事总述】\n${recentBig.map(item =>
+          `- [楼层 ${item.startLayer}-${item.endLayer}] ${item.content}`
+        ).join('\n')}`
+      });
     }
     // 总述注入上限只控制进入 prompt 的总述数量；判断纪要是否已经整理时，
     // 必须查看全部有效总述，避免旧总述退出注入窗口后其子纪要重新被注入。
@@ -1710,23 +2127,66 @@ window.MEMORY_ENGINE = (function() {
       return index >= eventMemory.big_summary_cursor;
     });
     if (pendingSmall.length) {
-      sections.push(`【近期事件纪要】\n${pendingSmall.map(item =>
-        `- [楼层 ${item.startLayer}-${item.endLayer}] ${item.content}`
-      ).join('\n')}`);
+      const worldDigestTrim = clean(bridgeHints.worldDigestTrim);
+      blocks.push({
+        priority: 85,
+        text: `【近期事件纪要】\n${pendingSmall.map(item => {
+          const isWorldDup = item.source === 'world_engine' && worldDigestTrim && clean(item.content) === worldDigestTrim;
+          const prefix = isWorldDup ? '[世界同步] ' : '';
+          return `- [楼层 ${item.startLayer}-${item.endLayer}] ${prefix}${item.content}`;
+        }).join('\n')}`
+      });
+    }
+
+    // P3: 对已折叠进总述的历史纪要，凭关键词/实体/上下文词元按需精准唤醒
+    const recallLimit = Math.max(0, parseInt(st.recallArchivedSmallLimit ?? 3) || 0);
+    if (recallLimit > 0 && hasStructuredOverview) {
+      const archivedSmall = eventMemory.small_summaries.filter(item =>
+        item.status !== 'stale' && item.status !== 'failed' && coveredChildIds.has(item.id)
+      );
+      const recalled = archivedSmall
+        .map((item, idx) => ({ item, score: scoreArchivedSmallSummary(item, queryTokens, scanLower, idx, archivedSmall.length) }))
+        .filter(entry => entry.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, recallLimit)
+        .map(entry => entry.item);
+      if (recalled.length) {
+        blocks.push({
+          priority: 65,
+          text: `【关键词召回历史细节】\n${recalled.map(item =>
+            `- [楼层 ${item.startLayer}-${item.endLayer}${item.keywords?.length ? ` · #${item.keywords.slice(0, 3).join(' #')}` : ''}] ${item.content}`
+          ).join('\n')}`
+        });
+      }
+    }
+
+    // P4: 匹配人物（优先附带角色弧光卡片 + 主观记忆采样）
+    const arcLimit = Math.max(0, parseInt(st.injectCharacterArcsLimit ?? 6) || 0);
+    let injectedArcCount = 0;
+    const arcMap = new Map();
+    for (const arc of arcs) {
+      if (arc.characterId) arcMap.set(arc.characterId, arc);
+      for (const n of arc.names || []) arcMap.set(normalized(n), arc);
     }
     for (const character of matched) {
-      const records = [];
-      for (const name of character.names || []) records.push(...(state.knowledge_index[normalized(name)] || []));
-      const candidates = records.filter(record => {
-        const key = `${record.ownerId}\u0000${record.time}\u0000${record.memory}`;
-        return !globalSeen.has(key);
-      }).filter((record, index, list) => list.findIndex(other =>
-        other.ownerId === record.ownerId && other.time === record.time && other.memory === record.memory
-      ) === index);
+      const charArc = arcMap.get(character.id) || (character.names || []).map(n => arcMap.get(normalized(n))).find(Boolean);
+      const candidates = collectCharacterCandidates(state, character, globalSeen);
       const selected = exponentialMemorySample(candidates, limit, Math.random, st.injectionDiceSides);
       selected.forEach(record => globalSeen.add(`${record.ownerId}\u0000${record.time}\u0000${record.memory}`));
-      if (selected.length) sections.push(`【${character.names?.[0] || character.id}】\n` +
-        selected.map(record => `- [${record.time || '时间未明'}] ${record.memory}`).join('\n'));
+      const charLines = [];
+      if (charArc && injectedArcCount < arcLimit && (charArc.currentStance || charArc.arcSummary || charArc.relationship)) {
+        injectedArcCount++;
+        charLines.push(`- [角色弧光 ${charArc.progressPct ?? 0}%${charArc.relationship ? ` · ${charArc.relationship}` : ''}] ${charArc.currentStance || ''}${charArc.arcSummary ? `｜${charArc.arcSummary}` : ''}`);
+      }
+      if (selected.length) {
+        charLines.push(...selected.map(record => `- [${record.time || '时间未明'}] ${record.memory}`));
+      }
+      if (charLines.length) {
+        blocks.push({
+          priority: 50,
+          text: `【${character.names?.[0] || character.id}】\n${charLines.join('\n')}`
+        });
+      }
     }
     if (matchedEntities.length) {
       const entitySections = matchedEntities.map(({ type, entity }) => {
@@ -1737,7 +2197,10 @@ window.MEMORY_ENGINE = (function() {
         if (history.length) lines.push(...history.map(entry => `- [${entry.time || '时间未明'}] ${entry.event}`));
         return lines.filter(Boolean).join('\n');
       });
-      sections.push(`【相关世界实体】\n${entitySections.join('\n\n')}`);
+      blocks.push({
+        priority: 40,
+        text: `【相关世界实体】\n${entitySections.join('\n\n')}`
+      });
     }
     const coveredRefs = timelineApi()?.unionRefs?.([
       ...recentBig.map(item => item.sourceRefs || []),
@@ -1746,14 +2209,19 @@ window.MEMORY_ENGINE = (function() {
     const api = timelineApi();
     const coveredMessageIds = (() => {
       if (st.hideCoveredRawText === false) return new Set();
-      const keepRawRounds = st.recentRawRounds === undefined
-        ? 1 : Math.max(0, parseInt(st.recentRawRounds) || 0);
+      const baseKeep = st.recentRawRounds === undefined ? 1 : Math.max(0, parseInt(st.recentRawRounds) || 0);
+      const delayKeep = Math.max(0, parseInt(st.summaryDelayFloors) || 0);
+      const keepRawRounds = Math.max(baseKeep, delayKeep);
       const recentMessageIds = recentRawRoundMessageIds(chat(), keepRawRounds, st, api);
       return selectHiddenMessageIds(coveredRefs, data()?.getChatId?.(), recentMessageIds);
     })();
     syncHiddenMessages(coveredMessageIds, '同步正文覆盖失败');
-    if (!sections.length) { clearInjection(); return ''; }
-    const content = `${SENTINEL}\n事件总结记录对话中已经发生的剧情；人物条目是当前场景人物持有或明确知晓的主观记忆，允许彼此矛盾；实体条目记录相关组织、物件、能力与地点的当前描述和本地历史。\n\n${sections.join('\n\n')}`;
+    if (!blocks.length) { clearInjection(); return ''; }
+    const header = `${SENTINEL}\n事件总结记录对话中已经发生的剧情；持续事实记录当前长期生效的约束；人物条目包含阶段弧光与当前场景人物知晓的主观记忆（允许彼此矛盾）；实体条目记录相关组织、物件、能力与地点的当前描述和本地历史。\n\n`;
+    const maxBodyChars = Math.max(300, (parseInt(st.memoryInjectMaxChars) || 3500) - header.length);
+    const body = buildBudgetedSections(blocks, maxBodyChars);
+    if (!body) { clearInjection(); return ''; }
+    const content = `${header}${body}`;
     registerInjection(content);
     return content;
   }
@@ -1763,22 +2231,23 @@ window.MEMORY_ENGINE = (function() {
     if (st.engineEnabled === false || st.injectIntoWorldEngine !== true || !worldState) return '';
     const state = data().loadState();
     ensureEntityState(state);
+    ensureStructuredMemoryState(state);
     if (!state.knowledge_index || !Object.keys(state.knowledge_index).length) rebuildKnowledgeIndex(state);
     const scan = JSON.stringify(worldState);
     const appears = name => name && scan.includes(String(name));
     const limit = Math.max(1, parseInt(st.worldEngineMemoryLimit) || 5);
     const sections = [], seenRecords = new Set();
+    const matchedFacts = (state.ongoing_facts || []).filter(item =>
+      item.status === 'active' && (appears(item.subject) || (item.keywords || []).some(appears) || item.subject === '全局')
+    ).slice(-6);
+    if (matchedFacts.length) {
+      sections.push(`【相关持续事实】\n` + matchedFacts.map(item =>
+        `- [${item.category || '状态'} · ${item.subject || '全局'}] ${item.fact}`
+      ).join('\n'));
+    }
     for (const character of state.personal_memory || []) {
       if (!(character.names || []).some(appears)) continue;
-      const records = [];
-      for (const name of character.names || []) records.push(...(state.knowledge_index[normalized(name)] || []));
-      const candidates = records.filter(record => {
-        const key = `${record.ownerId}\u0000${record.time}\u0000${record.memory}`;
-        if (seenRecords.has(key)) return false;
-        return true;
-      }).filter((record, index, list) => list.findIndex(other =>
-        other.ownerId === record.ownerId && other.time === record.time && other.memory === record.memory
-      ) === index);
+      const candidates = collectCharacterCandidates(state, character, seenRecords);
       const selected = exponentialMemorySample(candidates, limit, Math.random, st.injectionDiceSides);
       selected.forEach(record => seenRecords.add(`${record.ownerId}\u0000${record.time}\u0000${record.memory}`));
       if (selected.length) sections.push(`【人物：${character.names?.[0] || character.id}】\n` +
@@ -1798,6 +2267,98 @@ window.MEMORY_ENGINE = (function() {
     }
     if (!sections.length) return '';
     return `【记忆引擎提供的相关人物与实体信息】\n以下信息只用于辅助世界推演；不包含纪要或总述。\n\n${sections.join('\n\n')}`;
+  }
+
+  function buildLightweightWorldEntities(worldUpdate) {
+    const groups = {};
+    for (const type of ENTITY_TYPES) groups[type] = [];
+    if (!worldUpdate || typeof worldUpdate !== 'object') return groups;
+    for (const faction of Array.isArray(worldUpdate.factions) ? worldUpdate.factions : []) {
+      const name = clean(faction?.name);
+      if (!name) continue;
+      const desc = [faction.status && `状态:${faction.status}`, faction.relation && `关系:${faction.relation}`, faction.currentGoal && `目标:${faction.currentGoal}`].filter(Boolean).join(' · ');
+      groups.organization.push({ name, aliases: [], description: desc, event: clean(faction.event || ''), time: '' });
+    }
+    for (const evt of Array.isArray(worldUpdate.events) ? worldUpdate.events : []) {
+      const name = clean(evt?.name), desc = clean(evt?.desc);
+      if (!name || !desc) continue;
+      if (['已爆发', '已完成'].includes(evt.stage)) {
+        groups.organization.push({ name: clean(evt.faction || name), aliases: [], description: '', event: Array.from(`事件「${name}」进入${evt.stage}：${desc}`).slice(0, 50).join(''), time: '' });
+      }
+    }
+    return groups;
+  }
+
+  function syncVerifiedOutlineKnowledge(events) {
+    const st = settings();
+    if (st.engineEnabled === false || !Array.isArray(events) || !events.length) return { changed: 0 };
+    const nameBlacklist = configuredNameBlacklist(st);
+    const state = data().loadState();
+    const timeline = ensureTimelineState(state);
+    let changed = 0;
+    const personal = [];
+    for (const entry of events) {
+      const names = unique(entry?.actorNames || [entry?.actorId]).filter(n => !nameIsBlacklisted(n, nameBlacklist));
+      const memory = Array.from(clean(entry?.memory)).slice(0, 50).join('');
+      const eventId = clean(entry?.outlineEventId);
+      if (!names.length || !memory) continue;
+      const duplicateNode = eventId && timeline.nodes.some(node =>
+        node.status === 'valid' && node.kind === 'outline_verified' && node.outlineEventId === eventId
+      );
+      if (duplicateNode) continue;
+      personal.push({ name: names, known_by: [], memory, time: clean(entry?.time), outlineEventId: eventId });
+    }
+    if (!personal.length) return { changed: 0 };
+    const layer = Number.isFinite(Number(events[0]?.layer)) ? Number(events[0].layer) : currentLayer();
+    for (const item of personal) {
+      changed += mergeMemories(state, [item]);
+      const refs = Array.isArray(events.find(e => e.outlineEventId === item.outlineEventId)?.sourceRefs)
+        ? clone(events.find(e => e.outlineEventId === item.outlineEventId).sourceRefs)
+        : [];
+      timeline.nodes.push({
+        id: nextTimelineNodeId(timeline),
+        kind: 'outline_verified',
+        outlineEventId: item.outlineEventId,
+        originChatId: data()?.getChatId?.() || 'default',
+        startLayer: layer,
+        endLayer: layer,
+        sourceRefs: refs,
+        sourceDigest: timelineApi()?.digestRefs?.(refs) || `outline:${item.outlineEventId || Date.now()}`,
+        personal: [item],
+        entities: {},
+        factUpdates: [],
+        arcUpdates: [],
+        status: 'valid',
+        revision: 1,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      });
+    }
+    data().saveState(replayTimeline(state));
+    applyInjection();
+    refreshMemoryPanel();
+    return { changed };
+  }
+
+  function getSnapshotSummaryForBridge() {
+    try {
+      const state = data().loadState();
+      ensureEntityState(state);
+      ensureStructuredMemoryState(state);
+      const events = ensureEventState(state);
+      return {
+        ongoingFacts: clone((state.ongoing_facts || []).filter(item => item.status === 'active')),
+        characterArcs: clone(state.character_arcs || []),
+        recentSmallSummaries: clone((events.small_summaries || []).filter(item => item.status === 'valid').slice(-5)),
+        recentBigSummaries: clone((events.big_summaries || []).filter(item => item.status === 'valid').slice(-2)),
+        peopleRoster: (state.personal_memory || []).map(p => ({ id: p.id, names: unique(p.names) })),
+        entityRoster: ENTITY_TYPES.flatMap(type => (state.entity_memory[type] || []).map(e => ({
+          id: e.id, type, name: e.name, aliases: unique(e.aliases), description: clean(e.description)
+        })))
+      };
+    } catch (_) {
+      return null;
+    }
   }
 
   async function ingestWorldEvolution(payload) {
@@ -1825,6 +2386,76 @@ window.MEMORY_ENGINE = (function() {
       ? JSON.stringify(safeWorldUpdate, null, 2)
       : digest;
     const attemptBase = data().loadState();
+
+    // 轻同步模式（不发起额外的记忆提取 LLM API 调用，直接落库公开世界节点并在总述到阈时只归纳大总结）
+    if (payload?.lightweight === true) {
+      const next = clone(attemptBase);
+      const lightweightEntities = buildLightweightWorldEntities(safeWorldUpdate);
+      const entityChanges = mergeEntityMemories(next, lightweightEntities);
+      const factUpdates = (Array.isArray(safeWorldUpdate?.worldTrends) ? safeWorldUpdate.worldTrends : [])
+        .filter(trend => clean(trend?.name) && clean(trend?.description))
+        .slice(0, 3)
+        .map(trend => ({
+          action: trend.status === '已结束' ? 'resolve' : 'upsert',
+          category: '设定',
+          subject: clean(trend.name),
+          fact: Array.from(clean(trend.description)).slice(0, 120).join(''),
+          keywords: unique([trend.name, trend.scope])
+        }));
+      const factChanges = factUpdates.length
+        ? mergeOngoingFacts(next, factUpdates, layer, null, clean(payload?.worldCommitId))
+        : 0;
+      appendTimelineNode(next, {
+        personal: [],
+        entities: lightweightEntities,
+        factUpdates,
+        arcUpdates: []
+      }, {
+        kind: 'world_link',
+        sourceKey,
+        worldCommitId: clean(payload?.worldCommitId),
+        startLayer: layer,
+        endLayer: layer,
+        conversation: digest
+      }, { layer });
+      const eventMemory = ensureEventState(next);
+      const worldKeywords = unique([
+        ...(Array.isArray(safeWorldUpdate?.factions) ? safeWorldUpdate.factions.map(f => f?.name) : []),
+        ...(Array.isArray(safeWorldUpdate?.events) ? safeWorldUpdate.events.map(e => e?.name) : [])
+      ]).slice(0, 6);
+      eventMemory.small_summaries.push({
+        id: nextSmallSummaryId(eventMemory),
+        startLayer: layer,
+        endLayer: layer,
+        content: Array.from(digest).slice(0, 200).join(''),
+        keywords: worldKeywords,
+        entityNames: worldKeywords,
+        impactLevel: 'normal',
+        source: 'world_engine',
+        sourceKey,
+        ...(payload?.worldCommitId ? { worldCommitId: clean(payload.worldCommitId) } : {}),
+        status: 'valid',
+        revision: 1
+      });
+      data().saveState(next);
+      window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+      applyInjection();
+      refreshMemoryPanel();
+      const bigTask = buildBigTask(next, false);
+      let updatedBig = 0;
+      if (bigTask) {
+        const bigRes = await runTasks({ big: bigTask }, { baseState: next, saveCheckpoint: false });
+        updatedBig = Number(bigRes?.updatedBig || 0);
+      }
+      return {
+        lightweight: true,
+        added: entityChanges.entities + entityChanges.history + entityChanges.descriptions + factChanges + 1 + updatedBig,
+        addedSmall: 1,
+        updatedBig,
+        state: data().loadState()
+      };
+    }
+
     try {
       const result = await runTasksThenDueBig({
         memory: {
@@ -2136,6 +2767,10 @@ window.MEMORY_ENGINE = (function() {
     if (key === lastEventKey) return;
     lastEventKey = key;
     clearTimeout(autoTimer);
+    if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
+      window.STORY_ENGINE_BRIDGE.scheduleTurn?.({ scope: 'memory', layer: currentLayer(), key, run: autoExtract });
+      return;
+    }
     autoTimer = setTimeout(() => autoExtract().catch(error => console.error('[记忆引擎] 自动提取失败', error)), 1500);
   }
 
@@ -2169,6 +2804,7 @@ window.MEMORY_ENGINE = (function() {
     if (ctx?.eventSource) {
       ctx.eventSource.on(types.GENERATION_ENDED || types.MESSAGE_RECEIVED || 'message_received', guardEvent('生成完成', onMessageReceived));
       ctx.eventSource.on(types.CHAT_LOADED || 'chat_loaded', guardEvent('聊天加载', () => {
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
         abortController?.abort();
         lastEventKey = '';
@@ -2176,6 +2812,7 @@ window.MEMORY_ENGINE = (function() {
         schedulePreparation(100);
       }));
       ctx.eventSource.on(types.MESSAGE_SWIPED || 'message_swiped', guardEvent('滑动重生成', () => {
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
         abortController?.abort();
         if (window.STORY_ENGINE_PROJECTION?.active?.() === true) applyInjection();
@@ -2183,13 +2820,17 @@ window.MEMORY_ENGINE = (function() {
         schedulePreparation(50);
       }));
       ctx.eventSource.on(types.MESSAGE_DELETED || 'message_deleted', guardEvent('删除消息', () => {
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
         abortController?.abort();
         lastEventKey = '';
         schedulePreparation(50);
       }));
       ctx.eventSource.on(types.GENERATION_STARTED || 'generation_started', guardEvent('生成开始', (type, _opts, dryRun) => {
-        if (!dryRun) applyInjection({ isReroll: type === 'swipe' || type === 'regenerate' });
+        if (!dryRun) {
+          window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+          applyInjection({ isReroll: type === 'swipe' || type === 'regenerate' });
+        }
       }));
     }
     try { applyInjection(); }
@@ -2199,7 +2840,7 @@ window.MEMORY_ENGINE = (function() {
   return {
     init, applyInjection, buildWorldEngineContext, ingestWorldEvolution, manualExtract, manualReextract, extractNow: manualExtract,
     reconcileHistory, prepareHistoryForGeneration, replayTimeline, commitManualState,
-    invalidateWorldCommits,
+    invalidateWorldCommits, syncVerifiedOutlineKnowledge, getSnapshotSummaryForBridge,
     quarantineUnprovenancedHistory, getQuarantineBackup,
     manualSmallSummary, manualBigSummary,
     backfill, backfillSummaries, stopBackfill, abort,
@@ -2211,7 +2852,8 @@ window.MEMORY_ENGINE = (function() {
     _test: {
       exponentialMemorySample, rollbackLinkedLayer, removeLinkedLayerFromState, rewindSummaryCursorForDeletedLayers,
       buildSmallHistoryContext, buildTaskReferenceContext, previousRawReference,
-      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds
+      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds,
+      mergeOngoingFacts, mergeCharacterArcs, scoreArchivedSmallSummary, tokenizeSearchText, stableAutoEndLayer, autoExtract
     }
   };
 })();

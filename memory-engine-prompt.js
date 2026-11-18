@@ -112,7 +112,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 每个 entity_updates 数组项同理只携带一条 event，并单独填写该 event 的 time。
 
 约束：
-1. 本任务负责 personal_memory 和 entity_updates；统一顶层对象除这两个字段外，只能包含同一次请求明确要求的 small_summary 或 big_summary。
+1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates、small_summary（及 keywords/entities/impact）或 big_summary（及 keywords），请按统一输出模板一并填写。
 2. 没有对应内容时，数组返回 []。
 3. PersonalMemory 只能包含 name、known_by、memory、time。
 4. EntityUpdate 只能包含 type、name、aliases、description、event、time。
@@ -122,7 +122,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 8. event 长度为 0 至 50 个字符。
 9. PersonalMemory.time 表示记忆所指事件的绝对故事时间；EntityUpdate.time 只对应 event。无法确定时填写空字符串，event 为空时 time 必须为空。
 10. type 只能是 organization、object、ability、location。
-11. 只输出有效 JSON；模板中的说明文字不得原样输出，不得增加其他字段。
+11. ongoing_fact_updates（若模板要求）记录长期生效状态与核心约束的新增/修订(upsert)或完结失效(resolve)，每条 fact 不超过 120 字；不得写入私密/未发生计划。
+12. character_arc_updates（若模板要求）只更新本批有明显心理态度、关系定性或阶段进展的角色，progress_pct 为 0 至 100 的整数。
+13. 只输出有效 JSON；模板中的说明文字不得原样输出，不得增加未声明字段。
 
 不得增加统一输出模板之外的顶层字段或任何额外条目字段。严格遵守前述类型、长度、数量、时间和分类规则。`);
 
@@ -147,6 +149,10 @@ window.MEMORY_ENGINE_PROMPT = (function() {
         }).filter(Boolean)
       : [];
     const worldbook = clean(input.worldbook);
+    const activeOngoingFacts = Array.isArray(input.activeOngoingFacts) ? input.activeOngoingFacts : [];
+    const knownCharacterArcs = Array.isArray(input.knownCharacterArcs) ? input.knownCharacterArcs : [];
+    const outlineFocusHint = clean(input.outlineFocusHint);
+    const worldContextHint = clean(input.worldContextHint);
     const referenceContext = clean(input.referenceContext);
     const conversation = clean(input.conversation);
 
@@ -155,6 +161,26 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       `【已知人物名称与别名】\n${knownPeople.length ? knownPeople.map(item => `- ${item}`).join('\n') : '未提供；仅使用对话中明确出现的称呼'}`,
       `【已知实体】\n${knownEntities.length ? knownEntities.join('\n') : '未提供；仅提取对话中明确命名且符合分类定义的实体'}`
     ];
+
+    if (activeOngoingFacts.length) {
+      sections.push(`【当前生效的持续事实（供去重与判定 resolve 完结）】\n${activeOngoingFacts.map(item =>
+        `- [${item.id}] (${item.category || '状态'}) ${item.subject || '全局'}：${item.fact}`
+      ).join('\n')}`);
+    }
+
+    if (knownCharacterArcs.length) {
+      sections.push(`【已知角色弧光状态】\n${knownCharacterArcs.map(arc =>
+        `- ${Array.isArray(arc.names) ? arc.names[0] : (arc.name || arc.characterId)}（${Number.isFinite(Number(arc.progressPct)) ? `${arc.progressPct}%` : '0%'} · ${arc.relationship || '未定'}）：${arc.currentStance || ''}${arc.arcSummary ? `｜${arc.arcSummary}` : ''}`
+      ).join('\n')}`);
+    }
+
+    if (worldContextHint) {
+      sections.push(`【世界客观动态参考（仅作实体与事实核对，不得替角色猜知情）】\n${worldContextHint}`);
+    }
+
+    if (outlineFocusHint) {
+      sections.push(`【当前公开剧情焦距（仅作主题参考，未发生事件不得提取）】\n${outlineFocusHint}`);
+    }
 
     if (worldbook) {
       sections.push(`【可选世界书背景】\n${worldbook}\n\n世界书只用于辨认人物、实体、称呼和背景，不得把其中内容直接当作本批新形成的人物记忆或实体更新。`);

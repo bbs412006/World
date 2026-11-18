@@ -19,6 +19,7 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     smallSummaryEveryX: 1,
     bigSummaryEveryX: 5,
     bigSummaryInjectLimit: 3,
+    summaryDelayFloors: 0,
     hideCoveredRawText: true,
     recentRawRounds: 1,
     referenceRawRounds: 1,
@@ -29,6 +30,13 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     worldEngineMemoryLimit: 5,
     searchDepth: 5,
     maxPerCharacter: 20,
+    memoryInjectMaxChars: 3500,
+    recallArchivedSmallLimit: 3,
+    injectOngoingFactsLimit: 15,
+    injectCharacterArcsLimit: 6,
+    enableFactAndArcExtraction: true,
+    worldLinkMode: 'lightweight',
+    coordinationMode: 'stagger-serial',
     injectionDiceSides: 10000,
     apiAutoRetries: 0,
     nameBlacklist: '',
@@ -47,8 +55,13 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
 
   let cached = null;
 
-  // 日常记忆以一轮为最小可重放单元：人物/实体与纪要同轮联合提取。
-  // 这里同时覆盖旧存档和 UI 传入值，避免历史设置中的 X 继续生效。
+  function clampInt(value, fallback, min, max) {
+    const num = parseInt(value, 10);
+    const parsed = Number.isFinite(num) ? num : fallback;
+    return Math.min(max, Math.max(min, parsed));
+  }
+
+  // 人物与实体记忆保持每轮可重放提取；纪要批量间隔（smallSummaryEveryX）与延迟楼层允许独立配置。
   function normalizeSettings(value) {
     const merged = { ...DEFAULTS, ...(value || {}) };
     const savedMaxTokens = Math.max(1, parseInt(merged.maxTokens) || 65000);
@@ -59,11 +72,21 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       evolveEveryX: 1,
       evolveReadRounds: 1,
       manualReadRounds: 1,
-      smallSummaryEveryX: 1,
-      recentRawRounds: Math.max(0, parseInt(merged.recentRawRounds) || 0),
-      referenceRawRounds: Math.max(0, parseInt(merged.referenceRawRounds) || 0),
-      referenceSmallSummaryCount: Math.max(0, parseInt(merged.referenceSmallSummaryCount) || 0),
-      referenceBigSummaryCount: Math.max(0, parseInt(merged.referenceBigSummaryCount) || 0)
+      smallSummaryEveryX: clampInt(merged.smallSummaryEveryX, 1, 1, 20),
+      bigSummaryEveryX: clampInt(merged.bigSummaryEveryX, 5, 1, 100),
+      bigSummaryInjectLimit: clampInt(merged.bigSummaryInjectLimit, 3, 1, 50),
+      summaryDelayFloors: clampInt(merged.summaryDelayFloors, 0, 0, 10),
+      recentRawRounds: clampInt(merged.recentRawRounds, 1, 0, 50),
+      referenceRawRounds: clampInt(merged.referenceRawRounds, 1, 0, 20),
+      referenceSmallSummaryCount: clampInt(merged.referenceSmallSummaryCount, 5, 0, 50),
+      referenceBigSummaryCount: clampInt(merged.referenceBigSummaryCount, 1, 0, 20),
+      memoryInjectMaxChars: clampInt(merged.memoryInjectMaxChars, 3500, 500, 20000),
+      recallArchivedSmallLimit: clampInt(merged.recallArchivedSmallLimit, 3, 0, 10),
+      injectOngoingFactsLimit: clampInt(merged.injectOngoingFactsLimit, 15, 0, 50),
+      injectCharacterArcsLimit: clampInt(merged.injectCharacterArcsLimit, 6, 0, 30),
+      enableFactAndArcExtraction: merged.enableFactAndArcExtraction !== false,
+      worldLinkMode: merged.worldLinkMode === 'llm' ? 'llm' : 'lightweight',
+      coordinationMode: merged.coordinationMode === 'independent' ? 'independent' : 'stagger-serial'
     };
   }
 
