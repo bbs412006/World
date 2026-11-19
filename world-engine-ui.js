@@ -764,6 +764,7 @@ window.WORLD_ENGINE_UI = (function() {
     const eventMemory = state?.event_memory || {};
     const smallSummaries = Array.isArray(eventMemory.small_summaries) ? eventMemory.small_summaries : [];
     const activeFacts = Array.isArray(state?.ongoing_facts) ? state.ongoing_facts.filter(item => item.status === 'active') : [];
+    const resolvedFacts = Array.isArray(state?.ongoing_facts) ? state.ongoing_facts.filter(item => item.status === 'resolved') : [];
     const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
     const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : 0;
     const uncoveredAll = coverage ? Number(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) || 0 : 0;
@@ -774,12 +775,15 @@ window.WORLD_ENGINE_UI = (function() {
     const progress = totalAi > 0 ? Math.min(1, coveredAi / totalAi) : (smallSummaries.length > 0 ? 1 : 0);
     const entityCount = ['organization', 'object', 'ability', 'location']
       .reduce((sum, type) => sum + (Array.isArray(state?.entity_memory?.[type]) ? state.entity_memory[type].length : 0), 0);
+    const factStatTitle = resolvedFacts.length > 0
+      ? `生效中 ${activeFacts.length} 条，已完结归档 ${resolvedFacts.length} 条（共 ${activeFacts.length + resolvedFacts.length} 条）`
+      : `生效中 ${activeFacts.length} 条`;
     const stats = [
-      ['人物', Array.isArray(state?.personal_memory) ? state.personal_memory.length : 0],
-      ['实体', entityCount],
-      ['事实', activeFacts.length],
-      ['纪要', smallSummaries.length]
-    ].map(([label, value]) => `<div class="we-core-stat"><div class="we-core-stat-k">${label}</div><div class="we-core-stat-v">${value}</div></div>`).join('');
+      ['人物', Array.isArray(state?.personal_memory) ? state.personal_memory.length : 0, ''],
+      ['实体', entityCount, ''],
+      ['事实', resolvedFacts.length > 0 ? `${activeFacts.length}/${activeFacts.length + resolvedFacts.length}` : activeFacts.length, factStatTitle],
+      ['纪要', smallSummaries.length, '']
+    ].map(([label, value, title]) => `<div class="we-core-stat"${title ? ` title="${h(title)}"` : ''}><div class="we-core-stat-k">${label}</div><div class="we-core-stat-v">${value}</div></div>`).join('');
     const centerMain = uncoveredAuto > 0 ? uncoveredAuto : (totalAi > 0 ? `${coveredAi}/${totalAi}` : '就绪');
     const centerUnit = uncoveredAuto > 0 ? '<span>层待填</span>' : '';
     const subLabel = uncoveredAuto > 0 ? '待追平填表' : (coverage?.effectiveDelayFloors > 0 ? `填表覆盖 · 延${coverage.effectiveDelayFloors}层` : '填表覆盖');
@@ -846,7 +850,7 @@ window.WORLD_ENGINE_UI = (function() {
             <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>每批轮数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
           </div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 8px;font-size:11px;color:var(--we-text2);">
-            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite" checked> 覆盖范围内已有填表数据（人物/实体/事实/弧光/纪要一并重算）</label>
+            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite"> 覆盖重填范围内已有记录（不勾选时与自动填表一致，逐层纯增量补漏）</label>
           </div>
           <button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button>
         </div>
@@ -1466,9 +1470,11 @@ window.WORLD_ENGINE_UI = (function() {
       const pCount = Array.isArray(st?.personal_memory) ? st.personal_memory.length : 0;
       const eCount = ['organization', 'object', 'ability', 'location']
         .reduce((sum, type) => sum + (Array.isArray(st?.entity_memory?.[type]) ? st.entity_memory[type].length : 0), 0);
-      const fCount = Array.isArray(st?.ongoing_facts) ? st.ongoing_facts.filter(f => f.status === 'active').length : 0;
+      const fActive = Array.isArray(st?.ongoing_facts) ? st.ongoing_facts.filter(f => f.status === 'active').length : 0;
+      const fResolved = Array.isArray(st?.ongoing_facts) ? st.ongoing_facts.filter(f => f.status === 'resolved').length : 0;
       const sCount = Array.isArray(st?.event_memory?.small_summaries) ? st.event_memory.small_summaries.length : 0;
-      return `人物 ${pCount} · 实体 ${eCount} · 事实 ${fCount} · 纪要 ${sCount}`;
+      const fLabel = fResolved > 0 ? `事实 ${fActive}(+${fResolved}完结)` : `事实 ${fActive}`;
+      return `人物 ${pCount} · 实体 ${eCount} · ${fLabel} · 纪要 ${sCount}`;
     };
     const catchupNow = document.getElementById('we-memory-catchup-now');
     if (catchupNow) {
@@ -1497,7 +1503,7 @@ window.WORLD_ENGINE_UI = (function() {
         const endRaw = document.getElementById('we-memory-range-end')?.value;
         const endLayer = Math.max(0, parseInt(endRaw, 10) || 0);
         const batchSize = Math.max(1, parseInt(document.getElementById('we-memory-range-batch')?.value, 10) || 1);
-        const overwrite = document.getElementById('we-memory-range-overwrite')?.checked !== false;
+        const overwrite = document.getElementById('we-memory-range-overwrite')?.checked === true;
         rangeFillBtn.disabled = true;
         try {
           const res = await window.MEMORY_ENGINE?.fillSummaryRange?.({
@@ -2508,7 +2514,10 @@ window.WORLD_ENGINE_UI = (function() {
   }
   function saveScopedState(scope, scopedState) {
     if (scope === 'checkpoint') core.saveCheckpoint(scopedState);
-    else core.saveState(scopedState);
+    else {
+      core.saveState(scopedState);
+      core.updateCurrentHistorySnapshot?.(scopedState);
+    }
   }
 
   function isEditingPanelContent() {
@@ -6471,7 +6480,11 @@ window.WORLD_ENGINE_UI = (function() {
           const stIn = gv('we-time-state');
           if (stIn != null && stIn !== '') {
             const s2 = core.loadState();
-            if (s2) { s2.time = Number(stIn); core.saveState(s2); }
+            if (s2) {
+              s2.time = Number(stIn);
+              core.saveState(s2);
+              core.updateCurrentHistorySnapshot?.(s2);
+            }
           }
           const cpIn = gv('we-time-checkpoint');
           if (cpIn != null && cpIn !== '') {
@@ -6727,6 +6740,7 @@ window.WORLD_ENGINE_UI = (function() {
         if (confirm('重置当前聊天所有世界状态和记忆？不可恢复！')) {
           core.clearState();
           core.clearCheckpoint();
+          core.clearHistory?.();
           core.saveFingerprint(String(core.getChatLayer()));
           showToast('世界已重置');
           refresh();
@@ -6923,6 +6937,7 @@ window.WORLD_ENGINE_UI = (function() {
                 _retryType: String(data._retryType || '')
               };
               core.saveState(state);
+              core.updateCurrentHistorySnapshot?.(state);
               showToast('区域事件导入成功');
               refresh();
               return;

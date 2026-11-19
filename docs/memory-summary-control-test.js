@@ -741,6 +741,109 @@ function makeChat(rounds) {
     assert.strictEqual(parsedNested.factUpdates.length, 1, '应拍平嵌套 memory 对象并解析 detail 事实字段');
   }
 
+  // 11. 统一逐层自动填表增量内核：一键追平与默认范围填表绝不删除跨楼旧节点，显式覆盖不误杀跨区间旧节点，且无 ID resolve 不通配误杀多条事实
+  {
+    const h = createHarness(makeChat(3)); // 0..6 (AI: 2, 4, 6)
+    h.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+      evolveMode: 'auto',
+      smallSummaryEveryX: 1,
+      skipCurrentFloorSummary: false,
+      summaryDelayFloors: 0
+    });
+
+    // 11A. 构造一个覆盖 1..4 的跨多楼旧记忆节点（含 7 条持续事实），纪要仅覆盖 1..2；执行一键追平补齐 3..4 和 5..6
+    const stInit = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    const refs14 = h.sandbox.MEMORY_ENGINE_TIMELINE.captureRange(1, 4);
+    const refs12 = h.sandbox.MEMORY_ENGINE_TIMELINE.captureRange(1, 2);
+    stInit.timeline.nodes.push({
+      id: 'memory_000001',
+      kind: 'memory',
+      startLayer: 1,
+      endLayer: 4,
+      sourceRefs: refs14,
+      sourceDigest: h.sandbox.MEMORY_ENGINE_TIMELINE.digestRefs(refs14),
+      personal: [{ name: ['林墨'], known_by: [], memory: '第2层确立的关键认知', time: '' }],
+      entities: { organization: [], object: [], ability: [], location: [] },
+      factUpdates: [1, 2, 3, 4, 5, 6, 7].map(i => ({
+        action: 'upsert', id: '', category: '状态', subject: '林墨', fact: `第2层重要持续事实_${i}`, keywords: [`k${i}`]
+      })),
+      arcUpdates: [],
+      memoryExtracted: true,
+      status: 'valid'
+    });
+    stInit.event_memory.small_summaries.push({
+      id: 'small_000001',
+      startLayer: 1,
+      endLayer: 2,
+      content: '第1-2层已有阶段纪要。'.repeat(60),
+      sourceRefs: refs12,
+      sourceDigest: h.sandbox.MEMORY_ENGINE_TIMELINE.digestRefs(refs12),
+      status: 'valid'
+    });
+    stInit.event_memory.small_summary_layer = 2;
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(h.sandbox.MEMORY_ENGINE.replayTimeline(stInit));
+    assert.strictEqual(h.sandbox.MEMORY_ENGINE_DATA.loadState().ongoing_facts.length, 7);
+
+    // 模拟第 4 层返回 1 条无 ID 空 fact 的 resolve（不应通配误杀）+ 1 条精准 resolve + 1 条新增
+    const origApi11 = h.sandbox.WORLD_ENGINE_API.callApi;
+    h.sandbox.WORLD_ENGINE_API.callApi = async prompt => {
+      if (prompt.includes('楼层 3 至 4')) {
+        return JSON.stringify({
+          personal_memory: [{ name: ['林墨'], known_by: [], memory: '第4层新增认知', time: '' }],
+          entity_updates: [],
+          ongoing_fact_updates: [
+            { action: 'resolve', id: '', category: '状态', subject: '林墨', fact: '' },
+            { action: 'resolve', id: '', category: '状态', subject: '林墨', fact: '第2层重要持续事实_1' },
+            { action: 'upsert', id: '', category: '状态', subject: '林墨', fact: '第4层新增持续事实', keywords: ['k8'] }
+          ],
+          character_arc_updates: [],
+          small_summary: '第3-4层详实纪要。'.repeat(60)
+        });
+      }
+      return origApi11(prompt);
+    };
+
+    await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    const afterCatchup = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.ok(
+      afterCatchup.timeline.nodes.some(n => n.startLayer === 1 && n.endLayer === 4),
+      '一键追平补填 3-4 时绝不能整块删除跨楼旧记忆节点 1-4'
+    );
+    assert.ok(
+      afterCatchup.ongoing_facts.length >= 8,
+      `第2层的7条事实必须全部保留并叠加第4/6层增量，实际=${afterCatchup.ongoing_facts.length}`
+    );
+    assert.strictEqual(
+      afterCatchup.ongoing_facts.filter(f => f.status === 'resolved').length,
+      1,
+      '空 fact 的无 ID resolve 不得通配误杀多条事实，仅精准匹配的第1条应标为已完结'
+    );
+
+    // 11B. 显式指定范围覆盖 3..6 时，不得误删起点在范围外（1..4）的跨区间旧节点
+    await h.sandbox.MEMORY_ENGINE.fillSummaryRange({
+      startLayer: 3, endLayer: 6, batchSize: 1, overwrite: true, includeMemory: true
+    });
+    const afterOverwrite36 = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.ok(
+      afterOverwrite36.timeline.nodes.some(n => n.startLayer === 1 && n.endLayer === 4),
+      '覆盖 3-6 时不得误杀包含第 2 层（在范围外）的 1-4 旧节点'
+    );
+    assert.ok(
+      afterOverwrite36.ongoing_facts.some(f => f.fact === '第2层重要持续事实_7'),
+      '第 2 层的既有持续事实必须完好保留'
+    );
+
+    // 11C. 范围填表默认不覆盖（overwrite 缺省为 false）：已覆盖区间跳过，只纯增量补漏
+    const h2 = createHarness(makeChat(2)); // 0..4 (AI: 2, 4)
+    h2.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ smallSummaryEveryX: 1, skipCurrentFloorSummary: false, summaryDelayFloors: 0 });
+    await h2.sandbox.MEMORY_ENGINE.fillSummaryRange({ startLayer: 0, endLayer: 2, batchSize: 1 });
+    assert.strictEqual(h2.calls.length, 1);
+    h2.calls.length = 0;
+    const incRes = await h2.sandbox.MEMORY_ENGINE.fillSummaryRange({ startLayer: 0, endLayer: 4, batchSize: 1 });
+    assert.strictEqual(incRes.completedBatches, 1, '默认范围填表（非覆盖）应跳过已填的第 2 层，仅纯增量补填第 4 层');
+    assert.strictEqual(h2.calls.length, 1);
+  }
+
   console.log('memory summary control, rollback-refill, range & catch-up tests passed');
 })().catch(error => {
   console.error(error);

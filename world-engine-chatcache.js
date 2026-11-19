@@ -42,18 +42,20 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
   function syncEnabled() { return settings().syncToChat === true; }
   function autoBackupEnabled() { return settings().autoBackup === true; }
 
-  // —— 按聊天隔离的 5 个存档键（命名与 core.js / worldbook.js 保持一致；改这里前先核对源模块）——
+  // —— 按聊天隔离的 6 个存档键（命名与 core.js / worldbook.js 保持一致；改这里前先核对源模块）——
   //   state:       world_engine_<id>                      (core.js loadState/saveState)
   //   checkpoint:  world_engine_<id>_checkpoint           (core.js getCheckpointKey)
   //   fingerprint: world_engine_<id>_fingerprint          (core.js getFingerprintKey)
   //   anchorLayer: world_engine_<id>_anchorLayer          (core.js getAnchorLayerKey，旧版遗留)
   //   worldbook:   world_engine_worldbook_selection_<id>  (worldbook.js getSelectionKey)
+  //   history:     world_engine_<id>_history              (core.js getHistoryKey，独立模式逐层历史)
   const SLOTS = {
     state:       id => `world_engine_${id}`,
     checkpoint:  id => `world_engine_${id}_checkpoint`,
     fingerprint: id => `world_engine_${id}_fingerprint`,
     anchorLayer: id => `world_engine_${id}_anchorLayer`,
-    worldbook:   id => `world_engine_worldbook_selection_${id}`
+    worldbook:   id => `world_engine_worldbook_selection_${id}`,
+    history:     id => `world_engine_${id}_history`
   };
   const SLOT_NAMES = Object.keys(SLOTS);
   const extraScopes = new Map();
@@ -111,13 +113,35 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     } catch (e) { return rawJson; }
   }
 
+  const MAX_SYNC_HISTORY_BYTES = 200 * 1024;
+  function stripHistoryForChat(rawJson) {
+    try {
+      if (!rawJson || rawJson.length <= MAX_SYNC_HISTORY_BYTES) return rawJson;
+      const h = JSON.parse(rawJson);
+      if (!h || typeof h !== 'object' || !Array.isArray(h.entries)) return rawJson;
+      const copy = { version: h.version || 1, baseline: h.baseline || null, entries: h.entries.slice() };
+      while (copy.entries.length > 5 && JSON.stringify(copy).length > MAX_SYNC_HISTORY_BYTES) {
+        const shifted = copy.entries.shift();
+        if (shifted && shifted.state) {
+          copy.baseline = { layer: Number(shifted.layer), isEmpty: false, state: shifted.state };
+        }
+      }
+      return JSON.stringify(copy);
+    } catch (e) { return rawJson; }
+  }
+
   // 把当前聊天的 slot 原样打包成 { slotName: rawString }（缺失的 slot 不放）
-  function packChat(id) {
+  // 快照（auto/manual snapshots）不携带 history 避免 chat_metadata 膨胀；live 同步携带裁剪后的 history。
+  function packChat(id, opts) {
+    const includeHistory = opts?.includeHistory !== false;
     const data = {};
     for (const name of SLOT_NAMES) {
+      if (name === 'history' && !includeHistory) continue;
       const raw = store().getItem(SLOTS[name](id));
       if (raw == null) continue;
-      data[name] = (name === 'state' || name === 'checkpoint') ? stripHeavy(raw) : raw;
+      if (name === 'state' || name === 'checkpoint') data[name] = stripHeavy(raw);
+      else if (name === 'history') data[name] = stripHistoryForChat(raw);
+      else data[name] = raw;
     }
     return data;
   }
@@ -365,7 +389,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     const round = currentRound(id);
     if (round <= 0) return false;
     if (_lastAutoRound != null && round <= _lastAutoRound) return false;
-    const packed = packChat(id);
+    const packed = packChat(id, { includeHistory: false });
     const newestAuto = ns.snapshots.find(s => s.auto);
     if (newestAuto && sameData(newestAuto.data, packed)) {
       _lastAutoRound = round; // 与最新自动备份内容相同 → 跳过，但更新基线
@@ -393,7 +417,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     const round = currentRound(id);
     const snap = addSnapshot(ns, {
       name: String(name || `存档 · 第${round}轮`).trim().slice(0, 60) || `存档 · 第${round}轮`,
-      auto: false, round, data: packChat(id)
+      auto: false, round, data: packChat(id, { includeHistory: false })
     }, id);
     return writeNamespace(ns) ? snap : null;
   }
@@ -408,7 +432,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     if (!snap) return false;
     if (hasAnyLocal(id)) {
       addSnapshot(ns, {
-        name: `恢复前自动备份 · 第${currentRound(id)}轮`, auto: true, round: currentRound(id), data: packChat(id)
+        name: `恢复前自动备份 · 第${currentRound(id)}轮`, auto: true, round: currentRound(id), data: packChat(id, { includeHistory: false })
       }, id);
     }
     installPack(snap.data, id, true);
@@ -437,6 +461,7 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
         store().setItem(SLOTS.checkpoint(id), JSON.stringify(cp));
       }
       store().setItem(SLOTS.fingerprint(id), String(layer));
+      store().removeItem(SLOTS.history(id));
     } catch (e) {
       console.warn('[世界引擎] 恢复后归一化失败', e);
     } finally {

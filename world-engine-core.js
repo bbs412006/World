@@ -432,6 +432,320 @@ window.WORLD_ENGINE_CORE = (function() {
     window.WORLD_ENGINE_STORE.removeItem(getCheckpointKey());
   }
 
+  // ========== 独立模式按楼层历史快照（大纲关闭时支持删楼自动回退） ==========
+  const MAX_HISTORY_ENTRIES = 60;
+  let _rollbackGeneration = 0;
+
+  function getHistoryKey() {
+    return STORAGE_PREFIX + getChatId() + '_history';
+  }
+
+  function getRollbackGeneration() {
+    return _rollbackGeneration;
+  }
+
+  function compactSnapshot(state) {
+    if (!state || typeof state !== 'object') return getDefaultState();
+    const s = JSON.parse(JSON.stringify(state));
+    delete s.lastInjection;
+    delete s.lastEvolveResult;
+    delete s._terminalEventsThisRound;
+    return ensureArrays(s);
+  }
+
+  function getLayerMessageId(layer) {
+    try {
+      const ctx = SillyTavern.getContext();
+      const msg = ctx?.chat?.[layer];
+      return String(msg?.extra?.world_engine_memory_source_id || '').trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function loadHistory() {
+    const raw = window.WORLD_ENGINE_STORE.getItem(getHistoryKey());
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && Array.isArray(parsed.entries)) {
+          return {
+            version: Number(parsed.version) || 1,
+            baseline: parsed.baseline && typeof parsed.baseline === 'object' ? parsed.baseline : null,
+            entries: parsed.entries
+          };
+        }
+      } catch (e) {
+        console.warn('[世界引擎] 独立历史快照读取失败', e);
+      }
+    }
+    return { version: 1, baseline: null, entries: [] };
+  }
+
+  function saveHistory(history) {
+    const payload = {
+      version: 1,
+      baseline: history && history.baseline ? history.baseline : null,
+      entries: Array.isArray(history && history.entries) ? history.entries : []
+    };
+    window.WORLD_ENGINE_STORE.setItem(getHistoryKey(), JSON.stringify(payload));
+  }
+
+  function clearHistory() {
+    _rollbackGeneration++;
+    window.WORLD_ENGINE_STORE.removeItem(getHistoryKey());
+  }
+
+  function recordHistorySnapshot(state, options = {}) {
+    if (!state || typeof state !== 'object') return null;
+    if (window.STORY_ENGINE_PROJECTION?.active?.()) return null;
+    const rawLayer = options.layer != null ? options.layer : (state.chatLayer != null ? state.chatLayer : getChatLayer());
+    const layer = Number.isFinite(Number(rawLayer)) ? Math.max(0, Math.floor(Number(rawLayer))) : getChatLayer();
+    const history = loadHistory();
+
+    if (history.entries.length === 0 && !history.baseline) {
+      const before = options.beforeState && typeof options.beforeState === 'object' ? options.beforeState : null;
+      const hadBefore = options.hadStoredState === true && before && (Number(before.round) > 0 || before.chatLayer != null);
+      if (hadBefore) {
+        const baseLayer = Number.isFinite(Number(before.chatLayer))
+          ? Math.max(0, Math.floor(Number(before.chatLayer)))
+          : Math.max(-1, layer - 1);
+        const baseState = compactSnapshot(before);
+        if (baseLayer >= 0) baseState.chatLayer = baseLayer;
+        history.baseline = { layer: baseLayer, isEmpty: false, state: baseState };
+      } else {
+        history.baseline = { layer: -1, isEmpty: true, state: compactSnapshot(getDefaultState()) };
+      }
+    }
+
+    const snapshot = compactSnapshot(state);
+    snapshot.chatLayer = layer;
+    const entry = {
+      layer,
+      round: Number(snapshot.round) || 0,
+      state: snapshot,
+      sourceRefs: Array.isArray(options.sourceRefs) ? JSON.parse(JSON.stringify(options.sourceRefs)) : [],
+      messageId: getLayerMessageId(layer),
+      updatedAt: Date.now()
+    };
+
+    history.entries = history.entries.filter(item => item && Number.isFinite(Number(item.layer)) && Number(item.layer) < layer);
+    history.entries.push(entry);
+
+    while (history.entries.length > MAX_HISTORY_ENTRIES) {
+      const shifted = history.entries.shift();
+      if (shifted && shifted.state) {
+        history.baseline = {
+          layer: Number(shifted.layer),
+          isEmpty: false,
+          state: shifted.state
+        };
+      }
+    }
+
+    saveHistory(history);
+    return entry;
+  }
+
+  function updateCurrentHistorySnapshot(state) {
+    if (!state || typeof state !== 'object') return false;
+    if (window.STORY_ENGINE_PROJECTION?.active?.()) return false;
+    const history = loadHistory();
+    if (!history.entries.length) return false;
+    const layer = Number.isFinite(Number(state.chatLayer)) ? Math.floor(Number(state.chatLayer)) : null;
+    if (layer == null) return false;
+    const top = history.entries[history.entries.length - 1];
+    if (!top || Number(top.layer) !== layer) return false;
+    const snapshot = compactSnapshot(state);
+    snapshot.chatLayer = layer;
+    top.round = Number(snapshot.round) || 0;
+    top.state = snapshot;
+    top.updatedAt = Date.now();
+    saveHistory(history);
+    return true;
+  }
+
+  function isHistoryEntryValid(entry, targetMax, chat) {
+    if (!entry || typeof entry !== 'object') return false;
+    const layer = Number(entry.layer);
+    if (!Number.isFinite(layer) || layer < 0 || layer > targetMax) return false;
+    const msg = Array.isArray(chat) ? chat[layer] : null;
+    if (!msg) return false;
+
+    const refs = Array.isArray(entry.sourceRefs) ? entry.sourceRefs : [];
+    const timeline = window.MEMORY_ENGINE_TIMELINE;
+    if (refs.length > 0 && timeline && typeof timeline.auditRefs === 'function') {
+      const audit = timeline.auditRefs(refs);
+      if (Array.isArray(audit?.missing) && audit.missing.length > 0) return false;
+      const expectedEnd = Math.max(...refs.map(ref => Number(ref?.layer) || 0));
+      if (Number.isFinite(audit?.endLayer) && audit.endLayer !== expectedEnd) return false;
+    } else if (entry.messageId) {
+      const currentId = String(msg?.extra?.world_engine_memory_source_id || '').trim();
+      if (currentId && currentId !== entry.messageId) return false;
+    }
+    return true;
+  }
+
+  /** 独立模式下按当前聊天楼层自动回退世界状态、存档点、指纹与历史栈 */
+  function rollbackToLayer(maxLayer, _options = {}) {
+    if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+      return { rolledBack: false, reason: 'linked-active' };
+    }
+    let chat = [];
+    try {
+      const ctx = SillyTavern.getContext();
+      chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+    } catch (_) {
+      chat = [];
+    }
+    const targetMax = Number.isFinite(Number(maxLayer))
+      ? Math.floor(Number(maxLayer))
+      : (chat.length - 1);
+
+    // 1. 聊天已清空：全部重置
+    if (chat.length === 0 || targetMax < 0) {
+      const hadAnything = hasState() || !!restoreCheckpoint() || loadHistory().entries.length > 0;
+      clearState();
+      clearCheckpoint();
+      clearHistory();
+      saveFingerprint('0');
+      if (hadAnything) _rollbackGeneration++;
+      return { rolledBack: hadAnything, layer: -1, round: 0, cleared: true };
+    }
+
+    const history = loadHistory();
+    const entries = history.entries || [];
+    const currentHasState = hasState();
+    const currentState = currentHasState ? loadState() : null;
+    const currentStateLayer = currentState && Number.isFinite(Number(currentState.chatLayer))
+      ? Math.floor(Number(currentState.chatLayer))
+      : null;
+
+    // 2. 有独立历史栈：按时间线前缀校验，遇到首个失效层起截断
+    if (entries.length > 0) {
+      let validCount = 0;
+      while (validCount < entries.length && isHistoryEntryValid(entries[validCount], targetMax, chat)) {
+        validCount++;
+      }
+      const prunedCount = entries.length - validCount;
+      const stateAhead = currentStateLayer != null && currentStateLayer > targetMax;
+      if (prunedCount === 0 && !stateAhead) {
+        return { rolledBack: false };
+      }
+
+      _rollbackGeneration++;
+      const surviving = entries.slice(0, validCount);
+      if (surviving.length > 0) {
+        const target = surviving[surviving.length - 1];
+        const prev = surviving.length >= 2
+          ? surviving[surviving.length - 2]
+          : (history.baseline && !history.baseline.isEmpty && Number(history.baseline.layer) <= targetMax
+              ? history.baseline
+              : null);
+
+        const nextState = compactSnapshot(target.state);
+        nextState.chatLayer = Number(target.layer);
+        saveState(nextState);
+
+        if (prev && prev.state) {
+          const nextCp = compactSnapshot(prev.state);
+          if (Number.isFinite(Number(prev.layer)) && Number(prev.layer) >= 0) {
+            nextCp.chatLayer = Math.floor(Number(prev.layer));
+          }
+          saveCheckpoint(nextCp);
+        } else {
+          clearCheckpoint();
+        }
+        saveFingerprint(String(target.layer));
+        history.entries = surviving;
+        saveHistory(history);
+        return {
+          rolledBack: true,
+          layer: Number(target.layer),
+          round: Number(nextState.round) || 0,
+          prunedCount,
+          state: nextState
+        };
+      }
+
+      // 所有历史推演层都已删光：尝试回退到非空基线（旧存档升级/导入前基线）
+      const baseline = history.baseline;
+      if (baseline && !baseline.isEmpty && baseline.state && Number(baseline.layer) <= targetMax) {
+        const baseState = compactSnapshot(baseline.state);
+        const baseLayer = Number.isFinite(Number(baseline.layer)) && Number(baseline.layer) >= 0
+          ? Math.floor(Number(baseline.layer))
+          : -1;
+        if (baseLayer >= 0) baseState.chatLayer = baseLayer;
+        saveState(baseState);
+        clearCheckpoint();
+        saveFingerprint(baseLayer >= 0 ? String(baseLayer) : '');
+        history.entries = [];
+        saveHistory(history);
+        return {
+          rolledBack: true,
+          layer: baseLayer,
+          round: Number(baseState.round) || 0,
+          prunedCount,
+          resetToBaseline: true,
+          state: baseState
+        };
+      }
+
+      // 基线为空白世界，或删楼已越过最早可回退基线层：回到初始空白世界
+      const beyondBaseline = Boolean(baseline && !baseline.isEmpty && Number.isFinite(Number(baseline.layer)) && Number(baseline.layer) > targetMax);
+      const baselineLayer = beyondBaseline ? Math.floor(Number(baseline.layer)) : -1;
+      clearState();
+      clearCheckpoint();
+      clearHistory();
+      saveFingerprint('');
+      return {
+        rolledBack: true,
+        layer: -1,
+        round: 0,
+        prunedCount,
+        resetToBaseline: true,
+        cleared: true,
+        beyondBaseline,
+        baselineLayer
+      };
+    }
+
+    // 3. 兼容兜底（旧存档升级前尚无历史栈，仅有 state + checkpoint）
+    if (currentStateLayer != null && currentStateLayer > targetMax) {
+      const cp = restoreCheckpoint();
+      const cpLayer = cp && Number.isFinite(Number(cp.chatLayer)) ? Math.floor(Number(cp.chatLayer)) : null;
+      if (cp && cpLayer != null && cpLayer <= targetMax) {
+        _rollbackGeneration++;
+        const nextState = compactSnapshot(cp);
+        nextState.chatLayer = cpLayer;
+        saveState(nextState);
+        clearCheckpoint();
+        saveFingerprint(String(cpLayer));
+        return {
+          rolledBack: true,
+          layer: cpLayer,
+          round: Number(nextState.round) || 0,
+          fromCheckpoint: true,
+          state: nextState
+        };
+      }
+      if (!cp && Number(currentState?.round || 0) <= 1) {
+        _rollbackGeneration++;
+        clearState();
+        clearCheckpoint();
+        saveFingerprint('');
+        return {
+          rolledBack: true,
+          layer: -1,
+          round: 0,
+          cleared: true
+        };
+      }
+    }
+
+    return { rolledBack: false };
+  }
+
   /** 旧版独立锚点接口（层数语义统一为 chat.length - 1；当前计数不使用它）。 */
   function getAnchorLayer() {
     const saved = window.WORLD_ENGINE_STORE.getItem(getAnchorLayerKey());
@@ -812,6 +1126,7 @@ window.WORLD_ENGINE_CORE = (function() {
     clean.lastUpdated = { chatId, timestamp: Date.now() };
     ensureArrays(clean);
     saveState(clean);
+    clearHistory();
     return clean;
   }
 
@@ -822,6 +1137,8 @@ window.WORLD_ENGINE_CORE = (function() {
     inheritLegacyIds,
     ensureEventFields, getUserName, renderUserName,
     saveCheckpoint, restoreCheckpoint, clearCheckpoint, getAnchorLayer, setAnchorLayer,
+    loadHistory, saveHistory, clearHistory, recordHistorySnapshot, updateCurrentHistorySnapshot,
+    rollbackToLayer, getRollbackGeneration,
     getChatLayer, getChatFingerprint, saveFingerprint, loadFingerprint, isNewRound,
     getCleanExport, importState,
     cnToNum, parseStoryDay, getLastStoryDay, setLastStoryDay, filterDialogue,

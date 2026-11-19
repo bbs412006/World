@@ -630,10 +630,13 @@
           if (storyDay != null) evolveOpts.storyDay = Number(storyDay);
           if (opts.mode) evolveOpts.mode = opts.mode;
           const success = await evolution.evolve(state, opts.userMsg || '', aiMsg, evolveOpts);
-          if (core.getChatId() !== requestedChatId || SillyTavern.getContext()?.chat !== chat) return false;
+          if (core.getChatId() !== requestedChatId || SillyTavern.getContext()?.chat !== chat || chat.length !== requestedLength) return false;
           if (success) {
-            if (!window.STORY_ENGINE_PROJECTION?.active?.()) ledger.recordChanges(state);
-            if (storyDay != null && !window.STORY_ENGINE_PROJECTION?.active?.()) { state.time = Number(storyDay); core.saveState(state); }
+            if (!window.STORY_ENGINE_PROJECTION?.active?.()) {
+              ledger.recordChanges(state);
+              if (storyDay != null) { state.time = Number(storyDay); core.saveState(state); }
+              core.updateCurrentHistorySnapshot?.(state);
+            }
             // 世界 API 已经完成：先落库、更新注入并刷新世界界面，再开始记忆联动。
             // isEvolving 继续作为内部互斥锁保持 true，防止联动期间再次启动世界推演；
             // UI 运行态则在这里结束，让两个引擎的动画严格按先后阶段显示。
@@ -870,7 +873,10 @@
         if (chat.length === 0) {
           core.clearState();
           core.clearCheckpoint();
+          core.clearHistory?.();
           core.saveFingerprint(String(currentLayer));
+        } else {
+          core.rollbackToLayer?.(currentLayer);
         }
         let storedState = null;
         if (core.hasState()) {
@@ -923,12 +929,15 @@
       function onGenerationStarted(type, _opts, dryRun) {
         if (dryRun) return; // 预热轮不重判注入
         window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+        const isReroll = (type === 'swipe' || type === 'regenerate');
         if (window.STORY_ENGINE_PROJECTION?.active?.()) {
           clearAutoEvolveTimer();
           evolution.abort?.();
           window.STORY_ENGINE_HISTORY.prepareForGeneration({ type });
+        } else if (!isReroll) {
+          const rb = core.rollbackToLayer?.();
+          if (rb?.rolledBack && ui?.refresh) ui.refresh(true);
         }
-        const isReroll = (type === 'swipe' || type === 'regenerate');
         applyInjectionForCurrentRound({ isReroll });
         setTimeout(() => window.STORY_ENGINE_BRIDGE?.ensureInjectionOrder?.(), 0);
       }
@@ -942,12 +951,32 @@
         ctx.eventSource.on(ctx.event_types?.CHAT_LOADED || 'chat_loaded', guard('世界引擎', '聊天加载', onChatLoaded));
         ctx.eventSource.on(ctx.event_types?.MESSAGE_SWIPED || 'message_swiped', guard('世界引擎', '滑动重生成', onMessageSwiped));
         ctx.eventSource.on(ctx.event_types?.GENERATION_STARTED || 'generation_started', guard('世界引擎', '生成开始', onGenerationStarted));
-        for (const event of new Set([ctx.event_types?.MESSAGE_DELETED || 'message_deleted', ctx.event_types?.MESSAGE_EDITED || 'message_edited'])) {
+        const msgDeletedEvent = ctx.event_types?.MESSAGE_DELETED || 'message_deleted';
+        const msgEditedEvent = ctx.event_types?.MESSAGE_EDITED || 'message_edited';
+        for (const event of new Set([msgDeletedEvent, msgEditedEvent])) {
           ctx.eventSource.on(event, guard('联合存档', '正文变化', () => {
             window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-            if (!window.STORY_ENGINE_PROJECTION?.active?.()) return;
-            clearAutoEvolveTimer(); evolution.abort?.();
-            window.STORY_ENGINE_HISTORY.reconcile(); applyInjectionForCurrentRound();
+            if (window.STORY_ENGINE_PROJECTION?.active?.()) {
+              clearAutoEvolveTimer(); evolution.abort?.();
+              window.STORY_ENGINE_HISTORY.reconcile(); applyInjectionForCurrentRound();
+              return;
+            }
+            if (event !== msgDeletedEvent) return;
+            clearAutoEvolveTimer();
+            evolution.abort?.();
+            lastProcessedMessageKey = '';
+            const rb = core.rollbackToLayer?.();
+            applyInjectionForCurrentRound();
+            if (rb?.rolledBack) {
+              if (rb.cleared) {
+                setStatus(rb.beyondBaseline
+                  ? `已随删楼回退至初始世界（超过最早可回退层第 ${rb.baselineLayer} 层）`
+                  : '已随删楼回退至初始世界');
+              } else {
+                setStatus(`已随删楼回退至第 ${rb.layer} 层（第 ${rb.round} 轮）`);
+              }
+              if (ui?.refresh) ui.refresh(true);
+            }
           }));
         }
         ctx.eventSource.on(ctx.event_types?.GENERATION_STOPPED || 'generation_stopped', guard('联合存档', '取消生成', async () => {

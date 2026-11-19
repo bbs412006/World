@@ -1131,6 +1131,8 @@ ${JSON.stringify(sample || [], null, 2)}
     }
 
     delete state._terminalEventsThisRound;
+    const evolveStartChatId = core.getChatId();
+    const evolveStartRollbackGen = core.getRollbackGeneration?.() || 0;
     const hadStoredState = core.hasState();
     const backup = JSON.parse(JSON.stringify(state));
     // 基底由调用方显式指定（手动双按钮）：
@@ -1210,6 +1212,9 @@ ${JSON.stringify(sample || [], null, 2)}
       if (linked) {
         if (!history.validateWorldStep(storyToken)) throw new Error('正文、计划或联合基底已变化，旧世界结果已丢弃');
         if (!store.isTransactionActive?.()) { store.beginTransaction(); ownsTransaction = true; }
+      } else if (core.getChatId() !== evolveStartChatId || (core.getRollbackGeneration?.() || 0) !== evolveStartRollbackGen) {
+        _lastError = '聊天已切换或已随删楼回退，旧推演结果已丢弃';
+        return false;
       }
 
       // 随机对象先识别并清洗临时标记，再进入既有实体 ID 分配与合并流程。
@@ -1392,6 +1397,9 @@ ${JSON.stringify(sample || [], null, 2)}
       //     重 roll 后注入将拿到「重 roll 推演前」的状态而非「这层正文产生前」的，语义错位。
       //   旧代码无差别在 isNew=false 时打印「重roll/redo 轮次不变」，但上方基底选择已把自动重 roll
       //   错误 Object.assign(cp) 回存档点（症状B），现基底已纠正为不回存档点，此处轮次保持当前轮。
+      const explicitLayer = (!linked && Number.isFinite(Number(opts?.layer)))
+        ? Math.max(0, Math.floor(Number(opts.layer)))
+        : null;
       if (linked) {
         state.round = (Number(backup.round) || 0) + 1;
         if (opts?.storyDay != null) state.time = Number(opts.storyDay);
@@ -1403,13 +1411,30 @@ ${JSON.stringify(sample || [], null, 2)}
         // 首次推演不创建空白存档点；后续旧当前状态成为存档点并保留原层数。
         state.round++;                             // 只在 forward 涨轮次
         if (hadStoredState) core.saveCheckpoint(backup);
-        core.saveFingerprint(core.getChatFingerprint());
+        core.saveFingerprint(explicitLayer != null ? String(explicitLayer) : core.getChatFingerprint());
         console.log('[世界引擎] ✅ 推演完成，新轮次第', state.round, '轮，存档点已推进');
       } else {
         const label = (mode === 'redo') ? 'redo' : '自动重roll';
         console.log('[世界引擎] ✅ 推演完成（' + label + '），轮次不变：第', state.round, '轮');
       }
-      if (linked) core.saveState(state); else core.saveStateWithLayer(state);
+      if (linked) {
+        core.saveState(state);
+      } else {
+        if (explicitLayer != null) {
+          state.chatLayer = explicitLayer;
+          core.saveState(state);
+        } else {
+          core.saveStateWithLayer(state);
+        }
+        const preLayerState = isForward ? backup : (core.restoreCheckpoint() || backup);
+        const preHadStored = isForward ? hadStoredState : Boolean(core.restoreCheckpoint());
+        core.recordHistorySnapshot?.(state, {
+          layer: state.chatLayer,
+          beforeState: preLayerState,
+          hadStoredState: preHadStored,
+          sourceRefs: opts?.sourceRefs
+        });
+      }
       if (linked) {
         const commit = history.commitWorldStep(storyToken, { worldState: state,
           privateEvents: storyResult?.privateEvents || [], observations: storyResult?.observations || [] });
@@ -1439,12 +1464,14 @@ ${JSON.stringify(sample || [], null, 2)}
       const pendingNear = state.nearEvent && state.nearEvent.pending
         ? JSON.parse(JSON.stringify(state.nearEvent))
         : null;
-      // 恢复前状态；恢复语句本身可能抛错（如 IDB 在内存压力下写失败），吞掉以免跳过 finally 复位
+      // 恢复前状态；若期间已切换聊天或已发生删楼回退，绝不用旧 backup 覆盖新状态
       try {
-        Object.assign(state, backup);
-        if (pendingDistant) state.distantEvent = pendingDistant;
-        if (pendingNear) state.nearEvent = pendingNear;
-        core.saveState(state);
+        if (core.getChatId() === evolveStartChatId && (core.getRollbackGeneration?.() || 0) === evolveStartRollbackGen) {
+          Object.assign(state, backup);
+          if (pendingDistant) state.distantEvent = pendingDistant;
+          if (pendingNear) state.nearEvent = pendingNear;
+          core.saveState(state);
+        }
       } catch (_) {}
       return false;
     } finally {
@@ -1533,9 +1560,10 @@ ${JSON.stringify(sample || [], null, 2)}
     }
     const totalBatches = batches.length;
 
-    // 4) 清空重来：丢弃当前世界状态与存档点，让第 1 批从空白世界起推
+    // 4) 清空重来：丢弃当前世界状态、存档点与独立历史快照，让第 1 批从空白世界起推
     core.clearState();
     core.clearCheckpoint();
+    core.clearHistory?.();
 
     _backfillRunning = true;
     _backfillAborted = false;
@@ -1578,7 +1606,7 @@ ${JSON.stringify(sample || [], null, 2)}
             return { done: false, reason: 'chat-changed', totalBatches, completedBatches, failedAt: b + 1 };
           }
           const state = core.loadState();
-          ok = await evolve(state, '', aiMsg, { mode: 'forward', dialogueText,
+          ok = await evolve(state, '', aiMsg, { mode: 'forward', dialogueText, layer: lastChatIdx,
             sourceRefs: window.MEMORY_ENGINE_TIMELINE?.captureRange?.(startChatIdx, lastChatIdx) || [] });
           if (ok || _backfillAborted) break;
           if (attempt < retries) {
@@ -1603,6 +1631,7 @@ ${JSON.stringify(sample || [], null, 2)}
         if (window.WORLD_ENGINE_LEDGER) {
           try { window.WORLD_ENGINE_LEDGER.recordChanges(cur); } catch (e) {}
         }
+        core.updateCurrentHistorySnapshot?.(cur);
         onProgress({ phase: 'batch-done', batch: b + 1, totalBatches,
           layerFrom: pStart + 1, layerTo: pEnd + 1, attempt: lastAttempt, ok: true, round: cur.round });
       }

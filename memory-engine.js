@@ -901,18 +901,32 @@ window.MEMORY_ENGINE = (function() {
       const factText = Array.from(clean(item.fact || item.content)).slice(0, 120).join('');
       const keywords = unique(item.keywords);
       if (action === 'resolve') {
-        for (const existing of state.ongoing_facts) {
-          if (existing.status === 'resolved') continue;
-          const matchById = itemId && existing.id === itemId;
-          const matchByKey = !itemId
-            && normalized(existing.subject) === normalized(subject)
-            && normalized(existing.category) === normalized(category)
-            && (!factText || normalized(existing.fact) === normalized(factText) || existing.fact.includes(factText));
-          if (matchById || matchByKey) {
-            existing.status = 'resolved';
-            existing.updatedLayer = targetLayer;
+        if (itemId) {
+          const target = state.ongoing_facts.find(existing => existing.status !== 'resolved' && existing.id === itemId);
+          if (target) {
+            target.status = 'resolved';
+            target.updatedLayer = targetLayer;
             changed++;
           }
+          continue;
+        }
+        // 缺少 id 时禁止空文本或过短片段通配完结同一主体下的多条事实，且最多完结最匹配的一条
+        const factNorm = normalized(factText);
+        if (factNorm.length < 4) continue;
+        const candidates = state.ongoing_facts.filter(existing =>
+          existing.status !== 'resolved'
+          && normalized(existing.subject) === normalized(subject)
+          && normalized(existing.category) === normalized(category)
+        );
+        const matched = candidates.find(existing => normalized(existing.fact) === factNorm)
+          || candidates.find(existing => {
+            const existingNorm = normalized(existing.fact);
+            return existingNorm.includes(factNorm) || factNorm.includes(existingNorm);
+          });
+        if (matched) {
+          matched.status = 'resolved';
+          matched.updatedLayer = targetLayer;
+          changed++;
         }
         continue;
       }
@@ -1493,27 +1507,74 @@ window.MEMORY_ENGINE = (function() {
           chatLayer: before.chatLayer ?? null
         };
       }
-      if ((options?.replaceOverlappingRange === true || options?.replaceOverlappingMemory === true) && tasks.memory) {
-        const mStart = Number(tasks.memory.startLayer) || 0;
-        const mEnd = Number(tasks.memory.endLayer) || mStart;
-        const mRefs = Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
-          ? tasks.memory.sourceRefs
-          : (timelineApi()?.captureRange?.(mStart, mEnd) || []);
-        const mRefIds = new Set(mRefs.map(ref => clean(ref?.messageId)).filter(Boolean));
-        tlBefore.nodes = tlBefore.nodes.filter(node => {
-          if (!isCurrentChatRecord(node)) return true;
-          // 移除位于当前重填起点及之后的旧手动快照，防止 replayTimeline 末尾用旧快照把新提取的人物/实体/事实/弧光全部清空
-          if (node.kind === 'manual_snapshot') {
-            return Number(node.endLayer) < mStart;
-          }
-          if (node.kind !== 'memory') return true;
-          const overlapsRange = Number(node.startLayer) <= mEnd && Number(node.endLayer) >= mStart;
-          const overlapsRef = mRefIds.size > 0 && (node.sourceRefs || []).some(ref => mRefIds.has(clean(ref?.messageId)));
-          return !(overlapsRange || overlapsRef);
-        });
-      }
       const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
         ? timelineApi()?.digestRefs?.(tasks.memory.sourceRefs) || '' : '';
+      const hasVisibleBefore = Boolean(
+        (before?.personal_memory?.length || 0) > 0
+        || (before?.ongoing_facts?.length || 0) > 0
+        || (before?.character_arcs?.length || 0) > 0
+        || ENTITY_TYPES.some(t => (before?.entity_memory?.[t]?.length || 0) > 0)
+      );
+      const hasBlockingEmptyManualSnapshot = !hasVisibleBefore
+        && tlBefore.nodes.some(node => isCurrentChatRecord(node) && node.kind === 'manual_snapshot');
+      const allChatMsgs = chat();
+      const recordAiLayersOf = record => {
+        const layers = [];
+        if (Array.isArray(record?.sourceRefs) && record.sourceRefs.length) {
+          for (const ref of record.sourceRefs) {
+            const idx = Number(ref?.layer);
+            if (Number.isFinite(idx) && ((allChatMsgs[idx] && !allChatMsgs[idx].is_user) || ref?.role === 'assistant')) {
+              layers.push(idx);
+            }
+          }
+        }
+        if (!layers.length) {
+          const s = Math.max(0, Number(record?.startLayer) || 0);
+          const e = Math.max(s, Number(record?.endLayer) || s);
+          for (let idx = s; idx <= e; idx++) {
+            if (allChatMsgs[idx] && !allChatMsgs[idx].is_user) layers.push(idx);
+          }
+        }
+        return layers;
+      };
+      const isContainedInBounds = (record, boundStart, boundEnd) => {
+        const aiLayers = recordAiLayersOf(record);
+        if (aiLayers.length) return aiLayers.every(idx => idx >= boundStart && idx <= boundEnd);
+        return Number(record?.startLayer) >= boundStart && Number(record?.endLayer) <= boundEnd;
+      };
+
+      // 与自动填表保持同一套纯增量写入原则：
+      // 1) 一键追平 / 非覆盖范围填表 / 自动填表：绝不删除任何跨楼层或不同来源的已有记忆节点；
+      //    仅在精确同批（相同 sourceDigest）旧节点为空/未提取，或被空 manual_snapshot 清空时，替换该精确同批节点；
+      // 2) 仅当用户显式勾选「覆盖重填」（overwriteRangeBounds）时，才替换完全落在覆盖范围内的旧节点，绝不误删跨区间旧节点。
+      if (tasks.memory && (options?.overwriteRangeBounds || options?.replaceExactSameBatch === true || hasBlockingEmptyManualSnapshot)) {
+        const mStart = Number(tasks.memory.startLayer) || 0;
+        const mEnd = Number(tasks.memory.endLayer) || mStart;
+        const ovStart = options?.overwriteRangeBounds ? Number(options.overwriteRangeBounds.start) : null;
+        const ovEnd = options?.overwriteRangeBounds ? Number(options.overwriteRangeBounds.end) : null;
+        tlBefore.nodes = tlBefore.nodes.filter(node => {
+          if (!isCurrentChatRecord(node)) return true;
+          if (node.kind === 'manual_snapshot') {
+            if (options?.overwriteRangeBounds || hasBlockingEmptyManualSnapshot) {
+              return Number(node.endLayer) < mStart;
+            }
+            return true;
+          }
+          if (node.kind !== 'memory') return true;
+          const sameDigest = Boolean(memorySourceDigest && clean(node.sourceDigest) === memorySourceDigest);
+          if (options?.overwriteRangeBounds) {
+            const overlapsCurrentBatch = Number(node.startLayer) <= mEnd && Number(node.endLayer) >= mStart;
+            const containedInBatch = isContainedInBounds(node, mStart, mEnd);
+            const containedInOverwrite = ovStart !== null && ovEnd !== null
+              && overlapsCurrentBatch && isContainedInBounds(node, ovStart, ovEnd);
+            return !(sameDigest || containedInBatch || containedInOverwrite);
+          }
+          if (sameDigest && (!nodeHasMemoryContent(node) || node.memoryExtracted !== true || hasBlockingEmptyManualSnapshot)) {
+            return false;
+          }
+          return true;
+        });
+      }
       const existingStoredNode = memorySourceDigest ? ensureTimelineState(next).nodes.find(node =>
         node.kind === 'memory' && node.status === 'valid' && clean(node.sourceDigest) === memorySourceDigest
       ) : null;
@@ -1536,8 +1597,8 @@ window.MEMORY_ENGINE = (function() {
         : 0;
       if (applyMemory) {
         const mStart = Number(tasks.memory?.startLayer);
-        if (Number.isFinite(mStart)) {
-          // 清理位于当前新写入楼层及之后的旧手动快照，避免新写入节点在 replayTimeline 时被末尾旧快照覆盖清空
+        if (Number.isFinite(mStart) && (options?.overwriteRangeBounds || hasBlockingEmptyManualSnapshot)) {
+          // 清理位于当前新写入楼层及之后的旧空手动快照，避免新写入节点在 replayTimeline 时被末尾旧快照覆盖清空
           tlBefore.nodes = tlBefore.nodes.filter(node =>
             !(isCurrentChatRecord(node) && node.kind === 'manual_snapshot' && Number(node.endLayer) >= mStart)
           );
@@ -1553,13 +1614,16 @@ window.MEMORY_ENGINE = (function() {
         const endLayer = Number(tasks.small.endLayer) || startLayer;
         const sourceRefs = clone(tasks.small.sourceRefs || timelineApi()?.captureRange?.(startLayer, endLayer) || []);
         const sourceDigest = timelineApi()?.digestRefs?.(sourceRefs) || '';
-        const newRefIds = new Set(sourceRefs.map(ref => clean(ref?.messageId)).filter(Boolean));
-        if (options?.replaceOverlappingRange === true) {
+        if (options?.overwriteRangeBounds) {
+          const ovStart = Number(options.overwriteRangeBounds.start);
+          const ovEnd = Number(options.overwriteRangeBounds.end);
           eventMemory.small_summaries = eventMemory.small_summaries.filter(item => {
             if (!isDialogueSummary(item) || !isCurrentChatRecord(item)) return true;
-            const overlapsRange = Number(item.startLayer) <= endLayer && Number(item.endLayer) >= startLayer;
-            const overlapsRef = newRefIds.size > 0 && (item.sourceRefs || []).some(ref => newRefIds.has(clean(ref?.messageId)));
-            return !(overlapsRange || overlapsRef);
+            const sameDigest = Boolean(sourceDigest && clean(item.sourceDigest) === sourceDigest);
+            const overlapsCurrentBatch = Number(item.startLayer) <= endLayer && Number(item.endLayer) >= startLayer;
+            const containedInBatch = isContainedInBounds(item, startLayer, endLayer);
+            const containedInOverwrite = overlapsCurrentBatch && isContainedInBounds(item, ovStart, ovEnd);
+            return !(sameDigest || containedInBatch || containedInOverwrite);
           });
         }
         const existingSummary = sourceDigest ? eventMemory.small_summaries.find(item =>
@@ -1611,7 +1675,7 @@ window.MEMORY_ENGINE = (function() {
       const added = addedPersonal + entityChanges.entities + entityChanges.history + entityChanges.descriptions + factChanges + arcChanges;
       let finalState = next;
       if (tasks.memory) {
-        if (applyMemory || options?.replaceOverlappingRange === true) {
+        if (applyMemory || options?.overwriteRangeBounds) {
           finalState = replayTimeline(next);
         }
         const prevChatLayer = finalState.chatLayer !== null && finalState.chatLayer !== '' && Number.isFinite(Number(finalState.chatLayer))
@@ -3606,6 +3670,35 @@ window.MEMORY_ENGINE = (function() {
     }
   }
 
+  // 统一的逐层/逐批自动填表执行内核：一键追平、指定范围填表共用自动填表的纯增量写入逻辑
+  async function runIncrementalFillBatch(batch, options = {}) {
+    const st = settings();
+    const overwrite = options.overwrite === true;
+    const includeMemory = options.includeMemory !== false;
+    const curState = data().loadState();
+    const curSmall = overwrite ? new Set() : coveredDialogueAiLayersSet(curState);
+    const curMem = (overwrite || !includeMemory) ? curSmall : coveredMemoryAiLayersSet(curState);
+    const needSmall = overwrite || batch.aiLayers.some(layer => !curSmall.has(layer));
+    // 只要开启全要素填表且本批需要补填纪要，就在同一次请求中一并提取人物、实体、持续事实与角色弧光（零额外调用），绝不退化成仅请求纪要
+    const needMemory = includeMemory && (overwrite || needSmall || batch.aiLayers.some(layer => !curMem.has(layer)));
+    if (!needSmall && !needMemory) return { skipped: true, addedSmall: 0 };
+    const tasks = {
+      ...(needMemory ? { memory: batch } : {}),
+      ...(needSmall ? { small: batch } : {})
+    };
+    const hasBounds = overwrite && Number.isFinite(Number(options.rangeStart)) && Number.isFinite(Number(options.rangeEnd));
+    return runTasks(tasks, {
+      baseState: curState,
+      layer: batch.endLayer,
+      retries: options.retries ?? st.backfillRetries,
+      saveCheckpoint: false,
+      allowWhileBackfill: true,
+      replaceExactSameBatch: overwrite || options.replaceEmptyOrSuperseded === true,
+      overwriteRangeBounds: hasBounds ? { start: Number(options.rangeStart), end: Number(options.rangeEnd) } : null,
+      retryEmptyMemory: true
+    });
+  }
+
   async function fillSummaryRange(options = {}) {
     const st = settings(), all = chat();
     if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
@@ -3621,7 +3714,8 @@ window.MEMORY_ENGINE = (function() {
     const endLayer = Math.min(maxChatLayer, rawEnd > 0 ? rawEnd : (options.endLayer === 0 && options.explicitZeroEnd ? 0 : maxChatLayer));
     if (endLayer < startLayer) throw new Error(`结束楼层（${endLayer}）不能小于起始楼层（${startLayer}）`);
 
-    const overwrite = options.overwrite !== false;
+    // 默认按纯增量逐层自动填表补漏；仅当用户显式传 overwrite: true 时才覆盖区间内已有记录
+    const overwrite = options.overwrite === true;
     const includeMemory = options.includeMemory !== false;
     const batchSize = Math.max(1, parseInt(options.batchSize ?? st.smallSummaryEveryX) || 1);
     const stateBefore = data().loadState();
@@ -3645,25 +3739,15 @@ window.MEMORY_ENGINE = (function() {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const batch = batches[i];
         setSummaryBackfillStatus(i, batches.length, `正在范围填表 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
-        const curState = data().loadState();
-        const curSmall = overwrite ? new Set() : coveredDialogueAiLayersSet(curState);
-        const curMem = (overwrite || !includeMemory) ? new Set() : coveredMemoryAiLayersSet(curState);
-        const needSmall = overwrite || batch.aiLayers.some(layer => !curSmall.has(layer));
-        const needMemory = includeMemory && (overwrite || needSmall || batch.aiLayers.some(layer => !curMem.has(layer)));
-        const tasks = {
-          ...(needMemory ? { memory: batch } : {}),
-          ...(needSmall ? { small: batch } : {})
-        };
-        const res = await runTasks(tasks, {
-          baseState: curState,
-          layer: batch.endLayer,
+        const res = await runIncrementalFillBatch(batch, {
+          overwrite,
+          includeMemory,
+          rangeStart: startLayer,
+          rangeEnd: endLayer,
           retries: st.backfillRetries,
-          saveCheckpoint: false,
-          allowWhileBackfill: true,
-          replaceOverlappingRange: overwrite,
-          replaceOverlappingMemory: needMemory,
-          retryEmptyMemory: true
+          replaceEmptyOrSuperseded: true
         });
+        if (res?.skipped) continue;
         completedBatches++;
         addedSmall += Number(res?.addedSmall || 0);
       }
@@ -3754,26 +3838,14 @@ window.MEMORY_ENGINE = (function() {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const batch = batches[i];
         setSummaryBackfillStatus(i, batches.length, `正在追平填表 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
-        const curState = data().loadState();
-        const curSmall = coveredDialogueAiLayersSet(curState);
-        const curMem = includeMemory ? coveredMemoryAiLayersSet(curState) : curSmall;
-        const needSmall = batch.aiLayers.some(layer => !curSmall.has(layer));
-        // 只要开启全要素追平且本批需要补填纪要，就在同一次请求中一并提取/同步人物、实体、持续事实与角色弧光（零额外调用），绝不退化成仅请求阶段纪要
-        const needMemory = includeMemory && (needSmall || batch.aiLayers.some(layer => !curMem.has(layer)));
-        if (!needSmall && !needMemory) continue;
-        const tasks = {
-          ...(needMemory ? { memory: batch } : {}),
-          ...(needSmall ? { small: batch } : {})
-        };
-        const res = await runTasks(tasks, {
-          baseState: curState,
-          layer: batch.endLayer,
+        // 一键追平严格走纯增量逐层自动填表，绝不删除任何已有的旧楼层记忆节点
+        const res = await runIncrementalFillBatch(batch, {
+          overwrite: false,
+          includeMemory,
           retries: st.backfillRetries,
-          saveCheckpoint: false,
-          allowWhileBackfill: true,
-          replaceOverlappingMemory: needMemory,
-          retryEmptyMemory: true
+          replaceEmptyOrSuperseded: true
         });
+        if (res?.skipped) continue;
         completedBatches++;
         addedSmall += Number(res?.addedSmall || 0);
       }
