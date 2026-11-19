@@ -201,7 +201,8 @@ window.STORY_ENGINE_HISTORY = (function() {
       return audit.valid && !audit.synthetic && !audit.inherited && audit.refs.every(ref => ref.chatId === id() && ref.layer < length) &&
         event.evidence?.length && event.evidence.every(proof => {
           const ref = audit.refs.find(item => item.messageId === proof.messageId);
-          return ref && proof.hash === ref.hash && clean(proof.quote) && String(context().chat[ref.layer]?.mes || '').includes(proof.quote);
+          const matchFn = window.OUTLINE_ENGINE_PROMPT?.matchQuote || ((src, q) => String(src || '').includes(q));
+      return ref && proof.hash === ref.hash && clean(proof.quote) && matchFn(String(context().chat[ref.layer]?.mes || ''), proof.quote);
         });
     });
     if (!retained.length) return frame;

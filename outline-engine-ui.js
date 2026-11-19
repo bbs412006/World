@@ -413,12 +413,12 @@ window.OUTLINE_ENGINE_UI = (function() {
         <label class="we-outline-check we-outline-check-inline"><input type="checkbox" data-outline-node-field="required" data-outline-nid="${h(node.id)}"${node.required !== false ? ' checked' : ''}><span>必要节点（作章末推进门槛）</span></label>
       </div>
       ${chaptersOf(plan).length ? choiceList('关联章节（只标所属章回，不限制跨章调度）', node.chapterIds, chapterChoices, `data-outline-node-list="chapterIds" data-outline-nid="${h(node.id)}"`) : ''}
-      ${editorField('剧情意图 / 发展方向', node.intent, `data-outline-node-field="intent" data-outline-nid="${h(node.id)}"`, true, '想推动怎样的遭遇、冲突或氛围')}
-      ${editorField('完成判据（留空则需手动标完成）', node.completionCriteria, `data-outline-node-field="completionCriteria" data-outline-nid="${h(node.id)}"`, true, '正文明确写出哪些条件满足后算完成')}
+      ${editorField('剧情意图 / 发展方向（作者后台可见）', node.intent, `data-outline-node-field="intent" data-outline-nid="${h(node.id)}"`, true, '想推动怎样的遭遇、冲突或幕后安排（不会直接透露给正文）')}
+      ${editorField('可供正文使用的公开提示（注入正文引导）', node.publicHint, `data-outline-node-field="publicHint" data-outline-nid="${h(node.id)}"`, true, '给正文 AI 看的自然方向提示，不剧透结局；留空则仅用节点标题')}
+      ${editorField('完成判据（留空则仅支持手动标完成）', node.completionCriteria, `data-outline-node-field="completionCriteria" data-outline-nid="${h(node.id)}"`, true, '正文明确写出哪些事实或结果后自动判完成')}
       <details class="we-outline-adv-fold" data-outline-adv-key="${h(node.id)}"${advOpen ? ' open' : ''}>
-        <summary data-outline-action="toggle-adv-fold" data-outline-nid="${h(node.id)}">高级调度与防剧透设置（公开提示、前置依赖、解锁与线索）</summary>
+        <summary data-outline-action="toggle-adv-fold" data-outline-nid="${h(node.id)}">高级调度与防剧透设置（前置依赖、执行来源、解锁与线索揭示）</summary>
         <div class="we-outline-adv-body">
-          ${editorField('可供正文使用的公开提示', node.publicHint, `data-outline-node-field="publicHint" data-outline-nid="${h(node.id)}"`, true, '留空则用节点标题；暗线建议填不剧透的探索提示')}
           ${editorField('作者备注', node.notes, `data-outline-node-field="notes" data-outline-nid="${h(node.id)}"`, true)}
           <div class="we-outline-form-grid">
             ${selectControl('执行主体', node.actorKind || 'player', `data-outline-node-field="actorKind" data-outline-nid="${h(node.id)}"`, [['player', '玩家相关'], ['npc', 'NPC后台']])}
@@ -449,6 +449,9 @@ window.OUTLINE_ENGINE_UI = (function() {
     const chapters = (node.chapterIds || []).map(id => chaptersOf(current.plan).find(ch => ch.id === id)?.title || id);
     const sched = schedContext ? shortScheduleSummary(node, status, schedContext.narrative, schedContext.world) : { text: '', tone: '' };
     const snippet = clean(node.intent || node.publicHint || '');
+    const isClosed = ['completed', 'skipped'].includes(status);
+    const manualOnly = !isClosed && !clean(node.completionCriteria);
+    const worldOff = !isClosed && node.completionSource === 'world' && window.WORLD_ENGINE_API?.getSettings?.()?.engineEnabled === false;
 
     return `<article class="we-outline-node we-outline-node-${h(kind)} we-outline-node-status-${h(status)}${expanded ? '' : ' is-collapsed'}" data-outline-node="${h(node.id)}">
       <div class="we-outline-node-head">
@@ -459,6 +462,8 @@ window.OUTLINE_ENGINE_UI = (function() {
             <span class="we-outline-badge we-outline-badge-${h(kind)}">${h(TRACK_LABELS[kind] || '剧情')}</span>
             <span class="we-outline-status we-outline-status-${h(status)}">${h(STATUS_LABELS[status] || status)}</span>
             ${node.required === false ? '<span class="we-outline-badge">可选</span>' : ''}
+            ${manualOnly ? '<span class="we-outline-badge" title="未填写完成判据，后台不会自动判完成；可在编辑中补填判据或手动切换状态">仅手动完成</span>' : ''}
+            ${worldOff ? '<span class="we-outline-badge" title="此节点设为仅由世界后台事实完成，但当前世界引擎已关闭；可开启世界引擎或在编辑中改为“正文或世界事实”">需世界引擎</span>' : ''}
             ${sched.text ? `<span class="we-outline-sched-pill is-${h(sched.tone)}">${h(sched.text)}</span>` : ''}
           </div>
         </div>
@@ -546,12 +551,23 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (!enabled) guidanceText = '模块尚未启用；启用后将在每次生成正文前，按系统提示词柔性注入选中节点的公开指引。';
     else if (settings().injectIntoPrompt === false) guidanceText = '“注入正文指导”开关已关闭，当前不会向正文注入任何大纲内容。';
     else {
-      const chosen = narrSched.selected || [];
-      const publicChosen = chosen.filter(node => node.visibility !== 'private');
-      const clues = validClues.filter(c => c.available && c.publicHint);
-      guidanceText = publicChosen.length || clues.length
-        ? `【本轮拟进入正文的公开内容】\n${publicChosen.map(n => `- ${n.trackId === 'legacy-main' ? n.title : (n.publicHint || n.title)}`).join('\n')}${clues.length ? `\n可发现线索：${clues.map(c => c.publicHint).join('；')}` : ''}`
-        : '本轮暂无满足前置条件的公开节点或可发现线索需要注入正文。';
+      let liveGuidance = '';
+      try { liveGuidance = clean(engine()?.buildNarrativeGuidance?.()); } catch (_) {}
+      if (liveGuidance) {
+        guidanceText = liveGuidance;
+      } else {
+        const chosen = narrSched.selected || [];
+        const publicChosen = chosen.filter(node => node.visibility !== 'private');
+        const clues = validClues.filter(c => c.available && c.publicHint);
+        const fmt = n => {
+          if (n.trackId === 'legacy-main') return `- ${n.title}`;
+          const t = clean(n.title), ph = clean(n.publicHint);
+          return t && ph && t !== ph && !ph.includes(t) ? `- ${t}：${ph}` : `- ${ph || t}`;
+        };
+        guidanceText = publicChosen.length || clues.length
+          ? `【本轮拟进入正文的公开内容】\n${publicChosen.map(fmt).join('\n')}${clues.length ? `\n可发现线索：${clues.map(c => c.publicHint).join('；')}` : ''}`
+          : '本轮暂无满足前置条件的公开节点或可发现线索需要注入正文。';
+      }
     }
     const lastFull = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
     const orderLine = lastFull

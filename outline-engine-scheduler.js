@@ -92,7 +92,8 @@ window.OUTLINE_ENGINE_SCHEDULER = (function() {
         // 自然语言条件只有在调用方提供可复核的原文证据时才有确定值。
         const record = ctx.conditionEvidence?.[condition.text], messages = new Map((ctx.messages || []).map(item => [item.messageId, String(item.content ?? item.mes ?? '')]));
         const proofs = record?.evidence;
-        if (typeof record?.value === 'boolean' && Array.isArray(proofs) && proofs.length && proofs.every(proof => proof.messageId && clean(proof.quote) && messages.get(proof.messageId)?.includes(proof.quote))) return output(record.value, 'verified_condition_evidence');
+        const matchFn = window.OUTLINE_ENGINE_PROMPT?.matchQuote || ((src, q) => String(src || '').includes(q));
+        if (typeof record?.value === 'boolean' && Array.isArray(proofs) && proofs.length && proofs.every(proof => proof.messageId && clean(proof.quote) && matchFn(messages.get(proof.messageId), proof.quote))) return output(record.value, 'verified_condition_evidence');
         return unknown('condition_requires_configuration_or_evidence');
       }
     }

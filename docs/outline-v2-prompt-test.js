@@ -41,4 +41,16 @@ const organized = prompts.parseOrganizeResponse({ title: '私密故事', synopsi
 assert.strictEqual(organized.publicSynopsis, '', 'v2不得把完整作者简介复制到正文投影');
 assert.deepStrictEqual(organized.nodes[0].dependencies, []); assert.strictEqual(organized.nodes[0].completionCriteria, '');
 assert.strictEqual(organized.nodes[0].disclosure.condition.type, 'unconfigured');
+
+// 宽松 JSON 修复（<think> 块、字符串内裸换行、注释与尾逗号）与引文标点/省略容错校验
+const looseRaw = `<think>模型思考中 {"fake": 1}</think>\n\`\`\`json\n{\n  // 核对结果注释\n  "nodeUpdates": [\n    {\n      "nodeId": "cargo",\n      "status": "completed",\n      "reason": "已读完\n第二行说明",\n      "evidence": [{ "messageId": "m1", "quote": "醒来后, 她读完真实货单." }],\n    },\n  ],\n  "contacts": [\n    {\n      "clueId": "open",\n      "actorId": "阿青",\n      "evidence": [{ "messageId": "m2", "quote": "阿青亲手打开……确认此前的怀疑" }],\n    },\n  ],\n}\n\`\`\``;
+const looseChecked = prompts.parseCheckResponse(looseRaw, options);
+assert.deepStrictEqual(looseChecked.nodeUpdates.map(item => item.nodeId), ['cargo'], '全半角标点与空白差异不应误杀真实引文，且宽松JSON应正常解析');
+assert.ok(messages[0].content.includes(looseChecked.nodeUpdates[0].evidence[0].quote), '容错匹配后应还原为原文精确子串以便后续离线审计');
+assert.strictEqual(looseChecked.contacts.length, 1, '长句中间带省略号衔接的真实引文应能按序命中');
+assert.ok(messages[1].content.includes(looseChecked.contacts[0].evidence[0].quote), '省略号引文匹配后也应还原为原文精确切片');
+assert.strictEqual(prompts.matchQuote('普通正文内容', '完全捏造……不存在的话'), false, '捏造的省略号引文必须拒绝');
+const orgPrompt = prompts.buildOrganizePrompt('第一章：先找守门人打听黑篷船，再夜探旧宅夺回账簿。');
+assert.ok(orgPrompt.includes('不得自行发明') && orgPrompt.includes('同义提炼') && orgPrompt.includes('publicHint'), '整理Prompt应引导从原文目标提炼可验证判据、先后依赖与公开提示');
+
 console.log('outline v2 prompt/evidence/temporal tests passed');

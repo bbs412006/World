@@ -50,7 +50,9 @@ function harness(options = {}) {
     WORLD_ENGINE_UI: { refresh() {} }, OUTLINE_ENGINE_UI: { refresh() {} } };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
-  for (const name of ['memory-engine-timeline.js', 'outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-prompt.js', 'outline-engine.js']) {
+  const files = ['memory-engine-timeline.js', 'outline-engine-settings.js', 'outline-engine-data.js',
+    ...(options.withScheduler ? ['outline-engine-scheduler.js'] : []), 'outline-engine-prompt.js', 'outline-engine.js'];
+  for (const name of files) {
     vm.runInContext(fs.readFileSync(path.join(root, name), 'utf8'), sandbox, { filename: name });
   }
   const config = sandbox.OUTLINE_ENGINE_SETTINGS, data = sandbox.OUTLINE_ENGINE_DATA, engine = sandbox.OUTLINE_ENGINE;
@@ -378,10 +380,62 @@ async function testImportedSourceAudit() {
   }
 }
 
+async function testSchedulerFullEligibleAndUnseenCatchup() {
+  // 真实加载 outline-engine-scheduler.js，验证：
+  // 1) 当 narrativeLimit=2 时，排在第 5 位的已解锁合格公开支线节点提前完成也能被 checkNow 正常检查命中（不被 2 个注入预算截断）
+  // 2) 当自动检查关闭连续聊了 5 轮（超出 checkEveryX=3）再点 checkNow 时，第 1 轮（L2）完成的节点不会因死切最后 3 轮而漏检
+  // 3) v2 公开节点同时含 title 与 publicHint 时，注入包含章节名与「标题：公开提示」，且绝不泄露私密 intent
+  const customV2 = {
+    title: '青州水路',
+    synopsis: 'PRIVATE_AUTHOR_SYNOPSIS',
+    publicSynopsis: '追查渡口异动',
+    chapters: [{ id: 'c1', title: '风起青州渡', goal: '摸清渡口底细', exitNodeIds: ['m1'] }],
+    tracks: [
+      { id: 't-main', kind: 'main', title: '主线', priority: 10 },
+      { id: 't-side', kind: 'side', title: '支线', priority: 1 }
+    ],
+    nodes: [
+      { id: 'm1', trackId: 't-main', chapterIds: ['c1'], title: '询问守门人', intent: 'PRIVATE_INTENT_M1', publicHint: '三号码头守门人似知昨夜船讯', completionCriteria: '得知黑篷船消息', required: true },
+      { id: 's1', trackId: 't-side', chapterIds: ['c1'], title: '支线一', intent: '支线1', publicHint: '提示1', completionCriteria: '完成支线一', required: false },
+      { id: 's2', trackId: 't-side', chapterIds: ['c1'], title: '支线二', intent: '支线2', publicHint: '提示2', completionCriteria: '完成支线二', required: false },
+      { id: 's3', trackId: 't-side', chapterIds: ['c1'], title: '支线三', intent: '支线3', publicHint: '提示3', completionCriteria: '完成支线三', required: false },
+      { id: 's4', trackId: 't-side', chapterIds: ['c1'], title: '顺手解围酒肆掌柜', intent: 'PRIVATE_SIDE_4', publicHint: '西市酒肆掌柜被泼皮纠缠', completionCriteria: '替酒肆掌柜解围', required: false }
+    ]
+  };
+  const h = harness({ withScheduler: true, plan: customV2, settings: { autoCheck: false, checkEveryX: 3, narrativeLimit: 2 } });
+  const guidanceText = h.engine.buildNarrativeGuidance();
+  assert.ok(guidanceText.includes('当前章节：风起青州渡'), 'v2公开节点注入应包含当前章节标题');
+  assert.ok(guidanceText.includes('询问守门人：三号码头守门人似知昨夜船讯'), 'v2公开节点应组合节点标题与公开提示');
+  assert.ok(!guidanceText.includes('PRIVATE_'), '增强公开引导后仍严禁泄露作者私密 intent 或 synopsis');
+
+  // 第 1 轮（L2）就顺手完成了排在第 5 位的支线节点 s4，随后又聊了 4 轮（共 5 轮未检查，超过 checkEveryX=3）
+  await h.reply('路过西市时，主角出手替酒肆掌柜解了泼皮之围。'); // L2
+  await h.reply('第二轮闲谈水路行情。'); // L4
+  await h.reply('第三轮夜宿客栈。'); // L6
+  await h.reply('第四轮清晨买早点。'); // L8
+  await h.reply('第五轮前往栈桥观望。'); // L10
+
+  h.setHandler(({ prompt }) => {
+    assert.ok(prompt.includes('"nodeId":"s4"'), '即使 narrativeLimit=2，后台检查仍须覆盖全部已解锁合格公开节点');
+    assert.ok(prompt.includes('替酒肆掌柜解了泼皮之围'), 'selectSources 应从上次检查锚点追平全部 5 轮未检原文，而非死切最后 3 轮');
+    return JSON.stringify({
+      nodeUpdates: [{ nodeId: 's4', status: 'completed', evidence: [{ messageId: h.proof(2).messageId, quote: '出手替酒肆掌柜……泼皮之围' }] }],
+      proposals: []
+    });
+  });
+
+  const res = await h.engine.checkNow();
+  assert.strictEqual(res.ok, true);
+  const afterState = h.data.loadState();
+  assert.strictEqual(h.data.getNodeStatus(afterState, 's4'), 'completed', '第1轮提前完成的第5号支线节点应成功核实打勾');
+  await h.engine.prepareHistoryForGeneration();
+  assert.strictEqual(h.data.getNodeStatus(h.data.loadState(), 's4'), 'completed', '还原为原生子串的证据通过后续本地审计且不失效');
+}
+
 (async function() {
   for (const test of [testDisabledAndScheduling, testEvidenceAndEarlyNodes, testAdvanceAndRollback,
     testLateResults, testApiAndPreviewIsolation, testProposalReview, testBlockedAndProposalRaces, testLoadedAndGuidanceBudget,
-    testFinishedAndImportActivation, testImportedSourceAudit]) {
+    testFinishedAndImportActivation, testImportedSourceAudit, testSchedulerFullEligibleAndUnseenCatchup]) {
     await test(); console.log(`${test.name}: passed`);
   }
   console.log('outline-runtime-test: all passed');

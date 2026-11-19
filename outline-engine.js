@@ -113,9 +113,10 @@ window.OUTLINE_ENGINE = (function() {
     if (!audit.valid || audit.synthetic || audit.inherited || timeline().digestRefs(refs) !== clean(record.sourceDigest)) return false;
     const current = new Map(audit.refs.map(ref => [ref.messageId, ref]));
     if (!Array.isArray(record.evidence) || !record.evidence.length) return false;
+    const matchFn = prompts()?.matchQuote || ((src, q) => String(src || '').includes(q));
     return record.evidence.every(proof => {
       const ref = current.get(clean(proof?.messageId)), quote = clean(proof?.quote);
-      return ref && quote && clean(proof.hash) === clean(ref.hash) && String(chat()[ref.layer]?.mes || '').includes(quote);
+      return ref && quote && clean(proof.hash) === clean(ref.hash) && matchFn(String(chat()[ref.layer]?.mes || ''), quote);
     });
   }
 
@@ -209,17 +210,22 @@ window.OUTLINE_ENGINE = (function() {
     const purpose = target === 'world'
       ? '世界继续独立演化；大纲目标不得冒充事实、世界摘要或人物记忆。\n'
       : '自然呈现机会和线索，不复述大纲、不提前揭晓幕后安排。\n';
-    const nodeBlock = node => node.trackId === 'legacy-main'
-      ? `- ${clean(node.title)}：${clean(node.intent)}${node.completionCriteria ? `；达成条件：${clean(node.completionCriteria)}` : '；条件未指定，仅用户可确认完成'}${node.notes ? `；备注：${clean(node.notes)}` : ''}\n`
-      : `- ${clean(node.publicHint || node.title)}\n`;
+    const nodeBlock = node => {
+      if (node.trackId === 'legacy-main') {
+        return `- ${clean(node.title)}：${clean(node.intent)}${node.completionCriteria ? `；达成条件：${clean(node.completionCriteria)}` : '；条件未指定，仅用户可确认完成'}${node.notes ? `；备注：${clean(node.notes)}` : ''}\n`;
+      }
+      const title = clean(node.title), hint = clean(node.publicHint);
+      if (title && hint && title !== hint && !hint.includes(title)) return `- ${title}：${hint}\n`;
+      return `- ${hint || title}\n`;
+    };
     // 预算约束只裁可选内容；核心作者约束和当前节点必须完整，不能在句中被截掉。
     const publicNodes = nodes.filter(node => node.visibility !== 'private');
     const legacyPublic = publicNodes.length > 0 && publicNodes.every(node => node.trackId === 'legacy-main');
-    let result = head + purpose + (legacyPublic ? `当前章节：${clean(chapter.title)}\n` : '');
+    let result = head + purpose + (publicNodes.length && clean(chapter.title) ? `当前章节：${clean(chapter.title)}\n` : '');
     if (state.plan.publicConstraints) result += `公开约束：${clean(state.plan.publicConstraints)}\n`;
     if (publicNodes.length) result += '当前节点：\n' + nodeBlock(publicNodes[0]);
     for (const clue of clues) result += `可被实际发现的线索[${clue.id}]：${clue.publicHint}（仅可发现，不代表任何角色已接触或知道其含义）\n`;
-    for (const extra of [legacyPublic && chapter.goal ? `章节目标：${clean(chapter.goal)}\n` : '',
+    for (const extra of [publicNodes.length && chapter.goal ? `章节目标：${clean(chapter.goal)}\n` : '',
       state.plan.publicSynopsis ? `故事方向：${clean(state.plan.publicSynopsis)}\n` : '', ...publicNodes.slice(1).map(nodeBlock)]) {
       if (result.length + extra.length <= limit) result += extra;
     }
@@ -354,7 +360,14 @@ window.OUTLINE_ENGINE = (function() {
   function selectSources(state) {
     const refs = assistantRefs(), count = Math.max(1, Number(settings().checkEveryX) || 3);
     if (!refs.length) return { refs: [], messages: [] };
-    const selected = refs.slice(-count), first = selected[0].layer;
+    const maxWindow = Math.max(count, 12);
+    const hasChecked = state?.tracking?.checkedLayer != null && Number.isFinite(Number(state.tracking.checkedLayer));
+    const hasAnchor = state?.tracking?.anchorLayer != null && Number.isFinite(Number(state.tracking.anchorLayer));
+    const baseLayer = hasChecked ? Number(state.tracking.checkedLayer) : (hasAnchor ? Number(state.tracking.anchorLayer) : null);
+    // 优先追平自上次检查边界以来的全部未检 AI 回复（封顶 maxWindow 轮防超长老存档过载）；若无新增未检层（如手动复检），回退最近 count 轮。
+    const unseen = baseLayer != null ? refs.filter(ref => ref.layer > baseLayer) : [];
+    const selected = unseen.length ? unseen.slice(-maxWindow) : refs.slice(-count);
+    const first = selected[0].layer;
     let start = first;
     // 一轮包括 AI 回复及其前面的用户输入，但不把上一条 AI 回复混入。
     while (start > 0 && chat()[start - 1]?.is_user) start--;
@@ -398,12 +411,14 @@ window.OUTLINE_ENGINE = (function() {
     if (!Array.isArray(evidence) || !evidence.length) return null;
     const messages = new Map(selection.messages.map(item => [item.messageId, item]));
     const refs = new Map(selection.refs.map(item => [item.messageId, item]));
+    const resolveFn = prompts()?.resolveQuote || ((src, q) => (String(src || '').includes(q) ? q : null));
     const result = [];
     for (const proof of evidence) {
       const id = clean(proof?.messageId), quote = clean(proof?.quote), message = messages.get(id), ref = refs.get(id);
-      if (!message || !ref || !quote || !message.content.includes(quote) ||
+      const canonical = message && quote ? resolveFn(message.content, quote) : null;
+      if (!message || !ref || !canonical ||
           (proof.hash && clean(proof.hash) !== clean(ref.hash)) || !timeline().auditRefs([ref]).valid) return null;
-      result.push({ messageId: id, hash: ref.hash, quote, layer: ref.layer });
+      result.push({ messageId: id, hash: ref.hash, quote: canonical, layer: ref.layer });
     }
     return result;
   }
@@ -547,7 +562,11 @@ window.OUTLINE_ENGINE = (function() {
     try {
       task = beginRequest('检查剧情进度', state, selection.refs);
       const schedule = getSchedule('narrative', { state, advanceTick: true });
-      const nodes = schedule.selected.filter(node => node.visibility !== 'private' && node.completionSource !== 'world');
+      // 检查全部已解锁合格的公开非纯世界节点，避免被 narrativeLimit（默认 3）截断导致已完成的支线节点漏检
+      const eligiblePool = Array.isArray(schedule.candidates)
+        ? schedule.candidates.filter(item => item.eligible).map(item => item.node)
+        : (schedule.selected || []);
+      const nodes = eligiblePool.filter(node => node && node.visibility !== 'private' && node.completionSource !== 'world').slice(0, 24);
       const prompt = prompts().buildCheckPrompt({ state: clone(state), nodes, messages: selection.messages,
         referenceContext: referenceContext(), allowProposals: settings().allowProposals !== false,
         includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() });
