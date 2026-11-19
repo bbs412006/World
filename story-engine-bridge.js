@@ -318,6 +318,20 @@ window.STORY_ENGINE_BRIDGE = (function() {
           if (smalls.length) {
             mLines.push('近期事件纪要：\n' + smalls.map(s => `- [楼层${s.startLayer}-${s.endLayer}] ${cut(s.content, 200)}`).join('\n'));
           }
+          if (mem.peopleRoster?.length) {
+            const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));
+            const pickedProfiles = mem.peopleRoster.filter(p =>
+              (clean(p.profile?.basicInfo?.identity) || clean(p.profile?.experiences))
+              && (!activeNames.size || (p.names || []).some(n => activeNames.has(normalized(n))))
+            ).slice(0, 4);
+            if (pickedProfiles.length) {
+              mLines.push('人物档案履历：\n' + pickedProfiles.map(p => {
+                const idText = clean(p.profile?.basicInfo?.identity);
+                const expText = cut(p.profile?.experiences, 120);
+                return `- ${p.names?.[0] || p.id}${idText ? `（${cut(idText, 30)}）` : ''}${expText ? `：${expText}` : ''}`;
+              }).join('\n'));
+            }
+          }
           if (mem.characterArcs?.length) {
             const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));
             const pickedArcs = mem.characterArcs.filter(arc => !activeNames.size || (arc.names || []).some(n => activeNames.has(normalized(n)))).slice(0, 4);

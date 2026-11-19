@@ -112,8 +112,12 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 每个 entity_updates 数组项同理只携带一条 event，并单独填写该 event 的 time。
 
 约束：
-1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按文末【统一输出要求】在同一个顶层 JSON 对象中一并完整填写，绝不可拆成多个 JSON 块，也绝不可把人物/组织/地点/物品/事实只写进 small_summary 而把前面四个数组留空。
-2. 凡本段对话中有明确出场、发言、行动、发现、决策、情绪或关系互动的命名人物，应积极提取其关键主观认知到 personal_memory；凡本段首次提及或发生状态/归属/关键事件变化的组织（organization）、物件（object）、能力（ability）、地点（location），应积极提取到 entity_updates（仅当本段确实完全没有对应内容时才返回 []）。
+1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 character_profile_updates、ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按文末【统一输出要求】在同一个顶层 JSON 对象中一并完整填写，绝不可拆成多个 JSON 块，也绝不可把人物/组织/地点/物品/事实只写进 small_summary 而把前面数组留空。
+2. 人物信息防膨胀规则：
+   - 凡本段对话中有明确出场、背景披露或重要经历进展的命名人物，统一写入 character_profile_updates（统一固定格式：basic_info 五项【identity 身份/阵营、appearance 外貌特征、personality 性格风格、abilities 核心能力/特长、relations 关键人际关系】+ experiences 截至目前的详细关键经历）。
+   - basic_info 每项仅在有新披露或发生变化时填写最新整合值，无变化填 ""（保留本地已有信息）；experiences 必须将本段新发生的重大转折、关键行动、重要抉择、得失与关系变化自然整合进该人物“已有迄今经历”，写成详实连贯的履历（最多 800 字）；日常寒暄、吃饭走路、普通跑腿等琐碎小事绝不写入。
+   - personal_memory 仅保留会直接影响该人物后续判断、隐瞒或立场的少数核心主观认知/秘密/误解（不重复搬运基本信息和流水账，避免条数无限膨胀）。
+   - 凡本段首次提及或发生状态/归属/关键事件变化的组织（organization）、物件（object）、能力（ability）、地点（location），应积极提取到 entity_updates（仅当本段确实完全没有对应内容时才返回 []）。
 3. PersonalMemory 只能包含 name、known_by、memory、time。
 4. EntityUpdate 只能包含 type、name、aliases、description、event、time；type 必须使用英文值 organization、object、ability、location 之一（不要写中文分类名）。
 5. PersonalMemory.name 必须是非空字符串数组；EntityUpdate.name 必须是非空字符串；known_by 与 aliases 必须是字符串数组。
@@ -132,13 +136,42 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     return String(value == null ? '' : value).trim();
   }
 
+  function formatKnownPersonLine(item) {
+    if (!item) return '';
+    if (Array.isArray(item)) {
+      const joined = item.map(clean).filter(Boolean).join(' / ');
+      return joined ? `- ${joined}` : '';
+    }
+    if (typeof item === 'string') {
+      const name = clean(item);
+      return name ? `- ${name}` : '';
+    }
+    if (typeof item === 'object') {
+      const names = (Array.isArray(item.names) ? item.names : [item.name]).map(clean).filter(Boolean);
+      if (!names.length) return '';
+      const profile = item.profile && typeof item.profile === 'object' ? item.profile : {};
+      const basic = profile.basicInfo && typeof profile.basicInfo === 'object' ? profile.basicInfo : {};
+      const basicParts = [
+        clean(basic.identity) ? `身份：${clean(basic.identity)}` : '',
+        clean(basic.appearance) ? `外貌：${clean(basic.appearance)}` : '',
+        clean(basic.personality) ? `性格：${clean(basic.personality)}` : '',
+        clean(basic.abilities) ? `能力：${clean(basic.abilities)}` : '',
+        clean(basic.relations) ? `关系：${clean(basic.relations)}` : ''
+      ].filter(Boolean);
+      const experiences = clean(profile.experiences);
+      const lines = [`- ${names.join(' / ')}`];
+      if (basicParts.length) lines.push(`  基本信息：${basicParts.join('｜')}`);
+      if (experiences) lines.push(`  迄今经历：${experiences}`);
+      return lines.join('\n');
+    }
+    return '';
+  }
+
   function buildUserPrompt(options) {
     const input = options || {};
     const currentStoryTime = clean(input.currentStoryTime);
     const knownPeople = Array.isArray(input.knownPeople)
-      ? input.knownPeople.filter(Boolean).map(item =>
-          Array.isArray(item) ? item.map(clean).filter(Boolean).join(' / ') : clean(item)
-        ).filter(Boolean)
+      ? input.knownPeople.map(formatKnownPersonLine).filter(Boolean)
       : [];
     const knownEntities = Array.isArray(input.knownEntities)
       ? input.knownEntities.map(item => {
@@ -158,7 +191,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 
     const sections = [
       `【当前绝对故事时间】\n${currentStoryTime || '未提供；不得换算任何相对时间'}`,
-      `【已知人物名称与别名】\n${knownPeople.length ? knownPeople.map(item => `- ${item}`).join('\n') : '未提供；仅使用对话中明确出现的称呼'}`,
+      `【已知人物档案与别名（更新基本信息与迄今经历时请在此基础上整合，无变化字段留空）】\n${knownPeople.length ? knownPeople.join('\n') : '未提供；仅使用对话中明确出现的称呼'}`,
       `【已知实体】\n${knownEntities.length ? knownEntities.join('\n') : '未提供；仅提取对话中明确命名且符合分类定义的实体'}`
     ];
 

@@ -609,6 +609,7 @@ window.WORLD_ENGINE_CORE = (function() {
       clearCheckpoint();
       clearHistory();
       saveFingerprint('0');
+      setLastStoryDay(null);
       if (hadAnything) _rollbackGeneration++;
       return { rolledBack: hadAnything, layer: -1, round: 0, cleared: true };
     }
@@ -657,6 +658,7 @@ window.WORLD_ENGINE_CORE = (function() {
           clearCheckpoint();
         }
         saveFingerprint(String(target.layer));
+        setLastStoryDay(nextState.time != null ? Number(nextState.time) : null);
         history.entries = surviving;
         saveHistory(history);
         return {
@@ -698,6 +700,7 @@ window.WORLD_ENGINE_CORE = (function() {
       clearCheckpoint();
       clearHistory();
       saveFingerprint('');
+      setLastStoryDay(null);
       return {
         rolledBack: true,
         layer: -1,

@@ -113,9 +113,33 @@ window.MEMORY_ENGINE_DATA = (function() {
       };
     }).filter(Boolean);
   }
+  function normalizeCharacterProfile(raw) {
+    const src = raw && typeof raw === 'object' ? raw : {};
+    const basic = src.basicInfo && typeof src.basicInfo === 'object'
+      ? src.basicInfo
+      : (src.basic_info && typeof src.basic_info === 'object' ? src.basic_info : {});
+    return {
+      basicInfo: {
+        identity: clean(basic.identity),
+        appearance: clean(basic.appearance),
+        personality: clean(basic.personality),
+        abilities: clean(basic.abilities),
+        relations: clean(basic.relations)
+      },
+      experiences: clean(src.experiences)
+    };
+  }
+
   function normalizeState(state) {
     const next = state && typeof state === 'object' && !Array.isArray(state) ? clone(state) : defaultState();
     if (!Array.isArray(next.personal_memory)) next.personal_memory = [];
+    next.personal_memory = next.personal_memory.map(person => {
+      const item = person && typeof person === 'object' && !Array.isArray(person) ? person : {};
+      item.names = unique(item.names);
+      if (!item.memory || typeof item.memory !== 'object' || Array.isArray(item.memory)) item.memory = {};
+      item.profile = normalizeCharacterProfile(item.profile);
+      return item;
+    });
     if (!next.knowledge_index || typeof next.knowledge_index !== 'object' || Array.isArray(next.knowledge_index)) next.knowledge_index = {};
     // 兼容开发期曾使用的 world_memory/item 结构；对外稳定结构只保留 entity_memory/object。
     if (!next.entity_memory || typeof next.entity_memory !== 'object' || Array.isArray(next.entity_memory)) {
@@ -219,6 +243,7 @@ window.MEMORY_ENGINE_DATA = (function() {
           sourceRefs: Array.isArray(node?.sourceRefs) ? clone(node.sourceRefs) : [],
           sourceDigest: clean(node?.sourceDigest),
           personal: Array.isArray(node?.personal) ? clone(node.personal) : [],
+          profileUpdates: Array.isArray(node?.profileUpdates) ? clone(node.profileUpdates) : [],
           entities: node?.entities && typeof node.entities === 'object' ? clone(node.entities) : emptyEntityMemory(),
           factUpdates: Array.isArray(node?.factUpdates) ? clone(node.factUpdates) : [],
           arcUpdates: Array.isArray(node?.arcUpdates) ? clone(node.arcUpdates) : [],
@@ -285,6 +310,7 @@ window.MEMORY_ENGINE_DATA = (function() {
       personal_memory: people.map(person => ({
         id: person.id,
         names: clone(person.names || []),
+        profile: normalizeCharacterProfile(person.profile),
         memories: Object.entries(person.memory || {}).flatMap(([time, memories]) =>
           (Array.isArray(memories) ? memories : []).map(memory => ({
             time,
@@ -447,6 +473,7 @@ window.MEMORY_ENGINE_DATA = (function() {
     const people = source.map(person => ({
       id: clean(person?.id),
       names: unique(person?.names),
+      profile: normalizeCharacterProfile(person?.profile),
       memory: Array.isArray(person?.memories) ? {} : clone(person?.memory || {})
     }));
     for (const person of people) if (!person.id) person.id = nextImportedCharacterId(people);

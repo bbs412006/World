@@ -276,14 +276,25 @@ window.MEMORY_ENGINE_VECTOR = (function() {
         const names = unique(p?.names);
         if (!names.length) continue;
         const arc = arcs.find(a => a.characterId === p.id || (a.names || []).some(n => names.includes(n)));
+        const basic = p?.profile?.basicInfo || {};
+        const basicText = [
+          clean(basic.identity) ? `身份:${clean(basic.identity)}` : '',
+          clean(basic.appearance) ? `外貌:${clean(basic.appearance)}` : '',
+          clean(basic.personality) ? `性格:${clean(basic.personality)}` : '',
+          clean(basic.abilities) ? `能力:${clean(basic.abilities)}` : '',
+          clean(basic.relations) ? `关系:${clean(basic.relations)}` : ''
+        ].filter(Boolean).join('｜');
+        const expText = clean(p?.profile?.experiences);
         const recentMemories = Object.values(p.memory || {}).flat().slice(-5);
-        if (!arc && !recentMemories.length) continue;
+        if (!arc && !basicText && !expText && !recentMemories.length) continue;
         const text = [
           `人物：${names.join('/')}`,
+          basicText ? `基本信息：${basicText}` : '',
+          expText ? `迄今经历：${expText}` : '',
           arc?.relationship ? `关系：${arc.relationship}` : '',
           arc?.currentStance ? `立场：${arc.currentStance}` : '',
           recentMemories.join('；')
-        ].filter(Boolean).join(' | ').slice(0, 360);
+        ].filter(Boolean).join(' | ').slice(0, 600);
         items.push({
           key: `person:${p.id}`,
           kind: 'person',

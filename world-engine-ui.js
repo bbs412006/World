@@ -952,20 +952,33 @@ window.WORLD_ENGINE_UI = (function() {
 
   function renderMemoryPersonEditor(person, isNew, state) {
     const arc = isNew ? null : findPersonArc(state, person);
+    const basic = person?.profile?.basicInfo || {};
+    const experiences = String(person?.profile?.experiences || '');
     const entries = Object.entries(person?.memory || {}).flatMap(([time, memories]) =>
       (Array.isArray(memories) ? memories : []).map(memory => renderMemoryEntryRow(time, memory, 'memory', memoryKnownBy(state, person, time, memory)))
     ).join('');
     return `<div class="we-memory-editor" data-person-editor data-person-id="${h(person?.id || '')}" data-new="${isNew ? 'true' : 'false'}">
       <div class="we-input-group"><label>姓名与别名（用 / 分隔）</label><input class="we-memory-person-names" type="text" value="${h((person?.names || []).join(' / '))}" placeholder="例如：沈鹤亭 / 鹤亭"></div>
+      <div class="we-memory-editor-label">人物基本信息（统一格式）</div>
+      <div class="we-memory-form-grid">
+        <div class="we-input-group"><label>身份 / 阵营</label><input class="we-memory-profile-identity" type="text" value="${h(basic.identity || '')}" placeholder="职业、身份、所属势力"></div>
+        <div class="we-input-group"><label>外貌特征</label><input class="we-memory-profile-appearance" type="text" value="${h(basic.appearance || '')}" placeholder="显著外貌、装束或标志"></div>
+      </div>
+      <div class="we-memory-form-grid">
+        <div class="we-input-group"><label>性格风格</label><input class="we-memory-profile-personality" type="text" value="${h(basic.personality || '')}" placeholder="性格底色与行事方式"></div>
+        <div class="we-input-group"><label>核心能力 / 特长</label><input class="we-memory-profile-abilities" type="text" value="${h(basic.abilities || '')}" placeholder="武艺、术法、智谋或关键资源"></div>
+      </div>
+      <div class="we-input-group"><label>关键人际关系</label><input class="we-memory-profile-relations" type="text" value="${h(basic.relations || '')}" placeholder="与主角及其他核心人物的关系"></div>
+      <div class="we-input-group"><label>截至目前的详细经历（仅记关键经历，不写琐碎小事）</label><textarea class="we-memory-profile-experiences" rows="5" placeholder="连贯详实地记录该人物至今经历的重要事件、转折、抉择与得失（最多 800 字）">${h(experiences)}</textarea></div>
       <div class="we-memory-form-grid">
         <div class="we-input-group"><label>当前关系定位（角色弧光）</label><input class="we-memory-arc-relationship" type="text" value="${h(arc?.relationship || '')}" placeholder="例如：利害同盟 / 互信挚友"></div>
         <div class="we-input-group"><label>弧光进度（0–100%）</label><input class="we-memory-arc-progress" type="number" min="0" max="100" step="1" value="${h(String(arc?.progressPct ?? 0))}"></div>
       </div>
       <div class="we-input-group"><label>当前态度 / 立场</label><input class="we-memory-arc-stance" type="text" value="${h(arc?.currentStance || '')}" placeholder="对主角与当前局势的立场（可选，最多60字）"></div>
       <div class="we-input-group"><label>弧光阶段演变描述</label><textarea class="we-memory-arc-summary" rows="2" placeholder="人物近期的心理成长、转变与纠葛（可选，最多120字）">${h(arc?.arcSummary || '')}</textarea></div>
-      <div class="we-memory-editor-label">人物记忆</div>
-      <div class="we-memory-entry-list">${entries || '<div class="we-memory-entry-empty">暂无记忆，可在下方增加</div>'}</div>
-      <button class="we-btn we-memory-add-entry" type="button" data-entry-kind="memory"><i class="fa-solid fa-plus"></i> 增加记忆</button>
+      <div class="we-memory-editor-label">关键主观记忆 / 秘密（可选）</div>
+      <div class="we-memory-entry-list">${entries || '<div class="we-memory-entry-empty">暂无关键主观记忆，可在下方增加</div>'}</div>
+      <button class="we-btn we-memory-add-entry" type="button" data-entry-kind="memory"><i class="fa-solid fa-plus"></i> 增加主观记忆</button>
       <div class="we-memory-editor-actions"><button class="we-btn we-memory-cancel-edit" type="button">取消</button><button class="we-btn we-btn-primary we-memory-save-person" type="button">保存</button></div>
     </div>`;
   }
@@ -973,13 +986,30 @@ window.WORLD_ENGINE_UI = (function() {
   function renderMemoryPeople(state) {
     const people = Array.isArray(state.personal_memory) ? state.personal_memory : [];
     const draft = _memoryEditingPerson === '__new__'
-      ? `<div class="we-memory-record we-memory-record-new">${renderMemoryPersonEditor({ id: '', names: [], memory: {} }, true, state)}</div>` : '';
+      ? `<div class="we-memory-record we-memory-record-new">${renderMemoryPersonEditor({ id: '', names: [], memory: {}, profile: {} }, true, state)}</div>` : '';
     const cards = people.map(person => {
       const editing = _memoryEditingPerson === person.id;
       const collapseKey = `person:${person.id}`;
       const arc = findPersonArc(state, person);
       const pct = Math.max(0, Math.min(100, parseInt(arc?.progressPct) || 0));
       const hasArc = Boolean(arc && (arc.relationship || arc.currentStance || arc.arcSummary || pct > 0));
+      const basic = person?.profile?.basicInfo || {};
+      const basicRows = [
+        ['身份', basic.identity],
+        ['外貌', basic.appearance],
+        ['性格', basic.personality],
+        ['能力', basic.abilities],
+        ['关系', basic.relations]
+      ].filter(([, val]) => String(val || '').trim());
+      const expText = String(person?.profile?.experiences || '').trim();
+      const basicBlock = basicRows.length ? `<div class="we-memory-arc-card" style="margin-bottom:6px;">
+        <div class="we-memory-arc-head"><span class="we-memory-type-badge">基本信息</span></div>
+        ${basicRows.map(([k, v]) => `<div class="we-memory-arc-stance-text" style="margin-top:3px;"><strong>${h(k)}：</strong>${h(v)}</div>`).join('')}
+      </div>` : '';
+      const expBlock = expText ? `<div class="we-memory-arc-card" style="margin-bottom:6px;">
+        <div class="we-memory-arc-head"><span class="we-memory-type-badge">迄今经历</span></div>
+        <div class="we-memory-summary-text" style="margin-top:4px;">${h(expText)}</div>
+      </div>` : '';
       const arcBlock = hasArc ? `<div class="we-memory-arc-card">
         <div class="we-memory-arc-head">
           <span class="we-memory-type-badge">角色弧光 ${pct}%</span>
@@ -996,14 +1026,16 @@ window.WORLD_ENGINE_UI = (function() {
         })
       ).join('');
       const metaText = [
-        (person.names || []).slice(1).join(' · ') || person.id,
+        (person.names || []).slice(1).join(' · ') || '',
+        basic.identity ? Array.from(String(basic.identity)).slice(0, 18).join('') : '',
         arc?.relationship ? `${arc.relationship} ${pct}%` : ''
-      ].filter(Boolean).join(' · ');
+      ].filter(Boolean).join(' · ') || person.id;
+      const bodyContent = `${basicBlock}${expBlock}${arcBlock}${entries}` || '<div class="we-empty">暂无人物档案与记忆</div>';
       return `<div class="${memoryRecordClass(collapseKey)}" data-person-id="${h(person.id)}">
         <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${h(person.names?.[0] || '未命名人物')}</div><div class="we-memory-record-meta">${h(metaText)}</div></div>
           <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey)}<button class="we-icon-btn we-memory-edit-person" type="button" title="编辑"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-person" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
         </div>
-        ${memoryRecordBody(collapseKey, editing ? renderMemoryPersonEditor(person, false, state) : `${arcBlock}${entries || '<div class="we-empty">暂无人物记忆</div>'}`)}
+        ${memoryRecordBody(collapseKey, editing ? renderMemoryPersonEditor(person, false, state) : bodyContent)}
       </div>`;
     }).join('');
     return `<div class="we-memory-page-actions"><button class="we-btn we-btn-primary" id="we-memory-add-person" type="button"><i class="fa-solid fa-plus"></i> 新增人物</button></div>${draft}${cards || '<div class="we-empty">暂无人物，点击“新增人物”手动建立。</div>'}`;
@@ -1280,8 +1312,24 @@ window.WORLD_ENGINE_UI = (function() {
         const id = button.closest('[data-person-id]')?.dataset.personId;
         const state = window.MEMORY_ENGINE_DATA?.loadState?.();
         const person = state?.personal_memory?.find(item => item.id === id);
-        if (!person || !confirm(`删除人物“${person.names?.[0] || id}”及其全部记忆？`)) return;
+        if (!person || !confirm(`删除人物“${person.names?.[0] || id}”及其全部档案与记忆？`)) return;
+        const deletedNames = new Set((person.names || []).map(n => String(n || '').trim().toLocaleLowerCase()).filter(Boolean));
         state.personal_memory = state.personal_memory.filter(item => item.id !== id);
+        if (Array.isArray(state.character_arcs)) {
+          state.character_arcs = state.character_arcs.filter(arc =>
+            arc.characterId !== id && !(arc.names || []).some(n => deletedNames.has(String(n || '').trim().toLocaleLowerCase()))
+          );
+        }
+        if (state.knowledge_index && typeof state.knowledge_index === 'object') {
+          for (const [k, list] of Object.entries(state.knowledge_index)) {
+            if (deletedNames.has(String(k || '').trim().toLocaleLowerCase())) {
+              delete state.knowledge_index[k];
+              continue;
+            }
+            state.knowledge_index[k] = (Array.isArray(list) ? list : []).filter(rec => rec?.ownerId !== id);
+            if (!state.knowledge_index[k].length) delete state.knowledge_index[k];
+          }
+        }
         if (saveEditedMemoryState(state, '人物已删除')) { clearMemoryEditing(); refresh(); }
       };
     });
@@ -1306,7 +1354,17 @@ window.WORLD_ENGINE_UI = (function() {
           if (!Array.isArray(memory[entry.time])) memory[entry.time] = [];
           if (!memory[entry.time].includes(entry.content)) memory[entry.time].push(entry.content);
         }
-        const person = { id, names, memory };
+        const profile = {
+          basicInfo: {
+            identity: String(editor.querySelector('.we-memory-profile-identity')?.value || '').trim(),
+            appearance: String(editor.querySelector('.we-memory-profile-appearance')?.value || '').trim(),
+            personality: String(editor.querySelector('.we-memory-profile-personality')?.value || '').trim(),
+            abilities: String(editor.querySelector('.we-memory-profile-abilities')?.value || '').trim(),
+            relations: String(editor.querySelector('.we-memory-profile-relations')?.value || '').trim()
+          },
+          experiences: String(editor.querySelector('.we-memory-profile-experiences')?.value || '').trim()
+        };
+        const person = { id, names, memory, profile };
         const index = state.personal_memory.findIndex(item => item.id === id);
         if (index >= 0) state.personal_memory[index] = person; else state.personal_memory.push(person);
         const rel = String(editor.querySelector('.we-memory-arc-relationship')?.value || '').trim();

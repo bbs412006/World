@@ -844,6 +844,149 @@ function makeChat(rounds) {
     assert.strictEqual(h2.calls.length, 1);
   }
 
+  // 12. 复现并验证：(1) 末尾存在非空 manual_snapshot 或同源旧节点时，一键追平与非覆盖范围填表必须让人物/档案/实体/事实/弧光全部落表，不再只落纪要；
+  //                 (2) 统一人物档案格式（基本信息 5 项 + 迄今详细经历）原地整合更新防膨胀、完整注入、删楼可精准回退。
+  {
+    const h = createHarness(makeChat(3)); // 0..6 (AI: 2, 4, 6)
+    h.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+      evolveMode: 'auto',
+      smallSummaryEveryX: 1,
+      skipCurrentFloorSummary: false,
+      summaryDelayFloors: 0
+    });
+
+    // 12A. 模拟用户在第 6 层手工编辑过表格（留下“非空” manual_snapshot，表里只有 1 条手工事实）+ 第 2 层已有旧同源节点（仅 1 条旧数据）但无纪要
+    const st0 = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    const edited = plain(st0);
+    edited.ongoing_facts = [{
+      id: 'fact_000001', category: '设定', subject: '全局', fact: '用户手工添加的基础设定', keywords: ['设定'], status: 'active', startLayer: 0, updatedLayer: 6
+    }];
+    h.sandbox.MEMORY_ENGINE.commitManualState(edited, st0);
+    // 再给 1-2 层放一个仅有 1 条旧人物记忆的同源节点（但没有纪要），确保一键追平请求 1-2 后不会因 memoryAlreadyStored 丢弃新数据
+    const refs12 = h.sandbox.MEMORY_ENGINE_TIMELINE.captureRange(1, 2);
+    edited.timeline.nodes.unshift({
+      id: 'memory_000001',
+      kind: 'memory',
+      startLayer: 1,
+      endLayer: 2,
+      sourceRefs: refs12,
+      sourceDigest: h.sandbox.MEMORY_ENGINE_TIMELINE.digestRefs(refs12),
+      personal: [{ name: ['旧路人'], known_by: [], memory: '旧路人目睹了开端。', time: '' }],
+      profileUpdates: [],
+      entities: { organization: [], object: [], ability: [], location: [] },
+      factUpdates: [],
+      arcUpdates: [],
+      memoryExtracted: true,
+      status: 'valid'
+    });
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(edited);
+
+    let lastPromptAt4 = '';
+    h.sandbox.WORLD_ENGINE_API.callApi = async prompt => {
+      if (prompt.includes('楼层 1 至 2')) {
+        return JSON.stringify({
+          character_profile_updates: [{
+            name: ['沈清秋', '清秋'],
+            basic_info: {
+              identity: '北境暗桩总管',
+              appearance: '青衫玉簪，左腕有旧剑疤',
+              personality: '沉稳克制、心思缜密',
+              abilities: '精于情报布局与轻功',
+              relations: '与主角初建利害合作'
+            },
+            experiences: '在青石渡秘密约见主角并交付青铜虎符，约定半月内不得示人以保全北境暗桩。'
+          }],
+          personal_memory: [],
+          entity_updates: [{ type: 'organization', name: '北境暗桩', aliases: [], description: '隐秘情报网络', event: '启动青石渡联络线', time: '' }],
+          ongoing_fact_updates: [{ action: 'upsert', id: '', category: '契约', subject: '青铜虎符', fact: '半月内不可示人', keywords: ['虎符'] }],
+          character_arc_updates: [{ name: '沈清秋', current_stance: '审慎试探', arc_summary: '以虎符试探主角底线', relationship: '利害同盟', progress_pct: 30 }],
+          small_summary: '第1-2层详实纪要。'.repeat(60)
+        });
+      }
+      if (prompt.includes('楼层 3 至 4')) {
+        lastPromptAt4 = prompt;
+        return JSON.stringify({
+          character_profile_updates: [{
+            name: ['沈清秋'],
+            basic_info: {
+              identity: '',
+              appearance: '',
+              personality: '',
+              abilities: '',
+              relations: '与主角升级为生死托付盟友'
+            },
+            experiences: '在青石渡托付虎符后，于第四层城西茶楼识破黑水帮埋伏并掩护主角突围，正式向主角亮明暗桩总管真身。'
+          }],
+          personal_memory: [],
+          entity_updates: [{ type: 'location', name: '城西茶楼', aliases: [], description: '暗桩接头据点', event: '爆发埋伏战', time: '' }],
+          ongoing_fact_updates: [{ action: 'upsert', id: '', category: '状态', subject: '沈清秋', fact: '已公开暗桩总管身份并联合主角反查黑水帮', keywords: ['暗桩总管'] }],
+          character_arc_updates: [{ name: '沈清秋', current_stance: '全力信任', arc_summary: '并肩突围后彻底托付信任', relationship: '生死盟友', progress_pct: 75 }],
+          small_summary: '第3-4层详实纪要。'.repeat(60)
+        });
+      }
+      return JSON.stringify({
+        character_profile_updates: [],
+        personal_memory: [],
+        entity_updates: [],
+        ongoing_fact_updates: [],
+        character_arc_updates: [],
+        small_summary: '第5-6层详实纪要。'.repeat(60)
+      });
+    };
+
+    const cu = await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    assert.strictEqual(cu.completedBatches, 3);
+    const stAfter = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.strictEqual(stAfter.event_memory.small_summaries.length, 3, '3 层纪要应全部落表');
+    const shen = stAfter.personal_memory.find(p => p.names.includes('沈清秋'));
+    assert.ok(shen, '即使末尾存在非空 manual_snapshot 且 1-2 已有旧同源节点，一键追平提取的新人物仍必须落表');
+    assert.ok(stAfter.entity_memory.organization.some(o => o.name === '北境暗桩'), '组织实体必须落表');
+    assert.ok(stAfter.entity_memory.location.some(l => l.name === '城西茶楼'), '地点实体必须落表');
+    assert.ok(stAfter.ongoing_facts.some(f => f.fact.includes('用户手工添加的基础设定')), '用户原有非空手动编辑不得丢失');
+    assert.ok(stAfter.ongoing_facts.some(f => f.fact.includes('半月内不可示人')), '第2层持续事实必须落表');
+    assert.ok(stAfter.ongoing_facts.some(f => f.fact.includes('已公开暗桩总管身份')), '第4层持续事实必须落表');
+    assert.ok(stAfter.character_arcs.some(a => a.names.includes('沈清秋') && a.progressPct === 75), '角色弧光必须落表');
+
+    // 12B. 验证统一人物档案原地整合更新（未变字段保留，已变字段与迄今经历更新，不膨胀）+ 请求上下文携带已知档案
+    assert.ok(lastPromptAt4.includes('基本信息：身份：北境暗桩总管'), '第 4 层请求应携带第 2 层已建立的统一人物基本信息');
+    assert.ok(lastPromptAt4.includes('迄今经历：在青石渡秘密约见主角'), '第 4 层请求应携带已有迄今经历供模型整合');
+    assert.strictEqual(shen.profile.basicInfo.identity, '北境暗桩总管', '未改动的基本信息字段必须保留');
+    assert.strictEqual(shen.profile.basicInfo.appearance, '青衫玉簪，左腕有旧剑疤', '未改动的外貌字段必须保留');
+    assert.strictEqual(shen.profile.basicInfo.relations, '与主角升级为生死托付盟友', '更新的关系字段应原地覆盖');
+    assert.ok(shen.profile.experiences.includes('城西茶楼识破黑水帮埋伏'), '迄今经历应原地更新为整合后的详实履历');
+
+    // 验证注入正文包含统一格式 [基本信息] 与 [迄今经历]
+    h.getChat().push({ is_user: true, name: '用户', mes: '沈清秋现在怎么样了？', swipe_id: 0, extra: {} });
+    const injected = h.sandbox.MEMORY_ENGINE.applyInjection();
+    assert.ok(injected.includes('[基本信息] 身份：北境暗桩总管'), '注入正文应包含统一格式的人物基本信息');
+    assert.ok(injected.includes('[迄今经历] 在青石渡托付虎符后'), '注入正文应包含整合后的迄今经历');
+
+    // 验证删除第 4-6 层后，人物档案中的关系与迄今经历同步回退至第 2 层状态
+    h.getChat().splice(3); // 保留 0..2
+    await h.sandbox.MEMORY_ENGINE.reconcileHistory({ refillUncovered: false });
+    const stRolled = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    const shenRolled = stRolled.personal_memory.find(p => p.names.includes('沈清秋'));
+    assert.ok(shenRolled, '回退到第 2 层后人物应保留');
+    assert.strictEqual(shenRolled.profile.basicInfo.relations, '与主角初建利害合作', '删楼后人物基本信息应回退到第 2 层');
+    assert.ok(!shenRolled.profile.experiences.includes('城西茶楼'), '删楼后人物迄今经历应回退，不含已删楼层剧透');
+
+    // 12C. 验证中文别名与字符串格式 basic_info 的容错解析
+    const cnProfileRaw = JSON.stringify({
+      人物档案: [{
+        姓名: '陆离',
+        基本信息: '身份：江湖游医｜性格：外冷内热｜能力：金针渡穴',
+        迄今经历: '孤身入青州疫区施药救人，意外查获毒源线索。'
+      }],
+      small_summary: '测试中文档案解析。'
+    });
+    const parsedCn = h.sandbox.MEMORY_ENGINE._test.parseResponse(cnProfileRaw, { memory: true, small: true });
+    assert.strictEqual(parsedCn.profileUpdates.length, 1);
+    assert.strictEqual(parsedCn.profileUpdates[0].basicInfo.identity, '江湖游医');
+    assert.strictEqual(parsedCn.profileUpdates[0].basicInfo.personality, '外冷内热');
+    assert.strictEqual(parsedCn.profileUpdates[0].basicInfo.abilities, '金针渡穴');
+    assert.ok(parsedCn.profileUpdates[0].experiences.includes('孤身入青州疫区'));
+  }
+
   console.log('memory summary control, rollback-refill, range & catch-up tests passed');
 })().catch(error => {
   console.error(error);

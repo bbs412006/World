@@ -39,7 +39,7 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     acceptOutlineSync: true,
     searchDepth: 5,
     maxPerCharacter: 20,
-    memoryInjectMaxChars: 3500,
+    memoryInjectMaxChars: 8000,
     recallArchivedSmallLimit: 3,
     injectOngoingFactsLimit: 15,
     injectCharacterArcsLimit: 6,
@@ -99,6 +99,7 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
   function normalizeSettings(value) {
     const merged = { ...DEFAULTS, ...(value || {}) };
     const savedMaxTokens = Math.max(1, parseInt(merged.maxTokens) || 65000);
+    const savedInjectBudget = clampInt(merged.memoryInjectMaxChars, 8000, 500, 30000);
     return {
       ...merged,
       // 旧版部分预设把输出上限保存成 4096；升级后自动迁移，避免继续截断 API 返回。
@@ -127,7 +128,8 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       backfillStartLayer: clampInt(merged.backfillStartLayer, 0, 0, 100000),
       backfillEndLayer: clampInt(merged.backfillEndLayer, 0, 0, 100000),
       summaryBackfillSmallEveryX: clampInt(merged.summaryBackfillSmallEveryX, 5, 1, 50),
-      memoryInjectMaxChars: clampInt(merged.memoryInjectMaxChars, 3500, 500, 20000),
+      // 单层纪要最低字数提升至 500 字后，旧版默认 3500 预算会被 8 条直注纪要占满并挤掉人物档案；旧默认值自动平滑升级至 8000，用户自定义值原样保留。
+      memoryInjectMaxChars: savedInjectBudget === 3500 ? 8000 : savedInjectBudget,
       recallArchivedSmallLimit: clampInt(merged.recallArchivedSmallLimit, 3, 0, 10),
       injectOngoingFactsLimit: clampInt(merged.injectOngoingFactsLimit, 15, 0, 50),
       injectCharacterArcsLimit: clampInt(merged.injectCharacterArcsLimit, 6, 0, 30),

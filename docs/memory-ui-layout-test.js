@@ -73,5 +73,19 @@ assert.match(css, /\.we-api-adv-fold/, 'CSS 应包含高级 API 参数折叠面�
 assert.match(css, /\.we-memory-arc-card/, 'CSS 应包含角色弧光卡片样式');
 assert.match(css, /\.we-memory-kw-tag/, 'CSS 应包含记忆关键词标签样式');
 assert.match(css, /\.we-memory-recall-hit/, 'CSS 应包含向量/Rerank 召回预览样式');
+for (const cls of [
+  'we-memory-profile-identity',
+  'we-memory-profile-appearance',
+  'we-memory-profile-personality',
+  'we-memory-profile-abilities',
+  'we-memory-profile-relations',
+  'we-memory-profile-experiences'
+]) {
+  assert.ok(ui.includes(cls), `人物编辑器应包含统一人物档案输入项：${cls}`);
+}
+assert.ok(
+  ui.includes('id="we-memory-range-overwrite">') && !ui.includes('id="we-memory-range-overwrite" checked>'),
+  '手动指定范围填表默认不应勾选覆盖重填（保持与自动填表一致的逐层纯增量补漏）'
+);
 
 console.log('memory UI layout tests passed');
