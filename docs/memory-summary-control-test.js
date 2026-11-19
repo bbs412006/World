@@ -667,6 +667,80 @@ function makeChat(rounds) {
     assert.ok(state.personal_memory.some(p => p.names.includes('林墨')) && state.entity_memory.organization.some(o => o.name === '黑水帮'));
   }
 
+  // 10. 复现并验证：用户曾在末尾楼层手工删除过人物/实体/事实（留下空 manual_snapshot）后，范围填表与一键追平都必须让人物/实体/事实/弧光真正落表，且一键追平绝不退化成仅请求阶段纪要
+  {
+    const h = createHarness(makeChat(3)); // 0..6 (3 个 AI 层)
+    h.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+      evolveMode: 'auto',
+      smallSummaryEveryX: 1,
+      skipCurrentFloorSummary: false,
+      summaryDelayFloors: 0
+    });
+    // 先跑一次范围填表，然后在第 6 层手工删除所有人物/实体/事实（模拟用户在面板手动清空表 -> 触发 commitManualState 生成末尾 manual_snapshot）
+    await h.sandbox.MEMORY_ENGINE.fillSummaryRange({ startLayer: 1, endLayer: 6, batchSize: 1, overwrite: true, includeMemory: true });
+    const prev = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    const cleared = plain(prev);
+    cleared.personal_memory = [];
+    cleared.knowledge_index = {};
+    cleared.entity_memory = { organization: [], object: [], ability: [], location: [] };
+    cleared.entity_index = {};
+    cleared.ongoing_facts = [];
+    cleared.character_arcs = [];
+    h.sandbox.MEMORY_ENGINE.commitManualState(cleared, prev);
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(cleared);
+    assert.ok(
+      h.sandbox.MEMORY_ENGINE_DATA.loadState().timeline.nodes.some(n => n.kind === 'manual_snapshot'),
+      '手工清空后时间线应包含末尾 manual_snapshot'
+    );
+
+    // 10A. 此时删掉纪要再点击一键追平：必须同时请求人物/实体/事实/弧光与纪要（不能只请求阶段纪要），且数据必须真正落表！
+    const beforeCu = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    beforeCu.event_memory.small_summaries = [];
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(beforeCu);
+    h.calls.length = 0;
+    const cu = await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    assert.strictEqual(cu.completedBatches, 3);
+    assert.ok(h.calls.every(p => p.includes('"personal_memory":') && p.includes('"small_summary": ""')),
+      '一键追平每一批都必须同时包含人物/实体/事实/弧光与纪要请求，绝不能退化成仅请求阶段纪要');
+    let afterCu = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.ok(afterCu.personal_memory.length > 0, '一键追平后人物表必须真正落表');
+    assert.ok(afterCu.entity_memory.location.length === 3, '一键追平后实体表必须真正落表');
+    assert.ok(afterCu.ongoing_facts.length === 3, '一键追平后持续事实表必须真正落表');
+    assert.ok(afterCu.character_arcs.length > 0, '一键追平后角色弧光必须真正落表');
+
+    // 10B. 再次模拟末尾出现空 manual_snapshot，然后执行范围填表（overwrite: true）：数据也必须真正落表，不能被旧 manual_snapshot 抹空！
+    const prev2 = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    const cleared2 = plain(prev2);
+    cleared2.personal_memory = [];
+    cleared2.knowledge_index = {};
+    cleared2.entity_memory = { organization: [], object: [], ability: [], location: [] };
+    cleared2.entity_index = {};
+    cleared2.ongoing_facts = [];
+    cleared2.character_arcs = [];
+    h.sandbox.MEMORY_ENGINE.commitManualState(cleared2, prev2);
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(cleared2);
+    await h.sandbox.MEMORY_ENGINE.fillSummaryRange({ startLayer: 1, endLayer: 6, batchSize: 1, overwrite: true, includeMemory: true });
+    const afterRange = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.ok(afterRange.personal_memory.length > 0, '范围填表后人物表必须真正落表，不能被末尾旧 manual_snapshot 清空');
+    assert.strictEqual(afterRange.entity_memory.location.length, 3, '范围填表后实体表必须真正落表');
+    assert.strictEqual(afterRange.ongoing_facts.length, 3, '范围填表后持续事实表必须真正落表');
+    assert.ok(afterRange.character_arcs.length > 0, '范围填表后角色弧光必须真正落表');
+
+    // 10C. 兼容嵌套 memory 对象与带括号中文实体类型（如 "organization (组织)"）
+    const nestedRaw = JSON.stringify({
+      memory: {
+        personal_memory: [{ character_name: '苏明', memories: ['苏明发现了密道入口。'], time: '' }],
+        entity_updates: [{ type: 'organization (组织)', name: '玄机阁', description: '隐秘情报组织', event: '启动暗哨', time: '' }],
+        ongoing_facts: [{ subject: '苏明', category: '持有', detail: '持有玄机阁密令', keywords: ['密令'] }]
+      },
+      small_summary: '嵌套结构返回的详实纪要。'
+    });
+    const parsedNested = h.sandbox.MEMORY_ENGINE._test.parseResponse(nestedRaw, { memory: true, small: true });
+    assert.strictEqual(parsedNested.personal.length, 1, '应展开 memories 数组并解析 character_name');
+    assert.strictEqual(parsedNested.entities.organization.length, 1, '应解析带括号的中英文混合实体类型 organization (组织)');
+    assert.strictEqual(parsedNested.factUpdates.length, 1, '应拍平嵌套 memory 对象并解析 detail 事实字段');
+  }
+
   console.log('memory summary control, rollback-refill, range & catch-up tests passed');
 })().catch(error => {
   console.error(error);

@@ -1462,6 +1462,14 @@ window.WORLD_ENGINE_UI = (function() {
 
     const addSmall = document.getElementById('we-memory-add-small');
     if (addSmall) addSmall.onclick = () => { clearMemoryEditing(); _memoryEditingSmall = '__new__'; refresh(); };
+    const summarizeMemoryCounts = st => {
+      const pCount = Array.isArray(st?.personal_memory) ? st.personal_memory.length : 0;
+      const eCount = ['organization', 'object', 'ability', 'location']
+        .reduce((sum, type) => sum + (Array.isArray(st?.entity_memory?.[type]) ? st.entity_memory[type].length : 0), 0);
+      const fCount = Array.isArray(st?.ongoing_facts) ? st.ongoing_facts.filter(f => f.status === 'active').length : 0;
+      const sCount = Array.isArray(st?.event_memory?.small_summaries) ? st.event_memory.small_summaries.length : 0;
+      return `人物 ${pCount} · 实体 ${eCount} · 事实 ${fCount} · 纪要 ${sCount}`;
+    };
     const catchupNow = document.getElementById('we-memory-catchup-now');
     if (catchupNow) {
       catchupNow.onclick = async () => {
@@ -1472,7 +1480,8 @@ window.WORLD_ENGINE_UI = (function() {
             includeCurrentFloor: includeCurrent,
             includeMemory: true
           });
-          showToast(res?.message || (res?.alreadyCaughtUp ? '全要素填表已是最新' : '一键追平填表完成'));
+          const countSummary = summarizeMemoryCounts(res?.state || window.MEMORY_ENGINE_DATA?.loadState?.());
+          showToast(res?.message || (res?.alreadyCaughtUp ? `全要素填表已是最新（${countSummary}）` : `一键追平完成（${countSummary}）`));
           refresh();
         } catch (error) {
           showToast(`一键追平失败：${error?.message || error}`, true);
@@ -1495,7 +1504,8 @@ window.WORLD_ENGINE_UI = (function() {
             startLayer, endLayer, explicitZeroEnd: String(endRaw ?? '').trim() === '0',
             batchSize, overwrite, includeMemory: true
           });
-          showToast(res?.message || (res?.stopped ? '范围填表已停止' : `范围填表完成（共 ${res?.completedBatches || 0} 批）`));
+          const countSummary = summarizeMemoryCounts(res?.state || window.MEMORY_ENGINE_DATA?.loadState?.());
+          showToast(res?.message || (res?.stopped ? '范围填表已停止' : `范围填表完成（共 ${res?.completedBatches || 0} 批 · ${countSummary}）`));
           refresh();
         } catch (error) {
           showToast(`范围填表失败：${error?.message || error}`, true);
