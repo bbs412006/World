@@ -27,7 +27,27 @@ assert.ok(
   '记忆界面应包含当前层不填表、自动回退重填、直注纪要上限、一键追平与手动指定范围填表控件'
 );
 const homeFn = ui.slice(ui.indexOf('function renderMemoryHomeView()'), ui.indexOf('const MEMORY_VIEW_META'));
-assert.ok(homeFn.includes('renderMemoryHomeFillControls('), '一键追平与手动指定范围填表应放在记忆引擎首页');
+assert.ok(homeFn.includes('renderMemoryCoreActions(') && homeFn.includes("view: 'fill'"), '记忆首页只保留核心仪表、一键追平快捷按钮与包含「填表」分页的导航');
+assert.ok(!homeFn.includes('renderMemoryFillPage('), '范围填表等完整工具不应平铺在记忆首页');
+const actionsFn = ui.slice(ui.indexOf('function renderMemoryCoreActions('), ui.indexOf('function renderMemoryFillPage('));
+assert.ok(actionsFn.includes('we-memory-catchup-now') && !actionsFn.includes('we-memory-range-fill-start'), '首页快捷区仅含一键追平，不含范围填表');
+const fillFn = ui.slice(ui.indexOf('function renderMemoryFillPage('), ui.indexOf('function renderMemoryHomeView()'));
+assert.ok(
+  fillFn.includes('we-memory-catchup-include-current') && fillFn.includes('we-memory-range-fill-start') &&
+  fillFn.includes('we-memory-range-start') && fillFn.includes('we-memory-home-fill-status'),
+  '「填表」分页应集中提供一键追平（含当前层）、范围填表与运行状态'
+);
+assert.match(ui, /safeView === 'fill' \? renderMemoryFillPage\(/, '记忆分页路由必须接入「填表」分页');
+for (const fn of ['function renderSubView(', 'function renderMemorySubView(', 'function renderMemorySettingsView(', 'function renderSettingsView(']) {
+  const start = ui.indexOf(fn);
+  assert.ok(start >= 0, `缺少 ${fn}`);
+  const end = ui.indexOf('\n  function ', start + fn.length);
+  const body = ui.slice(start, end > start ? end : undefined);
+  assert.ok(body.includes('renderSubTopbar('), `${fn} 应使用三模块统一的分页顶栏 renderSubTopbar`);
+}
+const worldHomeFn = ui.slice(ui.indexOf('function renderHomeView('), ui.indexOf('function renderHomeViewExpanded('));
+assert.ok(!worldHomeFn.includes('renderWorldDigest('), '世界首页不应再平铺世界摘要（已下沉至「局势」分页）');
+assert.match(ui, /content = renderWorldDigest\(s, scope\)\s*\+ renderSection\('天下大势'/, '世界摘要应位于「局势」分页顶部');
 const minutesFn = ui.slice(ui.indexOf('function renderMemoryMinutes(state)'), ui.indexOf('function renderMemorySubView(view)'));
 assert.ok(
   !minutesFn.includes('we-memory-catchup-now') && !minutesFn.includes('we-memory-range-fill-start'),

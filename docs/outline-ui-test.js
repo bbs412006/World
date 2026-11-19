@@ -157,6 +157,8 @@ async function main() {
   current.progressEvents.push({ nodeId: 'n1', planRevision: current.revision, status: 'active', validity: 'valid', evidence: [{ messageId: '<5>', quote: hostile }] });
   current.proposals.push({ id: 'p1', status: 'pending', planRevision: current.revision, before: { title: hostile }, after: { title: '新标题' }, reason: hostile });
   data.saveState(current);
+  // 当前位置与 AI 建议已从首页下沉到「进度」分页
+  await ui._test.handleAction('view-progress');
   const html = ui.render();
   assert.ok(html.includes('&lt;script&gt;evil()&lt;/script&gt;'));
   assert.ok(!html.includes('<script>'));

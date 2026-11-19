@@ -5,6 +5,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   const STATUS_LABELS = { pending: '待推进', active: '进行中', completed: '完成', skipped: '跳过', blocked: '受阻' };
   const TRACK_LABELS = { main: '主线', side: '支线', hidden: '暗线' };
   const VIEW_META = {
+    progress: { title: '当前进度', poem: '脉络所至，一目了然' },
     tracks: { title: '跨章剧情线', poem: '草蛇灰线，伏脉千里' },
     schedule: { title: '注入与调度', poem: '运筹帷幄之中' },
     facts: { title: '线索与真相', poem: '明察秋毫，洞若观火' },
@@ -145,7 +146,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     return `<div class="we-sub-topbar">
       <button class="we-icon-btn" type="button" data-outline-action="${h(backAction || 'view-home')}" title="返回"><i class="fa-solid fa-arrow-left"></i></button>
       <span class="we-sub-title">${h(title)}</span>
-      ${poem ? `<span class="we-memory-sub-poem">${h(poem)}</span>` : ''}
+      ${poem ? `<span class="we-sub-poem we-memory-sub-poem">${h(poem)}</span>` : ''}
     </div>`;
   }
   function planText(value) { return Array.isArray(value) ? value.join('\n') : String(value || ''); }
@@ -501,31 +502,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     const tierLabel = !chapters.length ? (allNodes.length ? `共 ${allNodes.length} 个节点` : '待建大纲') : (curIndex >= 0 ? `第 ${curIndex + 1}/${chapters.length} 章` : `共 ${chapters.length} 章`);
     const stats = [['章节', chapters.length], ['剧情线', tracks.length], ['节点', allNodes.length], ['线索', validClues.length]]
       .map(([k, v]) => `<div class="we-core-stat"><div class="we-core-stat-k">${k}</div><div class="we-core-stat-v">${v}</div></div>`).join('');
-
-    let previewDrawer = '';
-    if (draft.injectionPreviewOpen) {
-      let guidanceText = '';
-      if (!enabled) guidanceText = '模块尚未启用；启用后将在每次生成正文前，按系统提示词柔性注入选中节点的公开指引。';
-      else if (settings().injectIntoPrompt === false) guidanceText = '“注入正文指导”开关已关闭，当前不会向正文注入任何大纲内容。';
-      else {
-        const chosen = narrSched.selected || [];
-        const publicChosen = chosen.filter(node => node.visibility !== 'private');
-        const clues = validClues.filter(c => c.available && c.publicHint);
-        guidanceText = publicChosen.length || clues.length
-          ? `【本轮拟进入正文的公开内容】\n${publicChosen.map(n => `- ${n.trackId === 'legacy-main' ? n.title : (n.publicHint || n.title)}`).join('\n')}${clues.length ? `\n可发现线索：${clues.map(c => c.publicHint).join('；')}` : ''}`
-          : '本轮暂无满足前置条件的公开节点或可发现线索需要注入正文。';
-      }
-      const lastFull = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
-      const orderLine = lastFull
-        ? `上次正文三模块实际顺序：${(lastFull.order || []).map(item => item.label).join(' → ') || '均未注入'}（共 ${lastFull.promptLength || 0} 字）`
-        : '尚未捕获上次正文生成；生成一次正文后可在“查看完整提示词与调度”中核对三模块全文与顺序。';
-      previewDrawer = `<div class="we-outline-inject-preview">
-        <div class="we-outline-section-head"><strong>正文注入实时预览</strong>${button('view-schedule', '查看完整提示词与调度')}</div>
-        <p class="we-outline-hint">大纲以【剧情指导】柔性插入对话末端（system），只提供公开线索与方向，绝不直接剧透私密真相。</p>
-        <p class="we-outline-hint">${h(orderLine)}</p>
-        <pre>${h(guidanceText)}</pre>
-      </div>`;
-    }
+    const statusText = outlineStatusText(enabled, narrSched);
 
     return `<div class="we-section we-core-section we-outline-core-section">
       <div class="we-core" title="${h(subLabel)}">
@@ -545,32 +522,67 @@ window.OUTLINE_ENGINE_UI = (function() {
           </div>
         </div>
         <div class="we-core-stats">${stats}</div>
-        <div class="we-outline-core-actions">
+        <div class="we-core-actions we-outline-core-actions">
           ${button('check-now', running ? '检查中…' : '立即检查', running || !enabled ? ' disabled' : '', 'primary')}
-          ${button('open-text', '整理文本')}
-          ${button('edit-plan', draft.plan ? '继续草稿' : '全量编排')}
-          ${button('toggle-injection-preview', draft.injectionPreviewOpen ? '收起注入预览' : '注入预览')}
           ${running ? button('abort', '停止', '', 'danger') : ''}
         </div>
+        <div class="we-core-status${enabled ? ' is-active' : ''}">${h(statusText)}</div>
       </div>
-      ${previewDrawer}
     </div>`;
   }
 
-  function renderOutlineNavList(draft) {
+  function outlineStatusText(enabled, narrSched) {
+    if (!enabled) return '剧情模块当前关闭；仍可编辑与保存计划，启用后才检查和注入。';
+    const selectedCount = ((narrSched || schedule('narrative')).nodeIds || []).length;
+    return settings().injectIntoPrompt !== false
+      ? `已启用 · 每 ${settings().checkEveryX ?? 3} 轮自动检查 · 本轮拟注入 ${selectedCount} 个节点`
+      : `已启用 · 每 ${settings().checkEveryX ?? 3} 轮自动检查 · 正文注入已暂停`;
+  }
+
+  /** 注入分页顶部：本轮拟进入正文的公开内容实时预览（原首页抽屉下沉至此）。 */
+  function renderInjectionPreview(current, enabled, narrSched) {
+    const validClues = (current.clues || []).filter(item => item.validity !== 'stale' && item.validity !== 'invalid');
+    let guidanceText = '';
+    if (!enabled) guidanceText = '模块尚未启用；启用后将在每次生成正文前，按系统提示词柔性注入选中节点的公开指引。';
+    else if (settings().injectIntoPrompt === false) guidanceText = '“注入正文指导”开关已关闭，当前不会向正文注入任何大纲内容。';
+    else {
+      const chosen = narrSched.selected || [];
+      const publicChosen = chosen.filter(node => node.visibility !== 'private');
+      const clues = validClues.filter(c => c.available && c.publicHint);
+      guidanceText = publicChosen.length || clues.length
+        ? `【本轮拟进入正文的公开内容】\n${publicChosen.map(n => `- ${n.trackId === 'legacy-main' ? n.title : (n.publicHint || n.title)}`).join('\n')}${clues.length ? `\n可发现线索：${clues.map(c => c.publicHint).join('；')}` : ''}`
+        : '本轮暂无满足前置条件的公开节点或可发现线索需要注入正文。';
+    }
+    const lastFull = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
+    const orderLine = lastFull
+      ? `上次正文三模块实际顺序：${(lastFull.order || []).map(item => item.label).join(' → ') || '均未注入'}（共 ${lastFull.promptLength || 0} 字）`
+      : '尚未捕获上次正文生成；生成一次正文后可在下方核对三模块全文与顺序。';
+    return `<section class="we-section we-outline-inject-preview">
+      <div class="we-section-title">正文注入实时预览</div>
+      <p class="we-outline-hint">大纲以【剧情指导】柔性插入对话末端（system），只提供公开线索与方向，绝不直接剧透私密真相。</p>
+      <p class="we-outline-hint">${h(orderLine)}</p>
+      <pre>${h(guidanceText)}</pre>
+    </section>`;
+  }
+
+  function renderOutlineNavList(draft, current) {
+    const pending = (current?.proposals || []).filter(item => !item.status || ['pending', 'stale'].includes(item.status)).length;
     const rows = [
-      { view: 'tracks', label: '剧情', sub: '主线 · 支线 · 暗线跨章看板与随手增删改', poem: '草蛇灰线，伏脉千里' },
-      { view: 'schedule', label: '注入', sub: '本轮哪些节点入选或被拦 · 上次正文完整提示词', poem: '运筹帷幄之中' },
-      { view: 'facts', label: '线索', sub: '私密事实 · 可发现线索 · 接触与作者标记', poem: '明察秋毫，洞若观火' }
+      { view: 'progress', label: '进度', sub: pending ? `${pending} 条 AI 调整建议待审` : '当前章节 · 待推进节点 · 建议', poem: '脉络所至，一目了然', alert: pending > 0, badge: pending ? String(pending) : '' },
+      { view: 'tracks', label: '剧情', sub: '主线 · 支线 · 暗线 · 章节看板', poem: '草蛇灰线，伏脉千里' },
+      { view: 'schedule', label: '注入', sub: '注入预览 · 入选节点 · 提示词', poem: '运筹帷幄之中' },
+      { view: 'facts', label: '线索', sub: '私密事实 · 线索 · 知情记录', poem: '明察秋毫，洞若观火' }
     ];
     const html = rows.map((row, index) => {
       const selected = draft.selectedNavView === row.view ? ' we-nav-row--selected' : '';
+      const alert = row.alert ? ' we-nav-row--alert' : '';
       const topLine = index === 0 ? '<div class="we-nav-line we-nav-line-hidden"></div>' : '<div class="we-nav-line"></div>';
       const bottomLine = index === rows.length - 1 ? '<div class="we-nav-line we-nav-line-hidden"></div>' : '<div class="we-nav-line"></div>';
-      return `<div class="we-nav-row we-outline-nav-row${selected}" data-outline-nav="${row.view}">
+      return `<div class="we-nav-row we-outline-nav-row${selected}${alert}" data-outline-nav="${row.view}">
         <div class="we-nav-label">${row.label}</div>
         <div class="we-nav-track">${topLine}<div class="we-nav-dot"></div>${bottomLine}</div>
-        <div class="we-nav-content"><span class="we-nav-sub">${row.sub}</span><span class="we-nav-poem">${row.poem}</span></div>
+        <div class="we-nav-content"><span class="we-nav-sub">${h(row.sub)}</span><span class="we-nav-poem">${row.poem}</span></div>
+        ${row.badge ? `<span class="we-nav-badge">${h(row.badge)}</span>` : ''}
         <i class="fa-solid fa-chevron-right we-nav-arrow"></i>
       </div>`;
     }).join('');
@@ -724,7 +736,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
 
     return `<section class="we-section we-outline-home-chapter">
-      <div class="we-section-title we-outline-sec-title">${h(sectionTitle || '剧情看板')}<span class="we-section-motto">— ${h(sectionMotto || '章回多线，随增随改')}</span></div>
+      <div class="we-section-title we-outline-sec-title">${h(sectionTitle || '剧情看板')}${sectionMotto ? `<span class="we-section-motto">— ${h(sectionMotto)}</span>` : ''}</div>
       <div class="we-outline-plan-heading">
         <div class="we-outline-section-head">
           <div class="we-outline-plan-title">${h(plan.title || '还没有剧情大纲')}</div>
@@ -732,6 +744,10 @@ window.OUTLINE_ENGINE_UI = (function() {
             ${iconButton('quick-edit-plan', 'fa-pen', '编辑大纲标题与梗概')}
             ${hasAnyContent ? iconButton('clear-outline', 'fa-trash', '清空当前大纲', '', true) : ''}
           </div>
+        </div>
+        <div class="we-outline-actions we-outline-plan-tools">
+          ${button('open-text', '整理文本')}
+          ${button('edit-plan', draft.plan ? '继续草稿' : '全量编排')}
         </div>
         ${editingPlan ? renderInlinePlanForm(draft.inlineEdit.data) : `
           ${plan.synopsis ? `<details class="we-outline-plan-detail"><summary>作者梗概</summary><p>${h(plan.synopsis)}</p></details>` : ''}
@@ -765,7 +781,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (!hasAnyContent) {
       return `<section class="we-section we-outline-pos-section">
         <div class="we-outline-section-head">
-          <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置<span class="we-section-motto">— 脉络所至，一目了然</span></div>
+          <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置</div>
           <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
         </div>
         <div class="we-outline-empty-box">
@@ -811,7 +827,7 @@ window.OUTLINE_ENGINE_UI = (function() {
 
     return `<section class="we-section we-outline-pos-section">
       <div class="we-outline-section-head">
-        <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置<span class="we-section-motto">— 脉络所至，一目了然</span></div>
+        <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置</div>
         <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
       </div>
       ${plan.title ? `<div class="we-outline-pos-plan">《${h(plan.title)}》</div>` : ''}
@@ -824,14 +840,20 @@ window.OUTLINE_ENGINE_UI = (function() {
     </section>`;
   }
 
+  /** 首页仅保留「核心仪表 + 纵轴导航」；当前位置、建议、看板、注入预览均下沉到各分页。 */
   function renderHome(current, draft, running, enabled) {
-    const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
+    const narrative = schedule('narrative');
     return `<div class="we-outline-home">
-      ${renderOutlineCore(current, draft, running, enabled, schedContext.narrative)}
-      ${renderOutlineNavList(draft)}
-      ${renderCurrentPositionCard(current, draft, schedContext)}
-      ${renderSuggestions(current)}
+      ${renderOutlineCore(current, draft, running, enabled, narrative)}
+      ${renderOutlineNavList(draft, current)}
     </div>`;
+  }
+
+  function renderProgress(current, draft) {
+    const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
+    return `${subTopbar(VIEW_META.progress.title, VIEW_META.progress.poem)}
+      ${renderCurrentPositionCard(current, draft, schedContext)}
+      ${renderSuggestions(current)}`;
   }
 
   function renderTracks(current, draft) {
@@ -839,8 +861,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     const schedContext = { narrative: schedule('narrative'), world: schedule('world') };
     const mode = uiDraft.tracksBoardMode === 'chapter' ? 'chapter' : 'track';
     return `${subTopbar('跨章剧情线', VIEW_META.tracks.poem)}
-      ${renderStoryBoard(current, uiDraft, schedContext, mode, '跨章剧情看板', '草蛇灰线，伏脉千里')}
-      ${renderSuggestions(current)}`;
+      ${renderStoryBoard(current, uiDraft, schedContext, mode, '剧情看板', '')}`;
   }
 
   function displayDiff(value) {
@@ -1174,7 +1195,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       `<div class="we-settings-panel" data-tab="${tab.key}"${tab.key === activeTab ? '' : ' style="display:none;"'}>${panelContent[tab.key] || ''}</div>`
     ).join('');
 
-    return `${subTopbar('设置', '', 'close-settings')}
+    return `${subTopbar('设置', '工欲善其事，必先利其器', 'close-settings')}
       ${tabBar}${panels}
       <div class="we-settings-save-actions we-settings-save-sticky">
         ${button('save-settings', '保存设置')}
@@ -1238,7 +1259,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       </section>`;
     };
     return `${subTopbar('注入与调度', VIEW_META.schedule.poem)}
-      <div class="we-outline-intro-banner">下方展示本轮每个节点为何入选或被条件拦截、即将注入的原文，以及最近一次发往正文模型的完整提示词与三大模块顺序。</div>
+      ${renderInjectionPreview(current, settings().engineEnabled === true, schedule('narrative'))}
       ${renderLastPromptSummaryCard()}
       ${pane('narrative', '正文前台')}
       ${pane('world', '世界后台')}`;
@@ -1370,6 +1391,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     const draft = draftFor(), current = state(), running = draft.busy || Boolean(engine()?.isRunning?.()) || isRebuilding(), enabled = settings().engineEnabled === true;
     const views = {
       home: () => renderHome(current, draft, running, enabled),
+      progress: () => renderProgress(current, draft),
       tracks: () => renderTracks(current, draft),
       schedule: () => renderScheduleView(current),
       facts: () => renderFacts(current, draft),
@@ -1384,17 +1406,8 @@ window.OUTLINE_ENGINE_UI = (function() {
         : draft.textOpen
           ? renderTextImport(draft)
           : (views[draft.view] || views.home)();
-    let statusText = '剧情模块当前关闭；仍可编辑与保存计划，启用后才检查和注入。';
-    if (enabled) {
-      const injectPrompt = settings().injectIntoPrompt !== false;
-      const selectedCount = (schedule('narrative').nodeIds || []).length;
-      statusText = injectPrompt
-        ? `剧情模块已启用 · 每 ${settings().checkEveryX ?? 3} 轮自动检查 · 本轮拟向正文注入 ${selectedCount} 个节点`
-        : `剧情模块已启用 · 每 ${settings().checkEveryX ?? 3} 轮自动检查 · 正文注入已暂停`;
-    }
-
+    // 模块运行状态已并入首页核心卡；二级页与设置页顶部不再常驻状态条，保持三模块层级一致
     return `<div class="we-outline-root">
-      <div class="we-outline-status-strip${enabled ? ' is-enabled' : ''}">${h(statusText)}</div>
       ${draft.message ? `<p role="status" class="we-outline-message${draft.error ? ' is-error' : ''}">${h(draft.message)}</p>` : ''}
       ${renderTemporalNotice(current)}
       ${renderImportReview(draft)}
@@ -1533,7 +1546,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   async function handleAction(action, element) {
     const draft = draftFor(), ds = element?.dataset || {}, current = state();
     const ci = Number(ds.outlineCi);
-    if (['home', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug'].some(view => action === 'view-' + view)) {
+    if (['home', 'progress', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug'].some(view => action === 'view-' + view)) {
       const nextView = action.slice(5);
       draft.view = nextView;
       if (nextView === 'tracks' && !draft.tracksBoardMode) draft.tracksBoardMode = 'track';

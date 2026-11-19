@@ -4527,3 +4527,126 @@
 .we-api-adv-body {
   margin-top: 8px;
 }
+
+/* ===================================================================
+ * 三模块统一设计：首页 = 核心仪表 + 纵轴导航；具体数据与操作一律下沉到分页
+ * =================================================================== */
+/* 导航副题单行省略，避免长文案折行打乱纵轴节奏 */
+.we-nav-sub,
+.we-nav-poem {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 需要处理的入口（如待追平、待审建议）：副题与圆点转为金色提醒 */
+.we-nav-row--alert .we-nav-sub { color: var(--we-gold); }
+.we-nav-row--alert:not(.we-nav-row--selected) .we-nav-dot {
+  border-color: var(--we-gold);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--we-gold) 55%, transparent);
+}
+.we-nav-badge {
+  flex-shrink: 0;
+  align-self: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--we-gold) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--we-gold) 55%, transparent);
+  color: var(--we-gold);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* 跨模块入口：虚线圆点 + 外跳图标，和本模块分页区分 */
+.we-nav-row--jump .we-nav-dot { border-style: dashed; }
+.we-nav-row--jump .we-nav-label { opacity: 0.86; }
+
+/* 核心卡内的快捷操作（每个模块最多 1~2 个高频按钮）与一行运行状态 */
+.we-core-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding-top: 10px;
+  border-top: 1px solid var(--we-hairline);
+}
+.we-core-actions .we-btn { margin: 0; padding: 4px 14px; font-size: 12px; }
+.we-core-status {
+  width: 100%;
+  margin-top: -6px;
+  color: var(--we-text3);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.we-core-status.is-active { color: var(--we-accent); }
+.we-core-status:empty { display: none; }
+
+/* 统一的分页顶栏副题（世界 / 记忆 / 大纲 / 设置页共用） */
+.we-sub-poem {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--we-accent);
+  font-family: "SimSun", "宋体", "Songti SC", "STSong", serif;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+@media (max-width: 520px) {
+  .we-sub-poem { display: none; }
+}
+
+/* 记忆「填表」分页 */
+.we-fill-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.we-fill-fact {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--we-hairline);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--we-accent) 4%, transparent);
+  font-size: 11px;
+  color: var(--we-text3);
+}
+.we-fill-fact strong { color: var(--we-text); font-weight: 600; font-size: 12px; }
+.we-fill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.we-fill-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--we-text2);
+  cursor: pointer;
+}
+.we-fill-check-block { display: flex; margin: 2px 0 10px; line-height: 1.5; }
+.we-fill-range-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.we-fill-status { margin: 2px 2px 10px; }
+.we-fill-status:empty { display: none; }
+
+/* 吸底保存栏：吸到面板内边距之下（与顶栏 top:-12px 对称），并加上缘投影，滚动内容不再从按钮下方透出 */
+.we-settings-save-sticky {
+  bottom: -12px;
+  margin-bottom: -12px;
+  padding-bottom: 12px;
+  box-shadow: 0 -8px 12px -6px rgba(0, 0, 0, 0.35);
+}
+
+/* 头部高度在三模块间保持一致，切换标签时不跳动 */
+.we-header-top { min-height: 30px; align-items: center; }
+.we-header-mood { min-height: 22px; }

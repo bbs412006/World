@@ -4069,7 +4069,7 @@ window.MEMORY_ENGINE = (function() {
 
   function setSummaryBackfillStatus(current, total, message) {
     summaryBackfillStatus = { running: backfillRunning, current, total, message: message || '' };
-    for (const id of ['we-memory-home-fill-status', 'we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
+    for (const id of ['we-memory-home-fill-status', 'we-memory-core-status', 'we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
       const element = document.getElementById(id);
       if (element) element.textContent = summaryBackfillStatus.message;
     }

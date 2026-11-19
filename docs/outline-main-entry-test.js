@@ -194,22 +194,29 @@ function runMainEntrySuite() {
   // 3. 剧情大纲瘦身首页与分页结构检查（统一视觉语言 + 职责一目了然）
   const outlineHtml = sandbox.OUTLINE_ENGINE_UI.render();
   assert.ok(outlineHtml.includes('we-outline-core-section') && outlineHtml.includes('剧情脉络'), '剧情大纲首页应包含核心环形仪表盘');
-  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="tracks"') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"'), '剧情大纲首页纵轴导航应保留剧情、注入、线索 3 项高频入口');
+  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="progress"') && outlineHtml.includes('data-outline-nav="tracks"') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"'), '剧情大纲首页纵轴导航应包含进度、剧情、注入、线索 4 项入口');
   assert.ok(!outlineHtml.includes('data-outline-nav="transfer"') && !outlineHtml.includes('data-outline-nav="recovery"'), '低频存档与恢复已收进设置页，不应占首页纵轴导航');
-  assert.ok(outlineHtml.includes('we-outline-pos-section') && outlineHtml.includes('当前位置'), '剧情大纲首页应展示当前所处剧情位置');
+  assert.ok(!outlineHtml.includes('we-outline-pos-section'), '当前位置卡片已下沉到「进度」分页，首页不再平铺');
   assert.ok(!outlineHtml.includes('we-outline-board-toolbar'), '完整剧情看板已放进导航“剧情”模块，首页不再重复平铺');
+  assert.ok(!outlineHtml.includes('data-outline-action="open-text"') && !outlineHtml.includes('data-outline-action="toggle-injection-preview"'), '首页核心卡只保留立即检查等高频操作，整理文本与注入预览已下沉到分页');
+  assert.ok(outlineHtml.includes('we-core-actions') && outlineHtml.includes('data-outline-action="check-now"'), '首页核心卡应使用三模块统一的快捷操作区');
+  assert.ok(!outlineHtml.includes('we-outline-status-strip'), '模块状态已并入核心卡，不再在页面顶部常驻状态条');
 
   // 4. 二级分页、设置选项卡与编辑器均使用统一的 we-sub-topbar 与 we-settings-tabs-shell
   return (async () => {
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
-    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('正文注入实时预览'), '首页应支持展开注入预览看作用内容');
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-injection-preview');
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-progress');
+    const progressHtml = sandbox.OUTLINE_ENGINE_UI.render();
+    assert.ok(progressHtml.includes('we-outline-pos-section') && progressHtml.includes('当前位置'), '「进度」分页应展示当前所处剧情位置');
+
+    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-schedule');
+    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('正文注入实时预览'), '「注入」分页顶部应直接展示正文注入实时预览');
 
     await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-tracks');
     const tracksHtml = sandbox.OUTLINE_ENGINE_UI.render();
     assert.ok(tracksHtml.includes('we-outline-home-chapter') && tracksHtml.includes('we-outline-board-toolbar') && tracksHtml.includes('data-outline-action="board-mode-chapter"') && tracksHtml.includes('data-outline-action="board-mode-track"'), '剧情分页应直接采用完整剧情看板样式并支持按章节/按剧情线切换');
+    assert.ok(tracksHtml.includes('data-outline-action="open-text"') && tracksHtml.includes('data-outline-action="edit-plan"'), '整理文本与全量编排入口应位于「剧情」看板内');
 
-    for (const view of ['tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
+    for (const view of ['progress', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
       await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-' + view);
       const subHtml = sandbox.OUTLINE_ENGINE_UI.render();
       assert.ok(subHtml.includes('we-sub-topbar') && subHtml.includes('data-outline-action="view-home"'), `${view} 分页必须使用统一返回顶栏`);
