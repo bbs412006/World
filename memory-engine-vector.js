@@ -9,6 +9,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 
   let maintainRunning = false;
+  let activeMaintainPromise = null;
   let recallRunning = false;
   let abortController = null;
   let maintainStatus = { running: false, current: 0, total: 0, message: '' };
@@ -104,7 +105,8 @@ window.MEMORY_ENGINE_VECTOR = (function() {
       chatId: clean(chatId || getChatId()),
       embeddingModel: '',
       dimensions: 0,
-      records: {}
+      records: {},
+      hashArchive: {}
     };
   }
 
@@ -122,7 +124,8 @@ window.MEMORY_ENGINE_VECTOR = (function() {
         chatId: id,
         embeddingModel: clean(parsed.embeddingModel),
         dimensions: Math.max(0, parseInt(parsed.dimensions, 10) || 0),
-        records: parsed.records
+        records: parsed.records,
+        hashArchive: parsed.hashArchive && typeof parsed.hashArchive === 'object' ? parsed.hashArchive : {}
       };
     } catch (_) {
       return emptyStore(id);
@@ -131,15 +134,91 @@ window.MEMORY_ENGINE_VECTOR = (function() {
 
   function saveVectorStore(data, chatId) {
     const id = clean(chatId || data?.chatId || getChatId());
+    const archive = data?.hashArchive && typeof data.hashArchive === 'object' ? { ...data.hashArchive } : {};
+    const archiveKeys = Object.keys(archive);
+    if (archiveKeys.length > 300) {
+      for (const k of archiveKeys.slice(0, archiveKeys.length - 300)) delete archive[k];
+    }
     const next = {
       version: 1,
       chatId: id,
       embeddingModel: clean(data?.embeddingModel),
       dimensions: Math.max(0, parseInt(data?.dimensions, 10) || 0),
-      records: data?.records && typeof data.records === 'object' ? data.records : {}
+      records: data?.records && typeof data.records === 'object' ? data.records : {},
+      hashArchive: archive
     };
     window.WORLD_ENGINE_STORE?.setItem?.(VECTOR_PREFIX + id, JSON.stringify(next));
     return next;
+  }
+
+  function pruneVectorsForState(stateOverride) {
+    const id = getChatId();
+    const st = settings();
+    const state = stateOverride || window.MEMORY_ENGINE_DATA?.loadState?.();
+    if (!state) return { pruned: 0, restored: 0, total: 0 };
+    const store = loadVectorStore(id);
+    if (!store.hashArchive || typeof store.hashArchive !== 'object') store.hashArchive = {};
+    for (const rec of Object.values(store.records || {})) {
+      if (rec?.textHash && Array.isArray(rec.vector) && rec.vector.length) {
+        store.hashArchive[rec.textHash] = rec.vector;
+      }
+    }
+    const items = collectVectorizableItems(state, st);
+    const itemMap = new Map(items.map(item => [item.key, item]));
+    let pruned = 0, restored = 0;
+    for (const key of Object.keys(store.records || {})) {
+      const item = itemMap.get(key);
+      if (!item) {
+        delete store.records[key];
+        pruned++;
+        continue;
+      }
+      const existing = store.records[key];
+      if (!existing || existing.textHash !== item.textHash) {
+        const archived = store.hashArchive[item.textHash];
+        if (Array.isArray(archived) && archived.length) {
+          store.records[key] = {
+            key: item.key,
+            kind: item.kind,
+            ...(item.entityType ? { entityType: item.entityType } : {}),
+            refId: item.refId,
+            label: item.label,
+            text: item.text,
+            textHash: item.textHash,
+            vector: archived,
+            updatedAt: Date.now()
+          };
+          restored++;
+        } else {
+          delete store.records[key];
+          pruned++;
+        }
+      }
+    }
+    for (const item of items) {
+      if (!store.records[item.key]) {
+        const archived = store.hashArchive[item.textHash];
+        if (Array.isArray(archived) && archived.length) {
+          store.records[item.key] = {
+            key: item.key,
+            kind: item.kind,
+            ...(item.entityType ? { entityType: item.entityType } : {}),
+            refId: item.refId,
+            label: item.label,
+            text: item.text,
+            textHash: item.textHash,
+            vector: archived,
+            updatedAt: Date.now()
+          };
+          restored++;
+        }
+      }
+    }
+    if (pruned > 0 || restored > 0) {
+      saveVectorStore(store, id);
+      if (lastRecallCache?.chatId === id) lastRecallCache = null;
+    }
+    return { pruned, restored, total: Object.keys(store.records).length };
   }
 
   function clearVectorCache(chatId) {
@@ -296,63 +375,44 @@ window.MEMORY_ENGINE_VECTOR = (function() {
     if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
     const embCfg = embeddingConfig(st);
     if (!embCfg.apiUrl || !embCfg.model) throw new Error('请先配置 Embedding API URL 和模型名称');
-    if (maintainRunning) throw new Error('向量维护任务已在运行中');
     if (typeof window.WORLD_ENGINE_API?.callEmbeddingApi !== 'function') throw new Error('API 模块未支持 Embedding');
-
-    const chatId = getChatId();
-    const state = options.state || window.MEMORY_ENGINE_DATA?.loadState?.();
-    const items = collectVectorizableItems(state, st);
-    const store = options.forceRebuild ? emptyStore(chatId) : loadVectorStore(chatId);
-
-    // 清理已不存在的旧条目，防止向量库孤儿残留
-    const validKeys = new Set(items.map(item => item.key));
-    let pruned = 0;
-    for (const key of Object.keys(store.records)) {
-      if (!validKeys.has(key)) { delete store.records[key]; pruned++; }
+    if (maintainRunning && activeMaintainPromise) {
+      if (options.forceRebuild) throw new Error('向量维护任务已在运行中');
+      try { await activeMaintainPromise; } catch (_) {}
     }
+    if (maintainRunning) throw new Error('向量维护任务已在运行中');
 
-    const modelChanged = store.embeddingModel && store.embeddingModel !== embCfg.model;
-    const pending = items.filter(item => {
-      const existing = store.records[item.key];
-      return options.forceRebuild || modelChanged || !existing || existing.textHash !== item.textHash
-        || !Array.isArray(existing.vector) || !existing.vector.length;
-    });
+    const runMaintain = async () => {
+      const chatId = getChatId();
+      const state = options.state || window.MEMORY_ENGINE_DATA?.loadState?.();
+      const items = collectVectorizableItems(state, st);
+      const store = options.forceRebuild ? emptyStore(chatId) : loadVectorStore(chatId);
 
-    if (pruned > 0 && !pending.length) {
-      store.embeddingModel = embCfg.model;
-      saveVectorStore(store, chatId);
-    }
-    if (!pending.length) {
-      maintainStatus = { running: false, current: items.length, total: items.length, message: '全部向量均已是最新，无需重复请求' };
-      options.onProgress?.(maintainStatus);
-      return { updated: 0, pruned, total: items.length, skipped: true };
-    }
+      // 清理已不存在的旧条目，防止向量库孤儿残留
+      const validKeys = new Set(items.map(item => item.key));
+      let pruned = 0;
+      for (const key of Object.keys(store.records)) {
+        if (!validKeys.has(key)) { delete store.records[key]; pruned++; }
+      }
 
-    maintainRunning = true;
-    abortController = new AbortController();
-    let updated = 0;
-    try {
-      store.embeddingModel = embCfg.model;
-      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-        if (abortController.signal.aborted || getChatId() !== chatId) break;
-        const batch = pending.slice(i, i + BATCH_SIZE);
-        maintainStatus = {
-          running: true,
-          current: updated,
-          total: pending.length,
-          message: `正在计算向量 ${updated}/${pending.length}…`
-        };
-        options.onProgress?.(maintainStatus);
-        const vectors = await window.WORLD_ENGINE_API.callEmbeddingApi(
-          batch.map(item => item.text),
-          embCfg,
-          abortController.signal
-        );
-        if (abortController.signal.aborted || getChatId() !== chatId) break;
-        batch.forEach((item, idx) => {
-          const norm = normalizeVector(vectors[idx]);
-          if (!norm.length) return;
-          store.dimensions = norm.length;
+      const modelChanged = store.embeddingModel && store.embeddingModel !== embCfg.model;
+      if (modelChanged || options.forceRebuild) store.hashArchive = {};
+      if (!store.hashArchive || typeof store.hashArchive !== 'object') store.hashArchive = {};
+      for (const rec of Object.values(store.records || {})) {
+        if (rec?.textHash && Array.isArray(rec.vector) && rec.vector.length) {
+          store.hashArchive[rec.textHash] = rec.vector;
+        }
+      }
+      let restoredFromArchive = 0;
+      const pending = items.filter(item => {
+        const existing = store.records[item.key];
+        if (!options.forceRebuild && !modelChanged && existing && existing.textHash === item.textHash
+            && Array.isArray(existing.vector) && existing.vector.length) {
+          return false;
+        }
+        if (!options.forceRebuild && !modelChanged && Array.isArray(store.hashArchive[item.textHash]) && store.hashArchive[item.textHash].length) {
+          const archived = store.hashArchive[item.textHash];
+          store.dimensions = archived.length;
           store.records[item.key] = {
             key: item.key,
             kind: item.kind,
@@ -361,25 +421,87 @@ window.MEMORY_ENGINE_VECTOR = (function() {
             label: item.label,
             text: item.text,
             textHash: item.textHash,
-            vector: norm,
+            vector: archived,
             updatedAt: Date.now()
           };
-          updated++;
-        });
-        // 每完成一批立即落盘（防断电/手动停止后重复计费）
+          restoredFromArchive++;
+          return false;
+        }
+        return true;
+      });
+
+      if ((pruned > 0 || restoredFromArchive > 0) && !pending.length) {
+        store.embeddingModel = embCfg.model;
         saveVectorStore(store, chatId);
       }
-      maintainStatus = {
-        running: false,
-        current: updated,
-        total: pending.length,
-        message: abortController.signal.aborted ? `已中止，已保留已完成 ${updated} 条向量` : `向量维护完成：新增/更新 ${updated} 条`
-      };
-      options.onProgress?.(maintainStatus);
-      return { updated, pruned, total: items.length };
+      if (!pending.length) {
+        maintainStatus = { running: false, current: items.length, total: items.length, message: '全部向量均已是最新，无需重复请求' };
+        options.onProgress?.(maintainStatus);
+        return { updated: 0, pruned, total: items.length, skipped: true };
+      }
+
+      maintainRunning = true;
+      abortController = new AbortController();
+      let updated = 0;
+      try {
+        store.embeddingModel = embCfg.model;
+        for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+          if (abortController.signal.aborted || getChatId() !== chatId) break;
+          const batch = pending.slice(i, i + BATCH_SIZE);
+          maintainStatus = {
+            running: true,
+            current: updated,
+            total: pending.length,
+            message: `正在计算向量 ${updated}/${pending.length}…`
+          };
+          options.onProgress?.(maintainStatus);
+          const vectors = await window.WORLD_ENGINE_API.callEmbeddingApi(
+            batch.map(item => item.text),
+            embCfg,
+            abortController.signal
+          );
+          if (abortController.signal.aborted || getChatId() !== chatId) break;
+          batch.forEach((item, idx) => {
+            const norm = normalizeVector(vectors[idx]);
+            if (!norm.length) return;
+            store.dimensions = norm.length;
+            store.hashArchive[item.textHash] = norm;
+            store.records[item.key] = {
+              key: item.key,
+              kind: item.kind,
+              ...(item.entityType ? { entityType: item.entityType } : {}),
+              refId: item.refId,
+              label: item.label,
+              text: item.text,
+              textHash: item.textHash,
+              vector: norm,
+              updatedAt: Date.now()
+            };
+            updated++;
+          });
+          // 每完成一批立即落盘（防断电/手动停止后重复计费）
+          saveVectorStore(store, chatId);
+        }
+        maintainStatus = {
+          running: false,
+          current: updated,
+          total: pending.length,
+          message: abortController.signal.aborted ? `已中止，已保留已完成 ${updated} 条向量` : `向量维护完成：新增/更新 ${updated} 条`
+        };
+        options.onProgress?.(maintainStatus);
+        return { updated, pruned, total: items.length };
+      } finally {
+        maintainRunning = false;
+        abortController = null;
+      }
+    };
+
+    const p = runMaintain();
+    activeMaintainPromise = p;
+    try {
+      return await p;
     } finally {
-      maintainRunning = false;
-      abortController = null;
+      if (activeMaintainPromise === p) activeMaintainPromise = null;
     }
   }
 
@@ -631,6 +753,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
     loadVectorStore,
     saveVectorStore,
     clearVectorCache,
+    pruneVectorsForState,
     collectVectorizableItems,
     maintainVectors,
     recallForQuery,

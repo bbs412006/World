@@ -1071,7 +1071,7 @@ window.WORLD_ENGINE_UI = (function() {
     const delayBadge = coverage?.effectiveDelayFloors > 0
       ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 轮）</span>` : '';
     const coverageText = coverage
-      ? `当前至第 ${Math.max(0, coverage.latestLayer)} 层 · 已覆盖 ${coverage.coveredAiCount}/${coverage.totalAiCount} 轮${coverage.uncoveredCount > 0 ? ` · 未覆盖 ${coverage.uncoveredCount} 轮` : ' · 已全部覆盖'}${coverage.staleCount > 0 ? ` · 待重建 ${coverage.staleCount} 条` : ''}`
+      ? `当前至第 ${Math.max(0, coverage.latestLayer)} 层 · 已填表 ${coverage.coveredAiCount}/${coverage.totalAiCount} 个 AI 层${(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) > 0 ? ` · 待补填 ${coverage.uncoveredCombinedCount ?? coverage.uncoveredCount} 层` : ' · 已全部覆盖'}${coverage.staleCount > 0 ? ` · 待重建 ${coverage.staleCount} 条` : ''}`
       : `共 ${items.length} 条纪要`;
 
     const toolbar = `<div class="we-section" style="margin-bottom:10px;padding:10px;">
@@ -1096,8 +1096,8 @@ window.WORLD_ENGINE_UI = (function() {
             <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>每批轮数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
           </div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 8px;font-size:11px;color:var(--we-text2);">
-            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite" checked> 覆盖范围内已有纪要</label>
-            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-include-memory"> 同步提取人物与实体</label>
+            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite" checked> 覆盖范围内已有填表</label>
+            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-include-memory" checked> 同步提取人物/实体/事实/弧光</label>
           </div>
           <button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button>
         </div>
@@ -1129,7 +1129,7 @@ window.WORLD_ENGINE_UI = (function() {
         ? '已失效（待回退重填）'
         : (recentIdSet.has(item.id) ? '直接注入中' : '历史召回池');
       return `<div class="${memoryRecordClass(collapseKey, '', defaultCollapsed)}" data-small-id="${h(item.id)}">
-      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${badges}楼层 ${h(String(item.startLayer))}–${h(String(item.endLayer))}</div><div class="we-memory-record-meta">${stateLabel} · ${h(item.id)}</div></div>
+      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${badges}第 ${index + 1} 条 · 楼层 ${h(String(item.startLayer))}–${h(String(item.endLayer))}</div><div class="we-memory-record-meta">${stateLabel} · ${h(item.id)}</div></div>
         <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-edit-small" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-small" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
       </div>
       ${memoryRecordBody(collapseKey, _memoryEditingSmall === item.id ? editor(item, false) : `<div class="we-memory-summary-text">${h(item.content || '（内容为空）')}</div>${keywordsHtml}`, defaultCollapsed)}

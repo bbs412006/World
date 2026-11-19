@@ -69,17 +69,68 @@ function createHarness(initialChat) {
     OUTLINE_ENGINE_SETTINGS: { getSettings: () => ({ engineEnabled: true, useMemoryReference: true, useWorldReference: true }) },
     WORLD_ENGINE_API: {
       getSettings: () => ({ engineEnabled: true, memoryLinkEnabled: true, syncToOutlineEnabled: true }),
+      async callEmbeddingApi(inputs) {
+        const list = Array.isArray(inputs) ? inputs : [inputs];
+        return list.map(text => {
+          const s = String(text || '');
+          let h1 = 0, h2 = 0, h3 = 0;
+          for (let i = 0; i < s.length; i++) {
+            const c = s.charCodeAt(i);
+            h1 = (h1 * 31 + c) % 997;
+            h2 = (h2 * 37 + c) % 991;
+            h3 = (h3 * 41 + c) % 983;
+          }
+          return [Number((h1 / 997).toFixed(6)), Number((h2 / 991).toFixed(6)), Number((h3 / 983).toFixed(6))];
+        });
+      },
       async callApi(prompt) {
         calls.push(prompt);
         const rangeMatch = /楼层\s*(\d+)\s*至\s*(\d+)/.exec(prompt);
-        const label = rangeMatch ? `L${rangeMatch[1]}-${rangeMatch[2]}` : 'L?';
-        const snippet = (prompt.match(/【待总结对话】\n([\s\S]*?)(?:\n\n【统一输出要求】|$)/)?.[1] || '').trim().slice(0, 60);
+        const startL = rangeMatch ? Number(rangeMatch[1]) : 0;
+        const endL = rangeMatch ? Number(rangeMatch[2]) : 0;
+        const label = rangeMatch ? `L${startL}-${endL}` : 'L?';
+        const snippet = (prompt.match(/【(?:待总结对话|待提取对话)】\n([\s\S]*?)(?:\n\n(?:请严格按照|【任务说明|【统一输出要求)|$)/)?.[1] || '').trim().slice(0, 80);
         const res = {};
         if (prompt.includes('"personal_memory":')) {
-          res.personal_memory = [{ name: ['角色'], known_by: [], memory: `提取自${label}`, time: '' }];
-          res.entity_updates = [];
-          res.ongoing_fact_updates = [];
-          res.character_arc_updates = [];
+          res.personal_memory = [
+            { name: ['角色'], known_by: [], memory: `提取自${label}`, time: '' }
+          ];
+          if (endL >= 11) {
+            res.personal_memory.push({ name: [`新人物_${label}`], known_by: ['角色'], memory: `登场于${label}`, time: '' });
+          }
+          res.entity_updates = [
+            { type: 'location', name: `地点_${label}`, aliases: [], description: `发现于${label}`, event: `抵达${label}`, time: '' }
+          ];
+          res.ongoing_fact_updates = [
+            {
+              action: 'upsert',
+              id: '',
+              category: '状态',
+              subject: '角色',
+              fact: `事实_${label}`,
+              keywords: [label]
+            }
+          ];
+          // 在第 6 个 AI 层（L11-12）完结第 1 层的事实 fact_000001，以测试回退后该事实与向量能否自动恢复激活
+          if (endL === 12) {
+            res.ongoing_fact_updates.push({
+              action: 'resolve',
+              id: 'fact_000001',
+              category: '状态',
+              subject: '角色',
+              fact: '事实_L1-2',
+              keywords: ['L1-2']
+            });
+          }
+          res.character_arc_updates = [
+            {
+              name: '角色',
+              current_stance: `立场_${label}`,
+              arc_summary: `弧光_${label}`,
+              relationship: `关系_${label}`,
+              progress_pct: Math.min(100, endL * 5)
+            }
+          ];
         }
         if (prompt.includes('"small_summary": ""')) {
           res.small_summary = `纪要(${label})：${snippet.replace(/\s+/g, ' ')}`;
@@ -100,6 +151,7 @@ function createHarness(initialChat) {
     'memory-engine-timeline.js',
     'memory-engine-prompt.js',
     'memory-engine-small-summary-prompt.js',
+    'memory-engine-vector.js',
     'story-engine-projection.js',
     'story-engine-bridge.js',
     'memory-engine.js'
@@ -366,6 +418,153 @@ function makeChat(rounds) {
     const bridgeRef = h.sandbox.STORY_ENGINE_BRIDGE.buildOutlineReferenceContext({ plan: { nodes: [] } });
     assert.ok(bridgeRef.includes('近期事件纪要'), '大纲参考背景应包含近期事件纪要');
     assert.ok(!bridgeRef.includes('最新总述'), '去除总述后大纲参考背景不得再出现最新总述');
+  }
+
+  // 7. 进入之前未填过表的 14 楼旧卡（含已自动填了 13-14 的情况），一键追平必须补齐全部 1..7 条填表数据（纪要+人物+实体+事实+弧光+向量）
+  {
+    // 模拟用户在第 12 楼时首次开启插件（init 将 small_summary_layer 设为 12），随后推进到第 14 楼自动填了 13-14
+    const h = createHarness(makeChat(6)); // 0..12
+    h.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+      evolveMode: 'auto',
+      smallSummaryEveryX: 1,
+      skipCurrentFloorSummary: false,
+      summaryDelayFloors: 0,
+      vectorEnabled: true,
+      vectorAutoMaintain: true,
+      embeddingApiUrl: 'https://mock.embedding/v1/embeddings',
+      embeddingModel: 'text-embedding-3-small'
+    });
+    h.sandbox.MEMORY_ENGINE.init();
+    assert.strictEqual(h.sandbox.MEMORY_ENGINE_DATA.loadState().event_memory.small_summary_layer, 12);
+
+    // 推进到第 14 楼（新增 13 用户 + 14 AI），触发自动提取 13-14
+    h.getChat().push(
+      { is_user: true, name: '用户', mes: '第7轮用户发言：我们去第7层区域。', swipe_id: 0, extra: {} },
+      { is_user: false, name: '角色', mes: '第7轮角色回复：已抵达第7层区域。<small>第7日</small>', swipe_id: 0, extra: {} }
+    );
+    await h.sandbox.MEMORY_ENGINE._test.autoExtract();
+    let state = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.deepStrictEqual(
+      plain(state.event_memory.small_summaries.map(s => [s.startLayer, s.endLayer])),
+      [[13, 14]],
+      '仅自动提取最新一轮时只有 13-14'
+    );
+
+    // 此时覆盖率检测必须识别出前 6 个 AI 层（2,4,6,8,10,12）未填表！
+    const covBefore = h.sandbox.MEMORY_ENGINE.getSummaryCoverageStatus();
+    assert.deepStrictEqual(plain(covBefore.uncoveredCombinedAiLayers), [2, 4, 6, 8, 10, 12]);
+
+    // 点击“一键追平到最新”：应补齐前 6 个 AI 层，最终按 1..7 顺序呈现全部 7 条填表数据
+    const cu = await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(cu.completedBatches, 6, '应补齐前 6 个缺失的 AI 层');
+    await h.sandbox.MEMORY_ENGINE_VECTOR.maintainVectors();
+    state = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.deepStrictEqual(
+      plain(state.event_memory.small_summaries.map(s => [s.startLayer, s.endLayer])),
+      [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14]],
+      '追平后必须完整呈现 1..7 共 7 条纪要'
+    );
+    assert.deepStrictEqual(
+      plain(state.timeline.nodes.map(n => [n.startLayer, n.endLayer])),
+      [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14]],
+      '追平后时间线节点必须按 1..7 楼层顺序完整排列并重放'
+    );
+    assert.strictEqual(state.round, 7, '累计推演轮次应为 7');
+  }
+
+  // 8. 14 楼（7 个 AI 层）全要素填表后删除第 6、7 两个 AI 层：纪要/人物/实体/持续事实/角色弧光/向量必须全部精确回退至第 1–5 层填表时的状态
+  {
+    const h = createHarness(makeChat(5)); // 先到第 10 楼（前 5 个 AI 层：1-2, 3-4, 5-6, 7-8, 9-10）
+    h.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
+      evolveMode: 'auto',
+      smallSummaryEveryX: 1,
+      skipCurrentFloorSummary: false,
+      summaryDelayFloors: 0,
+      vectorEnabled: true,
+      vectorAutoMaintain: true,
+      embeddingApiUrl: 'https://mock.embedding/v1/embeddings',
+      embeddingModel: 'text-embedding-3-small'
+    });
+    // 追平前 5 个 AI 层并维护向量，记录第 1–5 层填表完成时的完整快照
+    await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    await h.sandbox.MEMORY_ENGINE_VECTOR.maintainVectors();
+
+    const stateAt5 = plain(h.sandbox.MEMORY_ENGINE_DATA.loadState());
+    const vectorsAt5 = plain(h.sandbox.MEMORY_ENGINE_VECTOR.loadVectorStore().records);
+    assert.strictEqual(stateAt5.event_memory.small_summaries.length, 5);
+    assert.strictEqual(stateAt5.timeline.nodes.length, 5);
+    assert.strictEqual(stateAt5.round, 5);
+    assert.strictEqual(stateAt5.chatLayer, 10);
+    assert.strictEqual(stateAt5.event_memory.small_summary_layer, 10);
+    // 验证第 5 层时：只有 1 个人物（角色，含 5 条记忆）、5 个地点实体、5 条 active 事实（含 fact_000001）、角色弧光进度 50
+    assert.strictEqual(stateAt5.personal_memory.length, 1);
+    assert.strictEqual((stateAt5.personal_memory[0].memory[''] || []).length, 5);
+    assert.strictEqual(stateAt5.entity_memory.location.length, 5);
+    assert.strictEqual(stateAt5.ongoing_facts.filter(f => f.status === 'active').length, 5);
+    assert.strictEqual(stateAt5.character_arcs[0].progressPct, 50);
+    assert.ok(vectorsAt5['fact:fact_000001'], '第 5 层时 fact_000001 处于激活态且拥有向量');
+
+    // 继续推进第 6、7 两个 AI 层（11-12 与 13-14）并填表 + 维护向量
+    h.getChat().push(
+      { is_user: true, name: '用户', mes: '第6轮用户发言：我们去第6层区域。', swipe_id: 0, extra: {} },
+      { is_user: false, name: '角色', mes: '第6轮角色回复：已抵达第6层区域。<small>第6日</small>', swipe_id: 0, extra: {} },
+      { is_user: true, name: '用户', mes: '第7轮用户发言：我们去第7层区域。', swipe_id: 0, extra: {} },
+      { is_user: false, name: '角色', mes: '第7轮角色回复：已抵达第7层区域。<small>第7日</small>', swipe_id: 0, extra: {} }
+    );
+    await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    await h.sandbox.MEMORY_ENGINE_VECTOR.maintainVectors();
+
+    const stateAt7 = plain(h.sandbox.MEMORY_ENGINE_DATA.loadState());
+    const vectorsAt7 = plain(h.sandbox.MEMORY_ENGINE_VECTOR.loadVectorStore().records);
+    assert.strictEqual(stateAt7.event_memory.small_summaries.length, 7);
+    assert.strictEqual(stateAt7.timeline.nodes.length, 7);
+    assert.strictEqual(stateAt7.personal_memory.length, 3, '第 6、7 层新增了 2 名新人物');
+    assert.strictEqual(stateAt7.entity_memory.location.length, 7, '第 6、7 层新增了 2 个地点实体');
+    assert.strictEqual(
+      stateAt7.ongoing_facts.find(f => f.id === 'fact_000001')?.status,
+      'resolved',
+      '第 6 层将 fact_000001 标记为已完结'
+    );
+    assert.strictEqual(stateAt7.character_arcs[0].progressPct, 70, '第 7 层将角色弧光推进至 70');
+    assert.ok(!vectorsAt7['fact:fact_000001'], '第 7 层时已完结的 fact_000001 从活动向量池移除');
+    assert.ok(vectorsAt7['small:small_000006'] && vectorsAt7['small:small_000007'], '第 6、7 层纪要向量已生成');
+
+    // 现在删除第 6、7 两个 AI 层（甚至故意留下第 11 层孤儿用户消息，即先删 12..14，再删 11）
+    h.getChat().splice(12, 3); // 留下 0..11（第 11 层是孤儿用户楼，第 6、7 两个 AI 层 12 和 14 已被删除）
+    h.calls.length = 0;
+    await h.sandbox.MEMORY_ENGINE.reconcileHistory({ refillUncovered: true });
+    assert.strictEqual(h.calls.length, 0, '删除第 6、7 两个 AI 层回退时不应产生多余的 API 请求');
+
+    // 再把第 11 层孤儿用户楼也删掉（完整删掉 11..14）
+    h.getChat().splice(11, 1);
+    await h.sandbox.MEMORY_ENGINE.reconcileHistory({ refillUncovered: true });
+    assert.strictEqual(h.calls.length, 0);
+
+    const rolledState = plain(h.sandbox.MEMORY_ENGINE_DATA.loadState());
+    const rolledVectors = plain(h.sandbox.MEMORY_ENGINE_VECTOR.loadVectorStore().records);
+
+    // 验证所有结构化数据与第 1–5 层填表时的状态完全一致！
+    assert.deepStrictEqual(rolledState.event_memory.small_summaries, stateAt5.event_memory.small_summaries, '纪要必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.timeline.nodes, stateAt5.timeline.nodes, '时间线节点必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.personal_memory, stateAt5.personal_memory, '人物记忆必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.knowledge_index, stateAt5.knowledge_index, '人物知识索引必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.entity_memory, stateAt5.entity_memory, '实体记忆必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.entity_index, stateAt5.entity_index, '实体索引必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.ongoing_facts, stateAt5.ongoing_facts, '持续事实（含第 6 层被完结的 fact_000001 恢复激活）必须精确回退至第 1–5 层状态');
+    assert.deepStrictEqual(rolledState.character_arcs, stateAt5.character_arcs, '角色弧光必须精确回退至第 1–5 层状态');
+    assert.strictEqual(rolledState.round, stateAt5.round, 'round 必须回退至 5');
+    assert.strictEqual(rolledState.chatLayer, stateAt5.chatLayer, 'chatLayer 必须回退至 10');
+    assert.strictEqual(rolledState.event_memory.small_summary_layer, stateAt5.event_memory.small_summary_layer, 'small_summary_layer 必须回退至 10');
+
+    // 验证向量库也同步回退至第 1–5 层填表时的状态（移除第 6、7 层向量，且恢复角色第 5 层向量与 fact_000001 向量）
+    const stripUpdatedAt = records => Object.fromEntries(
+      Object.entries(records).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, { textHash: v.textHash, vector: v.vector, meta: v.meta }])
+    );
+    assert.deepStrictEqual(
+      stripUpdatedAt(rolledVectors),
+      stripUpdatedAt(vectorsAt5),
+      '向量库记录必须精确回退至第 1–5 层填表时的状态'
+    );
   }
 
   console.log('memory summary control, rollback-refill, range & catch-up tests passed');

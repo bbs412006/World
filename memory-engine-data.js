@@ -68,6 +68,7 @@ window.MEMORY_ENGINE_DATA = (function() {
       },
       round: 0,
       chatLayer: null,
+      rebaseLayer: null,
       timeline: null
     };
   }
@@ -187,6 +188,8 @@ window.MEMORY_ENGINE_DATA = (function() {
     next.round = Math.max(0, parseInt(next.round) || 0);
     next.chatLayer = next.chatLayer !== null && next.chatLayer !== '' && Number.isFinite(Number(next.chatLayer))
       ? Number(next.chatLayer) : null;
+    next.rebaseLayer = next.rebaseLayer !== null && next.rebaseLayer !== '' && Number.isFinite(Number(next.rebaseLayer))
+      ? Number(next.rebaseLayer) : null;
     if (!next.timeline || typeof next.timeline !== 'object' || Array.isArray(next.timeline)) {
       // 旧数据没有事件链：把当时的完整最终状态封存为 Root，后续更新才进入节点链。
       next.timeline = newTimeline(next, { migratedFromLegacy: true });
@@ -421,6 +424,7 @@ window.MEMORY_ENGINE_DATA = (function() {
     const layer = currentChatLayer();
     // 导入是把既有记忆接到当前聊天；楼层游标必须从当前聊天重新起步。
     next.chatLayer = layer;
+    next.rebaseLayer = layer;
     next.event_memory.small_summary_layer = layer;
     // 跨聊天导入时，把来源于旧聊天的可重放链压成目标聊天的 Root。
     // 这样新聊天只处理之后的新楼层，不会把相同数字楼层误认为旧节点来源。
