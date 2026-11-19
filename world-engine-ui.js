@@ -1112,6 +1112,7 @@ window.WORLD_ENGINE_UI = (function() {
     const settings = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {};
     const directLimit = settings.smallSummaryInjectLimit === undefined
       ? 8 : Math.max(0, parseInt(settings.smallSummaryInjectLimit) || 0);
+    const minChars = Math.max(50, parseInt(settings.smallSummaryMinChars, 10) || 500);
     const validIds = items.filter(item => item.status !== 'stale' && item.status !== 'failed').map(item => item.id);
     const recentIdSet = new Set(directLimit > 0 ? validIds.slice(-directLimit) : []);
     const pageActions = `<div class="we-memory-page-actions"><button class="we-btn we-btn-primary" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button></div>`;
@@ -1120,7 +1121,7 @@ window.WORLD_ENGINE_UI = (function() {
       <div class="we-memory-form-grid"><div class="we-input-group"><label>起始楼层</label><input class="we-memory-small-start" type="number" min="0" value="${h(String(item.startLayer ?? 0))}"></div><div class="we-input-group"><label>结束楼层</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div></div>
       <div class="we-input-group"><label>纪要关键词（用 / 分隔，用于超出直注窗口后精准召回）</label><input class="we-memory-small-keywords" type="text" value="${h((item.keywords || []).join(' / '))}" placeholder="例如：青铜虎符 / 青石渡"></div>
       <div class="we-input-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input class="we-memory-small-key" type="checkbox" ${item.impactLevel === 'key' ? 'checked' : ''}> 标记为关键转折事件（优先召回与大纲参考）</label></div>
-      <div class="we-input-group"><label>纪要内容</label><textarea class="we-memory-small-content" rows="6">${h(item.content || '')}</textarea><div class="we-hint">API 以 50–200 字为目标，超出时仍完整保留；最新 ${directLimit} 条有效纪要直接注入，更早纪要自动进入关键词与语义召回池。</div></div>
+      <div class="we-input-group"><label>纪要内容</label><textarea class="we-memory-small-content" rows="6">${h(item.content || '')}</textarea><div class="we-hint">API 单层纪要最低目标 ${minChars} 字（可在记忆设置中调整），超出时完整保留；最新 ${directLimit} 条有效纪要直接注入，更早纪要自动进入关键词与语义召回池。</div></div>
       <div class="we-memory-editor-actions"><button class="we-btn we-memory-cancel-edit" type="button">取消</button><button class="we-btn we-btn-primary we-memory-save-small" data-new="${isNew ? 'true' : 'false'}" type="button">保存</button></div>
     </div>`;
     const draft = _memoryEditingSmall === '__new__'
@@ -1789,6 +1790,7 @@ window.WORLD_ENGINE_UI = (function() {
       + sectionBody(id, body) + '</div>';
     const mode = settings.evolveMode === 'manual' ? 'manual' : 'auto';
     const smallSummaryEveryX = Math.max(1, parseInt(settings.smallSummaryEveryX) || 1);
+    const smallSummaryMinChars = Math.max(50, parseInt(settings.smallSummaryMinChars, 10) || 500);
     const smallSummaryInjectLimit = settings.smallSummaryInjectLimit === undefined
       ? 8 : Math.max(0, parseInt(settings.smallSummaryInjectLimit) || 0);
     const skipCurrentFloorSummary = settings.skipCurrentFloorSummary === true;
@@ -1864,6 +1866,10 @@ window.WORLD_ENGINE_UI = (function() {
         <div style="flex:1;">
           <label>阶段纪要间隔轮数</label>
           <input type="number" id="we-memory-small-summary-every" min="1" max="20" step="1" value="${smallSummaryEveryX}" style="width:100%;">
+        </div>
+        <div style="flex:1;">
+          <label>单层纪要最低字数</label>
+          <input type="number" id="we-memory-small-summary-min-chars" min="50" max="5000" step="50" value="${smallSummaryMinChars}" style="width:100%;">
         </div>
         <div style="flex:1;">
           <label>额外延迟总结楼层</label>
@@ -5915,6 +5921,7 @@ window.WORLD_ENGINE_UI = (function() {
           evolveReadRounds: 1,
           manualReadRounds: 1,
           smallSummaryEveryX: Math.max(1, parseInt(gv('we-memory-small-summary-every')) || 1),
+          smallSummaryMinChars: Math.max(50, parseInt(gv('we-memory-small-summary-min-chars'), 10) || 500),
           smallSummaryInjectLimit: Math.max(0, parseInt(gv('we-memory-small-summary-inject-limit')) || 0),
           skipCurrentFloorSummary: document.getElementById('we-memory-skip-current-floor')?.checked === true,
           summaryDelayFloors: Math.max(0, parseInt(gv('we-memory-delay-floors')) || 0),

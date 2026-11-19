@@ -181,6 +181,14 @@ window.MEMORY_ENGINE = (function() {
       && Number(tasks.memory.endLayer) === Number(tasks.small.endLayer));
     const smallReference = tasks.small && !sharesReference
       ? buildTaskReferenceContext(state, tasks.small, st) : null;
+    const smallMinChars = Math.max(50, parseInt(st?.smallSummaryMinChars, 10) || 500);
+    const smallAiCount = Math.max(
+      1,
+      Number(tasks.small?.aiCount)
+      || (Array.isArray(tasks.small?.aiLayers) && tasks.small.aiLayers.length)
+      || 1
+    );
+    const targetSmallMinChars = smallMinChars * smallAiCount;
     if (tasks.memory) {
       const filtered = filterConversation(tasks.memory.conversation, st);
       let worldbook = '';
@@ -201,13 +209,16 @@ window.MEMORY_ENGINE = (function() {
         worldContextHint: clean(hints.worldContextHint),
         worldbook,
         referenceContext: memoryReference?.text || '',
-        conversation: filtered
+        conversation: filtered,
+        combinedTask: Boolean(tasks.small)
       });
       segments.push(`【任务说明】\n${window.MEMORY_ENGINE_PROMPT.TASK_PROMPT || window.MEMORY_ENGINE_PROMPT.SYSTEM_PROMPT}\n\n${user}`);
     }
     if (tasks.small) {
       segments.push(`【任务说明】\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.SYSTEM_PROMPT}\n\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.buildUserPrompt({
         ...tasks.small,
+        minChars: smallMinChars,
+        aiCount: smallAiCount,
         reuseConversation: sharesReference,
         outlineFocusHint: clean(hints.outlineFocusHint),
         referenceContext: sharesReference && memoryReference?.text
@@ -263,16 +274,19 @@ window.MEMORY_ENGINE = (function() {
       }
     }
     const tone = clean(st.tonePrompt);
-    const emptyMemory = tasks.memory
-      ? '\n\n没有对应内容时分别使用 "personal_memory": [] 和 "entity_updates": []'
-        + (enableStructured ? '、"ongoing_fact_updates": []、"character_arc_updates": []' : '')
-        + '；不得省略字段。'
-      : '';
-    return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
+    const taskGuidance = [];
+    if (tasks.memory && tasks.small) {
+      taskGuidance.push(`【双任务并重铁律】必须在同一个顶层 JSON 对象中同时完整提取：人物记忆（personal_memory）、实体更新（entity_updates，type 必须用英文 organization / object / ability / location）${enableStructured ? '、持续事实（ongoing_fact_updates）、角色弧光（character_arc_updates）' : ''} 与阶段纪要（small_summary，正文最低不少于 ${targetSmallMinChars} 字）。绝不可只写 small_summary 而把人物/组织/地点/物品/事实数组留空，也绝不可拆成两个 JSON 块输出！仅当原文确实完全未出现某类要素时才返回空数组（如 "personal_memory": [] / "entity_updates": []），不得省略任何字段。`);
+    } else if (tasks.memory) {
+      taskGuidance.push(`请完整提取本段对话涉及的人物记忆（personal_memory）、实体更新（entity_updates，type 必须用英文 organization / object / ability / location）${enableStructured ? '、持续事实（ongoing_fact_updates）与角色弧光（character_arc_updates）' : ''}；仅当原文确实无对应内容时才返回空数组（如 "personal_memory": [] / "entity_updates": []），不得省略字段。`);
+    } else if (tasks.small) {
+      taskGuidance.push(`small_summary 正文必须最低不少于 ${targetSmallMinChars} 字，请详实还原人物行动、关键对话原意、组织/物品/地点细节与阶段结果，不得省略字段。`);
+    }
+    return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}\n\n${taskGuidance.join('\n')}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
 
-  function extractBalancedJsonSpan(text) {
-    let result = null;
+  function extractAllBalancedJsonSpans(text) {
+    const results = [];
     let inString = false;
     let escaped = false;
     let rootChar = '';
@@ -303,7 +317,7 @@ window.MEMORY_ENGINE = (function() {
           if (depth === 0 && start !== -1) {
             try {
               const parsed = JSON.parse(text.slice(start, i + 1));
-              if (parsed && typeof parsed === 'object') result = parsed;
+              if (parsed && typeof parsed === 'object') results.push(parsed);
             } catch (_) {}
             rootChar = '';
             start = -1;
@@ -311,7 +325,72 @@ window.MEMORY_ENGINE = (function() {
         }
       }
     }
-    return result;
+    return results;
+  }
+
+  const KNOWN_PAYLOAD_KEYS = [
+    'personal_memory', 'memories', 'memory',
+    'entity_updates', 'entities', 'entity_memory',
+    'ongoing_fact_updates', 'ongoing_facts', 'facts',
+    'character_arc_updates', 'character_arcs', 'arcs',
+    'small_summary', 'small_summary_keywords', 'small_summary_entities', 'small_summary_impact'
+  ];
+
+  function unwrapPayloadObject(obj) {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+    const hasKnown = KNOWN_PAYLOAD_KEYS.some(k => Object.prototype.hasOwnProperty.call(obj, k));
+    if (hasKnown) return obj;
+    for (const wrapperKey of ['result', 'output', 'response', 'data']) {
+      const inner = obj[wrapperKey];
+      if (inner && typeof inner === 'object' && !Array.isArray(inner)
+        && KNOWN_PAYLOAD_KEYS.some(k => Object.prototype.hasOwnProperty.call(inner, k))) {
+        return inner;
+      }
+    }
+    return obj;
+  }
+
+  function mergeParsedPayloads(objects) {
+    const validObjs = objects
+      .map(unwrapPayloadObject)
+      .filter(obj => obj && typeof obj === 'object');
+    if (!validObjs.length) return null;
+    if (validObjs.length === 1) return validObjs[0];
+    const plainObjs = validObjs.filter(obj => !Array.isArray(obj));
+    if (!plainObjs.length) return validObjs[validObjs.length - 1];
+    // 当模型误把人物/实体与纪要拆成多个 JSON 块输出时，合并所有块的字段而不是丢弃前面块
+    const merged = {};
+    const arrayKeys = new Set([
+      'personal_memory', 'memories', 'entity_updates', 'ongoing_fact_updates',
+      'ongoing_facts', 'facts', 'character_arc_updates', 'character_arcs', 'arcs',
+      'small_summary_keywords', 'small_summary_entities'
+    ]);
+    for (const obj of plainObjs) {
+      for (const [key, val] of Object.entries(obj)) {
+        if (val === undefined || val === null) continue;
+        if (arrayKeys.has(key) && Array.isArray(val)) {
+          if (!Array.isArray(merged[key])) merged[key] = [];
+          merged[key].push(...val);
+        } else if (typeof val === 'string') {
+          if (clean(val) || merged[key] === undefined) merged[key] = val;
+        } else if (key === 'small_summary' && typeof val === 'object') {
+          merged[key] = val;
+        } else if ((key === 'entities' || key === 'entity_memory') && typeof val === 'object' && !Array.isArray(val)) {
+          if (!merged[key] || typeof merged[key] !== 'object' || Array.isArray(merged[key])) merged[key] = {};
+          for (const [k2, v2] of Object.entries(val)) {
+            if (Array.isArray(v2)) {
+              if (!Array.isArray(merged[key][k2])) merged[key][k2] = [];
+              merged[key][k2].push(...v2);
+            }
+          }
+        } else if (merged[key] === undefined || (Array.isArray(merged[key]) && !merged[key].length)) {
+          merged[key] = val;
+        } else {
+          merged[key] = val;
+        }
+      }
+    }
+    return merged;
   }
 
   function parseJsonPayload(raw) {
@@ -319,35 +398,101 @@ window.MEMORY_ENGINE = (function() {
     if (!text) throw new Error('API 返回中没有合法 JSON 对象或数组');
     // 剔除思考模型常见 <think>/<thought>/<reasoning> 包装，避免其中方括号或花括号误导截取
     text = text.replace(/<(?:think|thought|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
-    const candidates = [];
     const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+    const fencedObjects = [];
     let match;
     while ((match = fenceRe.exec(text)) !== null) {
       const inner = clean(match[1]);
-      if (inner) candidates.push(inner);
-    }
-    candidates.reverse();
-    const strippedTop = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    if (strippedTop) candidates.push(strippedTop);
-
-    for (const candidate of candidates) {
+      if (!inner) continue;
       try {
-        const parsed = JSON.parse(candidate);
-        if (parsed && typeof parsed === 'object') return parsed;
+        const parsed = JSON.parse(inner);
+        if (parsed && typeof parsed === 'object') { fencedObjects.push(parsed); continue; }
       } catch (_) {}
-      const balanced = extractBalancedJsonSpan(candidate);
-      if (balanced) return balanced;
+      const spans = extractAllBalancedJsonSpans(inner);
+      if (spans.length) { fencedObjects.push(...spans); continue; }
       try {
-        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(candidate);
-        if (repaired && typeof repaired === 'object') return repaired;
+        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(inner);
+        if (repaired && typeof repaired === 'object') fencedObjects.push(repaired);
+      } catch (_) {}
+    }
+    if (fencedObjects.length) {
+      const mergedFenced = mergeParsedPayloads(fencedObjects);
+      if (mergedFenced) return mergedFenced;
+    }
+
+    const strippedTop = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    if (strippedTop) {
+      try {
+        const parsed = JSON.parse(strippedTop);
+        if (parsed && typeof parsed === 'object') return unwrapPayloadObject(parsed);
+      } catch (_) {}
+      const spans = extractAllBalancedJsonSpans(strippedTop);
+      if (spans.length) {
+        const mergedSpans = mergeParsedPayloads(spans);
+        if (mergedSpans) return mergedSpans;
+      }
+      try {
+        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(strippedTop);
+        if (repaired && typeof repaired === 'object') return unwrapPayloadObject(repaired);
       } catch (_) {}
     }
     throw new Error('API 返回中没有合法 JSON 对象或数组');
   }
 
+  function normalizeEntityType(rawType) {
+    const key = clean(rawType).toLocaleLowerCase();
+    if (!key) return '';
+    if (ENTITY_TYPES.includes(key)) return key;
+    if (/^(org|orgs|organizations|faction|factions|group|clan|sect|guild|组织|势力|机构|门派|家族|帮派|政权|公司|军队|社团|公会)$/.test(key)) return 'organization';
+    if (/^(item|items|objects|artifact|weapon|gear|prop|tool|物品|物件|道具|装备|器物|载具|文书|装置|材料)$/.test(key)) return 'object';
+    if (/^(skill|skills|abilities|power|powers|magic|talent|technique|能力|技能|术法|天赋|权能|功法|法术)$/.test(key)) return 'ability';
+    if (/^(place|places|locations|area|region|site|city|room|building|地点|场所|区域|城市|建筑|遗迹|房间|地名|空间)$/.test(key)) return 'location';
+    return '';
+  }
+
+  function collectEntityItems(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const list = [];
+    const pushFromContainer = container => {
+      if (!container) return;
+      if (Array.isArray(container)) {
+        for (const item of container) if (item && typeof item === 'object') list.push(item);
+        return;
+      }
+      if (typeof container === 'object') {
+        const directType = normalizeEntityType(container.type || container.category);
+        if (directType && clean(container.name)) {
+          list.push(container);
+          return;
+        }
+        // 兼容按类型分组返回：{ organization: [...], object: [...], ability: [...], location: [...] }
+        for (const [groupKey, groupVal] of Object.entries(container)) {
+          const groupType = normalizeEntityType(groupKey);
+          if (!groupType || !Array.isArray(groupVal)) continue;
+          for (const item of groupVal) {
+            if (!item || typeof item !== 'object') continue;
+            list.push({ ...item, type: item.type || groupType });
+          }
+        }
+      }
+    };
+    pushFromContainer(value.entity_updates);
+    if (!list.length) pushFromContainer(value.entities);
+    if (!list.length) pushFromContainer(value.entity_memory);
+    return list;
+  }
+
   function parseResponse(raw, tasks) {
     const value = parseJsonPayload(raw);
     const nameBlacklist = configuredNameBlacklist(settings());
+    const hasMemoryPayload = Array.isArray(value) || Boolean(
+      value && typeof value === 'object' && [
+        'personal_memory', 'memories', 'memory',
+        'entity_updates', 'entities', 'entity_memory',
+        'ongoing_fact_updates', 'ongoing_facts', 'facts',
+        'character_arc_updates', 'character_arcs', 'arcs'
+      ].some(key => Object.prototype.hasOwnProperty.call(value, key))
+    );
     // 兼容 0.1.x：旧 API 只返回人物记忆数组。
     const personalValue = tasks.memory ? (Array.isArray(value)
       ? value
@@ -358,27 +503,27 @@ window.MEMORY_ENGINE = (function() {
     const counts = new Map(), personal = [];
     for (const item of personalSource) {
       if (!item || typeof item !== 'object') continue;
-      if (nameIsBlacklisted(item.name, nameBlacklist)) continue;
-      const names = unique(Array.isArray(item.name) ? item.name : [item.name]), memory = clean(item.memory);
+      const rawName = item.name ?? item.names ?? item.character ?? item.person ?? item.holder;
+      if (nameIsBlacklisted(rawName, nameBlacklist)) continue;
+      const names = unique(Array.isArray(rawName) ? rawName : [rawName]);
+      const memory = clean(item.memory ?? item.content ?? item.text ?? item.summary);
       if (!names.length || !memory) continue;
       const holder = normalized(names[0]), count = counts.get(holder) || 0;
       if (count >= 3) continue;
       counts.set(holder, count + 1);
       let time = clean(item.time);
       if (/^(昨晚|昨天|三天前|刚才|不久前|宴会之后)$/.test(time)) time = '';
+      const rawKnown = item.known_by ?? item.knownBy ?? item.witnesses ?? [];
       personal.push({
         name: names,
-        known_by: unique(Array.isArray(item.known_by) ? item.known_by : [item.known_by])
+        known_by: unique(Array.isArray(rawKnown) ? rawKnown : [rawKnown])
           .filter(name => !names.some(holderName => normalized(holderName) === normalized(name))),
         memory,
         time
       });
       if (personal.length >= 8) break;
     }
-    const entityValue = tasks.memory && !Array.isArray(value) ? value?.entity_updates : [];
-    const entitySource = Array.isArray(entityValue)
-      ? entityValue
-      : (entityValue && typeof entityValue === 'object' ? [entityValue] : []);
+    const entitySource = tasks.memory && !Array.isArray(value) ? collectEntityItems(value) : [];
     const entities = {};
     for (const type of ENTITY_TYPES) entities[type] = [];
     const perEntityCounts = new Map();
@@ -386,10 +531,14 @@ window.MEMORY_ENGINE = (function() {
     for (const item of entitySource) {
       if (entityUpdateCount >= 8) break;
       if (!item || typeof item !== 'object') continue;
-      const aliases = unique(Array.isArray(item.aliases) ? item.aliases : [item.aliases]);
-      if (nameIsBlacklisted([item.name, ...aliases], nameBlacklist)) continue;
-      if (!ENTITY_TYPES.includes(item.type)) continue;
-      const type = item.type, name = clean(item.name), description = clean(item.description), event = clean(item.event);
+      const rawAliases = item.aliases ?? item.alias ?? [];
+      const aliases = unique(Array.isArray(rawAliases) ? rawAliases : [rawAliases]);
+      const name = clean(item.name ?? item.title);
+      if (nameIsBlacklisted([name, ...aliases], nameBlacklist)) continue;
+      const type = normalizeEntityType(item.type ?? item.category ?? item.entity_type);
+      if (!type) continue;
+      const description = clean(item.description ?? item.desc ?? item.status);
+      const event = clean(item.event ?? item.change);
       if (!name) continue;
       const cleanAliases = aliases.filter(alias => normalized(alias) !== normalized(name));
       const key = `${type}:${normalized(name)}`, count = perEntityCounts.get(key) || 0;
@@ -409,20 +558,23 @@ window.MEMORY_ENGINE = (function() {
         smallSummaryEntities = unique(value.small_summary.entity_names || value.small_summary.entityNames).slice(0, 12);
         smallSummaryImpact = value.small_summary.impact === 'key' ? 'key' : 'normal';
       } else {
-        smallSummary = clean(value?.small_summary);
+        smallSummary = clean(value?.small_summary ?? value?.summary);
       }
-      if (!smallSummaryKeywords.length) smallSummaryKeywords = unique(value?.small_summary_keywords).slice(0, 8);
-      if (!smallSummaryEntities.length) smallSummaryEntities = unique(value?.small_summary_entities).slice(0, 12);
-      if (value?.small_summary_impact === 'key') smallSummaryImpact = 'key';
+      if (!smallSummaryKeywords.length) smallSummaryKeywords = unique(value?.small_summary_keywords ?? value?.keywords).slice(0, 8);
+      if (!smallSummaryEntities.length) smallSummaryEntities = unique(value?.small_summary_entities ?? value?.entity_names).slice(0, 12);
+      if ((value?.small_summary_impact ?? value?.impact) === 'key') smallSummaryImpact = 'key';
     }
     const factUpdates = [];
-    const factSource = tasks.memory && !Array.isArray(value) && Array.isArray(value?.ongoing_fact_updates) ? value.ongoing_fact_updates : [];
+    const rawFacts = tasks.memory && !Array.isArray(value)
+      ? (value?.ongoing_fact_updates ?? value?.ongoing_facts ?? value?.facts ?? [])
+      : [];
+    const factSource = Array.isArray(rawFacts) ? rawFacts : (rawFacts && typeof rawFacts === 'object' ? [rawFacts] : []);
     for (const item of factSource) {
       if (!item || typeof item !== 'object') continue;
       const action = clean(item.action) === 'resolve' ? 'resolve' : 'upsert';
-      const subject = clean(item.subject) || '全局';
-      const category = clean(item.category) || '状态';
-      const fact = Array.from(clean(item.fact || item.content)).slice(0, 120).join('');
+      const subject = clean(item.subject ?? item.owner ?? item.target) || '全局';
+      const category = clean(item.category ?? item.type) || '状态';
+      const fact = Array.from(clean(item.fact ?? item.content ?? item.description ?? item.text)).slice(0, 120).join('');
       const id = clean(item.id);
       if (action === 'upsert' && !fact) continue;
       if (action === 'resolve' && !id && !fact && !subject) continue;
@@ -438,23 +590,29 @@ window.MEMORY_ENGINE = (function() {
       if (factUpdates.length >= 10) break;
     }
     const arcUpdates = [];
-    const arcSource = tasks.memory && !Array.isArray(value) && Array.isArray(value?.character_arc_updates) ? value.character_arc_updates : [];
+    const rawArcs = tasks.memory && !Array.isArray(value)
+      ? (value?.character_arc_updates ?? value?.character_arcs ?? value?.arcs ?? [])
+      : [];
+    const arcSource = Array.isArray(rawArcs) ? rawArcs : (rawArcs && typeof rawArcs === 'object' ? [rawArcs] : []);
     for (const item of arcSource) {
       if (!item || typeof item !== 'object') continue;
-      const name = clean(item.name);
+      const rawArcName = item.name ?? item.character ?? (Array.isArray(item.names) ? item.names[0] : item.names);
+      const name = clean(rawArcName);
       if (!name || nameIsBlacklisted([name], nameBlacklist)) continue;
-      const currentStance = Array.from(clean(item.current_stance ?? item.currentStance)).slice(0, 60).join('');
-      const arcSummary = Array.from(clean(item.arc_summary ?? item.arcSummary)).slice(0, 120).join('');
-      const relationship = Array.from(clean(item.relationship)).slice(0, 40).join('');
-      const pctNum = Number(item.progress_pct ?? item.progressPct);
+      const currentStance = Array.from(clean(item.current_stance ?? item.currentStance ?? item.stance)).slice(0, 60).join('');
+      const arcSummary = Array.from(clean(item.arc_summary ?? item.arcSummary ?? item.summary)).slice(0, 120).join('');
+      const relationship = Array.from(clean(item.relationship ?? item.relation)).slice(0, 40).join('');
+      const pctNum = Number(item.progress_pct ?? item.progressPct ?? item.progress);
       const progressPct = Number.isFinite(pctNum) ? Math.max(0, Math.min(100, Math.round(pctNum))) : null;
       if (!currentStance && !arcSummary && !relationship && progressPct === null) continue;
       arcUpdates.push({ name, currentStance, arcSummary, relationship, progressPct });
       if (arcUpdates.length >= 6) break;
     }
+    const memoryItemCount = personal.length + entityUpdateCount + factUpdates.length + arcUpdates.length;
     return {
       personal, entities, factUpdates, arcUpdates,
-      smallSummary, smallSummaryKeywords, smallSummaryEntities, smallSummaryImpact
+      smallSummary, smallSummaryKeywords, smallSummaryEntities, smallSummaryImpact,
+      hasMemoryPayload, memoryItemCount
     };
   }
 
@@ -944,6 +1102,19 @@ window.MEMORY_ENGINE = (function() {
     };
   }
 
+  function nodeHasMemoryContent(node) {
+    if (!node || typeof node !== 'object') return false;
+    if (Array.isArray(node.personal) && node.personal.length > 0) return true;
+    if (Array.isArray(node.factUpdates) && node.factUpdates.length > 0) return true;
+    if (Array.isArray(node.arcUpdates) && node.arcUpdates.length > 0) return true;
+    if (node.entities && typeof node.entities === 'object') {
+      for (const type of ENTITY_TYPES) {
+        if (Array.isArray(node.entities[type]) && node.entities[type].length > 0) return true;
+      }
+    }
+    return false;
+  }
+
   function appendTimelineNode(state, extracted, task, options) {
     const timeline = ensureTimelineState(state), api = timelineApi();
     let refs = Array.isArray(task?.sourceRefs) ? clone(task.sourceRefs) : [];
@@ -966,8 +1137,12 @@ window.MEMORY_ENGINE = (function() {
       }];
     }
     const digest = api?.digestRefs?.(refs) || '';
-    const existing = timeline.nodes.find(node => node.sourceDigest && node.sourceDigest === digest && node.status !== 'stale');
-    if (existing) return existing;
+    const existingIdx = timeline.nodes.findIndex(node => node.sourceDigest && node.sourceDigest === digest && node.status !== 'stale');
+    if (existingIdx >= 0) {
+      const existing = timeline.nodes[existingIdx];
+      if (nodeHasMemoryContent(existing) || existing.memoryExtracted === true) return existing;
+      timeline.nodes.splice(existingIdx, 1);
+    }
     const bounds = sourceBounds(refs, options?.layer);
     const node = {
       id: nextTimelineNodeId(timeline),
@@ -984,6 +1159,7 @@ window.MEMORY_ENGINE = (function() {
       entities: clone(extracted?.entities || {}),
       factUpdates: clone(extracted?.factUpdates || []),
       arcUpdates: clone(extracted?.arcUpdates || []),
+      memoryExtracted: extracted?.hasMemoryPayload !== false,
       status: 'valid',
       revision: 1,
       createdAt: Date.now(),
@@ -1234,6 +1410,30 @@ window.MEMORY_ENGINE = (function() {
           (tasks.memory?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(tasks.memory.worldCommitId) === false)) {
         const error = new Error('记忆来源或聊天已变化，旧结果已丢弃'); error.name = 'AbortError'; throw error;
       }
+      // 兜底保护：若联合请求中模型漏填了人物/实体/事实/弧光字段（或对较长对话全部返回空数组），
+      // 自动补发一次独立的人物/实体/事实/弧光提取请求，避免只写了纪要而丢失结构化记忆。
+      const shouldFallbackMemory = Boolean(
+        tasks.memory && tasks.small && options?.skipMemoryFallback !== true
+        && (
+          extracted.hasMemoryPayload === false
+          || (options?.retryEmptyMemory === true && Number(extracted.memoryItemCount) === 0 && clean(tasks.memory.conversation).length >= 120)
+        )
+      );
+      if (shouldFallbackMemory) {
+        try {
+          const fallbackMem = await requestTasks({ memory: tasks.memory }, { ...options, baseState: before });
+          if (fallbackMem && (fallbackMem.hasMemoryPayload || Number(fallbackMem.memoryItemCount) > 0)) {
+            extracted.personal = fallbackMem.personal || [];
+            extracted.entities = fallbackMem.entities || extracted.entities;
+            extracted.factUpdates = fallbackMem.factUpdates || [];
+            extracted.arcUpdates = fallbackMem.arcUpdates || [];
+            extracted.hasMemoryPayload = Boolean(fallbackMem.hasMemoryPayload);
+            extracted.memoryItemCount = Number(fallbackMem.memoryItemCount) || 0;
+          }
+        } catch (fallbackErr) {
+          console.warn('[记忆引擎] 联合请求人物/实体兜底补提失败（已保留本批纪要）', fallbackErr);
+        }
+      }
       for (const task of Object.values(tasks)) {
         if (Array.isArray(task?.sourceRefs) && task.sourceRefs.length && timelineApi()?.auditRefs?.(task.sourceRefs)?.valid === false) {
           const error = new Error('正文已变化，记忆结果未写入'); error.name = 'AbortError'; throw error;
@@ -1270,10 +1470,13 @@ window.MEMORY_ENGINE = (function() {
       }
       const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
         ? timelineApi()?.digestRefs?.(tasks.memory.sourceRefs) || '' : '';
-      const memoryAlreadyStored = memorySourceDigest && ensureTimelineState(next).nodes.some(node =>
+      const existingStoredNode = memorySourceDigest ? ensureTimelineState(next).nodes.find(node =>
         node.kind === 'memory' && node.status === 'valid' && clean(node.sourceDigest) === memorySourceDigest
+      ) : null;
+      const memoryAlreadyStored = Boolean(
+        existingStoredNode && (nodeHasMemoryContent(existingStoredNode) || existingStoredNode.memoryExtracted === true)
       );
-      const applyMemory = Boolean(tasks.memory && !memoryAlreadyStored);
+      const applyMemory = Boolean(tasks.memory && !memoryAlreadyStored && extracted.hasMemoryPayload !== false);
       const targetLayer = Number.isFinite(Number(tasks.memory?.endLayer))
         ? Number(tasks.memory.endLayer)
         : (Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer());
@@ -2142,9 +2345,14 @@ window.MEMORY_ENGINE = (function() {
         if (id) idToLayer.set(id, idx);
       });
     }
-    for (const node of timeline.nodes) {
-      if ((node.kind && node.kind !== 'memory') || !isCurrentChatRecord(node)) continue;
-      if (node.status === 'stale' || node.status === 'failed') continue;
+    const validMemNodes = timeline.nodes.filter(node =>
+      (!node.kind || node.kind === 'memory') && isCurrentChatRecord(node) && node.status !== 'stale' && node.status !== 'failed'
+    );
+    for (const node of validMemNodes) {
+      if (node.memoryExtracted === false) continue;
+      // 仅当节点确实提取到了记忆数据，或已被新版解析器确认过结构化记忆字段时，才视为已覆盖；
+      // 旧版/异常产生的无记忆内容空节点一律视为未覆盖，允许一键追平自动补提。
+      if (!nodeHasMemoryContent(node) && node.memoryExtracted !== true) continue;
       if (Array.isArray(node.sourceRefs) && node.sourceRefs.length) {
         for (const ref of node.sourceRefs) {
           const mappedLayer = clean(ref?.messageId) && idToLayer.has(clean(ref.messageId))
@@ -3392,7 +3600,8 @@ window.MEMORY_ENGINE = (function() {
           retries: st.backfillRetries,
           saveCheckpoint: false,
           allowWhileBackfill: true,
-          replaceOverlappingRange: overwrite
+          replaceOverlappingRange: overwrite,
+          retryEmptyMemory: true
         });
         completedBatches++;
         addedSmall += Number(res?.addedSmall || 0);
@@ -3499,7 +3708,8 @@ window.MEMORY_ENGINE = (function() {
           layer: batch.endLayer,
           retries: st.backfillRetries,
           saveCheckpoint: false,
-          allowWhileBackfill: true
+          allowWhileBackfill: true,
+          retryEmptyMemory: true
         });
         completedBatches++;
         addedSmall += Number(res?.addedSmall || 0);

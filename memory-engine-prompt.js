@@ -112,18 +112,18 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 每个 entity_updates 数组项同理只携带一条 event，并单独填写该 event 的 time。
 
 约束：
-1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按统一输出模板一并填写。
-2. 没有对应内容时，数组返回 []。
+1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按文末【统一输出要求】在同一个顶层 JSON 对象中一并完整填写，绝不可拆成多个 JSON 块，也绝不可把人物/组织/地点/物品/事实只写进 small_summary 而把前面四个数组留空。
+2. 凡本段对话中有明确出场、发言、行动、发现、决策、情绪或关系互动的命名人物，应积极提取其关键主观认知到 personal_memory；凡本段首次提及或发生状态/归属/关键事件变化的组织（organization）、物件（object）、能力（ability）、地点（location），应积极提取到 entity_updates（仅当本段确实完全没有对应内容时才返回 []）。
 3. PersonalMemory 只能包含 name、known_by、memory、time。
-4. EntityUpdate 只能包含 type、name、aliases、description、event、time。
+4. EntityUpdate 只能包含 type、name、aliases、description、event、time；type 必须使用英文值 organization、object、ability、location 之一（不要写中文分类名）。
 5. PersonalMemory.name 必须是非空字符串数组；EntityUpdate.name 必须是非空字符串；known_by 与 aliases 必须是字符串数组。
 6. memory 长度为 1 至 50 个字符。
 7. description 长度为 0 至 200 个字符；空字符串表示不更新本地描述。
 8. event 长度为 0 至 50 个字符。
 9. PersonalMemory.time 表示记忆所指事件的绝对故事时间；EntityUpdate.time 只对应 event。无法确定时填写空字符串，event 为空时 time 必须为空。
 10. type 只能是 organization、object、ability、location。
-11. ongoing_fact_updates（若模板要求）记录长期生效状态与核心约束的新增/修订(upsert)或完结失效(resolve)，每条 fact 不超过 120 字；不得写入私密/未发生计划。
-12. character_arc_updates（若模板要求）只更新本批有明显心理态度、关系定性或阶段进展的角色，progress_pct 为 0 至 100 的整数。
+11. ongoing_fact_updates（若模板要求）记录本段确立、改变或仍持续生效的身份、状态、关系定性、约定/契约、持有物、任务目标、伤病或环境规则的新增/修订(upsert)或完结失效(resolve)，每条 fact 不超过 120 字；不得写入私密/未发生计划。
+12. character_arc_updates（若模板要求）更新本批展现明确心理态度、立场、关系定性或阶段进展的角色，progress_pct 为 0 至 100 的整数。
 13. 只输出有效 JSON；模板中的说明文字不得原样输出，不得增加未声明字段。
 
 不得增加统一输出模板之外的顶层字段或任何额外条目字段。严格遵守前述类型、长度、数量、时间和分类规则。`);
@@ -191,7 +191,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     }
 
     sections.push(`【待提取对话】\n${conversation || '（空）'}`);
-    sections.push('请严格按照系统规则，只返回一个 JSON 对象。');
+    if (input.combinedTask !== true) {
+      sections.push('请严格按照系统规则，只返回一个 JSON 对象。');
+    }
     return sections.join('\n\n');
   }
 

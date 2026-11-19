@@ -567,6 +567,106 @@ function makeChat(rounds) {
     );
   }
 
+  // 9. 解析加固、兜底补提、旧空节点修复与单层纪要最低 500 字设定验证
+  {
+    const h = createHarness(makeChat(2)); // 0..4
+    assert.strictEqual(h.sandbox.MEMORY_ENGINE_SETTINGS.getSettings().smallSummaryMinChars, 500, '默认单层纪要最低字数应为 500');
+
+    // 9A. 多 JSON 块合并 + 中文实体 type 归一化 + 别名字段兼容
+    const twoBlockRaw = [
+      '```json',
+      JSON.stringify({
+        personal_memory: [{ names: ['沈清秋'], content: '沈清秋与青石商会达成合作协议。', knownBy: ['林墨'], time: '' }],
+        entities: [
+          { type: '组织', name: '青石商会', description: '掌控北境商路的大商会', event: '与沈清秋签约', time: '' },
+          { type: '地点', name: '青石渡', description: '北境渡口', event: '', time: '' },
+          { type: '物品', name: '青铜虎符', description: '调兵信物', event: '', time: '' },
+          { type: '能力', name: '听潮剑意', description: '高阶剑道能力', event: '', time: '' }
+        ],
+        ongoing_facts: [{ action: 'upsert', category: '契约', subject: '沈清秋', description: '与青石商会签订保密商约', keywords: ['商约'] }],
+        character_arcs: [{ character: '沈清秋', stance: '谨慎合作', summary: '开始信任商会渠道', relationship: '合作伙伴', progress: 35 }]
+      }),
+      '```',
+      '```json',
+      JSON.stringify({
+        small_summary: '这是一段位于第二个代码块中的详实纪要正文。',
+        small_summary_keywords: ['青石商会', '青石渡'],
+        small_summary_entities: ['沈清秋', '青石商会'],
+        small_summary_impact: 'key'
+      }),
+      '```'
+    ].join('\n');
+    const parsedTwo = h.sandbox.MEMORY_ENGINE._test.parseResponse(twoBlockRaw, { memory: true, small: true });
+    assert.strictEqual(parsedTwo.hasMemoryPayload, true);
+    assert.strictEqual(parsedTwo.personal.length, 1, '双 JSON 块输出时不得丢弃第一个块中的人物记忆');
+    assert.strictEqual(parsedTwo.entities.organization.length, 1, '中文实体类型“组织”应正确归一化为 organization');
+    assert.strictEqual(parsedTwo.entities.location.length, 1, '中文实体类型“地点”应正确归一化为 location');
+    assert.strictEqual(parsedTwo.entities.object.length, 1, '中文实体类型“物品”应正确归一化为 object');
+    assert.strictEqual(parsedTwo.entities.ability.length, 1, '中文实体类型“能力”应正确归一化为 ability');
+    assert.strictEqual(parsedTwo.factUpdates.length, 1, '别名字段 ongoing_facts/description 应正确解析');
+    assert.strictEqual(parsedTwo.arcUpdates.length, 1, '别名字段 character_arcs 应正确解析');
+    assert.ok(parsedTwo.smallSummary.includes('第二个代码块'), '第二个块中的纪要正文也应保留');
+
+    // 9B. 联合请求中若模型漏填人物/实体/事实（只返回 small_summary），runTasks 应自动补发独立记忆提取兜底，且 Prompt 包含 500 字下限且不含中部 JSON 截断句
+    let combinedCallSeen = false;
+    let fallbackMemoryCallSeen = false;
+    const origCallApi = h.sandbox.WORLD_ENGINE_API.callApi;
+    h.sandbox.WORLD_ENGINE_API.callApi = async prompt => {
+      h.calls.push(prompt);
+      const isCombined = prompt.includes('"personal_memory":') && prompt.includes('"small_summary": ""');
+      if (isCombined) {
+        combinedCallSeen = true;
+        assert.ok(prompt.includes('最低不少于 500 字'), '单层纪要 Prompt 必须明确要求最低不少于 500 字');
+        assert.ok(!prompt.includes('请严格按照系统规则，只返回一个 JSON 对象。\n\n====='), '组合 Prompt 中段不得再出现导致模型拆块的独立 JSON 指令');
+        // 模拟偷懒模型只返回了 small_summary 而完全漏掉人物/组织/事实字段
+        return JSON.stringify({
+          small_summary: '仅返回了纪要字段的偷懒模型输出。'.repeat(25),
+          small_summary_keywords: ['测试'],
+          small_summary_entities: ['角色'],
+          small_summary_impact: 'normal'
+        });
+      }
+      if (prompt.includes('"personal_memory":') && !prompt.includes('"small_summary": ""')) {
+        fallbackMemoryCallSeen = true;
+        return JSON.stringify({
+          personal_memory: [{ name: ['林墨'], known_by: [], memory: '林墨得知黑水帮暗中封锁了渡口。', time: '' }],
+          entity_updates: [{ type: '组织', name: '黑水帮', aliases: [], description: '盘踞河道的帮派', event: '封锁渡口', time: '' }],
+          ongoing_fact_updates: [{ action: 'upsert', id: '', category: '环境', subject: '黑水帮', fact: '黑水帮正在封锁青石渡口', keywords: ['黑水帮'] }],
+          character_arc_updates: [{ name: '林墨', current_stance: '警惕调查', arc_summary: '决定暗查黑水帮动向', relationship: '敌对防备', progress_pct: 25 }]
+        });
+      }
+      return origCallApi(prompt);
+    };
+    await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(combinedCallSeen, true);
+    assert.strictEqual(fallbackMemoryCallSeen, true, '当联合请求漏掉人物/实体/事实时，必须自动补发独立记忆提取请求');
+    let state = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.strictEqual(state.event_memory.small_summaries.length, 2);
+    assert.ok(state.personal_memory.some(p => p.names.includes('林墨')), '兜底补提应成功写入人物');
+    assert.ok(state.entity_memory.organization.some(o => o.name === '黑水帮'), '兜底补提应成功写入组织实体');
+    assert.ok(state.ongoing_facts.some(f => f.fact.includes('黑水帮')), '兜底补提应成功写入持续事实');
+    assert.ok(state.character_arcs.some(a => a.names.includes('林墨')), '兜底补提应成功写入角色弧光');
+
+    // 9C. 验证若旧存档中存在“仅有纪要、时间线节点全为空且无人物/实体/事实”的残留状态，点击一键追平会自动补齐人物/组织/事实
+    const brokenState = plain(state);
+    brokenState.personal_memory = [];
+    brokenState.knowledge_index = {};
+    brokenState.entity_memory = { organization: [], object: [], ability: [], location: [] };
+    brokenState.entity_index = {};
+    brokenState.ongoing_facts = [];
+    brokenState.character_arcs = [];
+    brokenState.timeline.nodes = brokenState.timeline.nodes.map(n => ({
+      ...n, personal: [], entities: { organization: [], object: [], ability: [], location: [] }, factUpdates: [], arcUpdates: [], memoryExtracted: undefined
+    }));
+    h.sandbox.MEMORY_ENGINE_DATA.saveState(brokenState);
+    const covBroken = h.sandbox.MEMORY_ENGINE.getSummaryCoverageStatus();
+    assert.deepStrictEqual(plain(covBroken.uncoveredCombinedAiLayers), [2, 4], '全空旧时间线节点应被识别为待补提');
+    const repairCu = await h.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(repairCu.completedBatches, 2, '一键追平应自动为 2 个缺失记忆的 AI 层补提人物/组织/事实');
+    state = h.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.ok(state.personal_memory.some(p => p.names.includes('林墨')) && state.entity_memory.organization.some(o => o.name === '黑水帮'));
+  }
+
   console.log('memory summary control, rollback-refill, range & catch-up tests passed');
 })().catch(error => {
   console.error(error);

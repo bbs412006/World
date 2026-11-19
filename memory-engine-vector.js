@@ -243,7 +243,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
           (s.keywords || []).length ? `关键词：${s.keywords.join('、')}` : '',
           (s.entityNames || []).length ? `涉及：${s.entityNames.join('、')}` : '',
           s.content
-        ].filter(Boolean).join('；').slice(0, 420);
+        ].filter(Boolean).join('；').slice(0, 1200);
         items.push({
           key: `small:${s.id}`,
           kind: 'small',

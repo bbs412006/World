@@ -222,6 +222,7 @@ window.MEMORY_ENGINE_DATA = (function() {
           entities: node?.entities && typeof node.entities === 'object' ? clone(node.entities) : emptyEntityMemory(),
           factUpdates: Array.isArray(node?.factUpdates) ? clone(node.factUpdates) : [],
           arcUpdates: Array.isArray(node?.arcUpdates) ? clone(node.arcUpdates) : [],
+          ...(typeof node?.memoryExtracted === 'boolean' ? { memoryExtracted: node.memoryExtracted } : {}),
           snapshot: node?.snapshot && typeof node.snapshot === 'object' ? memoryBaseFrom(node.snapshot) : null,
           status: ['valid', 'stale', 'pending', 'failed'].includes(node?.status) ? node.status : 'valid',
           revision: Math.max(1, parseInt(node?.revision) || 1),
