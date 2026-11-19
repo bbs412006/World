@@ -766,8 +766,11 @@ window.WORLD_ENGINE_UI = (function() {
     const activeFacts = Array.isArray(state?.ongoing_facts) ? state.ongoing_facts.filter(item => item.status === 'active') : [];
     const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
     const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : 0;
-    const coveredAi = coverage ? Number(coverage.coveredAiCount) || 0 : 0;
-    const uncoveredAuto = coverage ? Number(coverage.uncoveredAutoCount) || 0 : 0;
+    const uncoveredAll = coverage ? Number(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) || 0 : 0;
+    const coveredAi = totalAi > 0
+      ? Math.max(0, totalAi - uncoveredAll)
+      : (coverage ? Number(coverage.coveredAiCount) || 0 : 0);
+    const uncoveredAuto = coverage ? Number(coverage.uncoveredCombinedAutoCount ?? coverage.uncoveredAutoCount) || 0 : 0;
     const progress = totalAi > 0 ? Math.min(1, coveredAi / totalAi) : (smallSummaries.length > 0 ? 1 : 0);
     const entityCount = ['organization', 'object', 'ability', 'location']
       .reduce((sum, type) => sum + (Array.isArray(state?.entity_memory?.[type]) ? state.entity_memory[type].length : 0), 0);
@@ -778,11 +781,11 @@ window.WORLD_ENGINE_UI = (function() {
       ['纪要', smallSummaries.length]
     ].map(([label, value]) => `<div class="we-core-stat"><div class="we-core-stat-k">${label}</div><div class="we-core-stat-v">${value}</div></div>`).join('');
     const centerMain = uncoveredAuto > 0 ? uncoveredAuto : (totalAi > 0 ? `${coveredAi}/${totalAi}` : '就绪');
-    const centerUnit = uncoveredAuto > 0 ? '<span>轮待补</span>' : '';
-    const subLabel = uncoveredAuto > 0 ? '纪要待追平' : (coverage?.effectiveDelayFloors > 0 ? `纪要覆盖 · 延${coverage.effectiveDelayFloors}层` : '纪要覆盖');
+    const centerUnit = uncoveredAuto > 0 ? '<span>层待填</span>' : '';
+    const subLabel = uncoveredAuto > 0 ? '待追平填表' : (coverage?.effectiveDelayFloors > 0 ? `填表覆盖 · 延${coverage.effectiveDelayFloors}层` : '填表覆盖');
     const tooltip = uncoveredAuto > 0
-      ? `尚有 ${uncoveredAuto} 轮可追平纪要（已覆盖 ${coveredAi}/${totalAi} 轮）`
-      : `纪要已覆盖 ${coveredAi}/${totalAi} 轮${coverage?.effectiveDelayFloors > 0 ? `（当前层不填表已开启，延后 ${coverage.effectiveDelayFloors} 轮）` : ''}`;
+      ? `尚有 ${uncoveredAuto} 个 AI 层待追平全要素填表（已覆盖 ${coveredAi}/${totalAi} 层）`
+      : `全要素填表已覆盖 ${coveredAi}/${totalAi} 个 AI 层${coverage?.effectiveDelayFloors > 0 ? `（当前层不填表已开启，延后 ${coverage.effectiveDelayFloors} 轮）` : ''}`;
 
     return `<div class="we-section we-core-section we-memory-core-section">
       <div class="we-core" title="${h(tooltip)}">
@@ -803,6 +806,55 @@ window.WORLD_ENGINE_UI = (function() {
     </div>`;
   }
 
+  function renderMemoryHomeFillControls(state, settings) {
+    const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
+    const isBusy = window.MEMORY_ENGINE?.isRunning?.() === true;
+    const statusMsg = window.MEMORY_ENGINE?.getSummaryBackfillStatus?.()?.message || '';
+    const latestLayer = coverage && coverage.latestLayer >= 0 ? coverage.latestLayer : 0;
+    const defaultStart = Math.max(coverage?.firstEligibleLayer ?? 0, parseInt(settings.backfillStartLayer) || 0);
+    const defaultEnd = parseInt(settings.backfillEndLayer) > 0 ? parseInt(settings.backfillEndLayer) : latestLayer;
+    const defaultBatch = Math.max(1, parseInt(settings.smallSummaryEveryX) || 1);
+    const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : 0;
+    const uncoveredAll = coverage ? Number(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) || 0 : 0;
+    const coveredAi = totalAi > 0
+      ? Math.max(0, totalAi - uncoveredAll)
+      : (coverage ? Number(coverage.coveredAiCount) || 0 : 0);
+    const delayBadge = coverage?.effectiveDelayFloors > 0
+      ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 轮）</span>` : '';
+    const coverageText = coverage
+      ? `当前至第 ${Math.max(0, coverage.latestLayer)} 层 · 已填表 ${coveredAi}/${totalAi} 个 AI 层${uncoveredAll > 0 ? ` · 待补填 ${uncoveredAll} 层` : ' · 已全部覆盖'}${coverage.staleCount > 0 ? ` · 待重建 ${coverage.staleCount} 条` : ''}`
+      : '全要素记忆填表（人物 / 实体 / 持续事实 / 角色弧光 / 纪要）';
+
+    return `<div class="we-section" style="margin-bottom:10px;padding:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+        <div style="font-size:12px;color:var(--we-text2);">${h(coverageText)}</div>
+        ${delayBadge}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <button class="we-btn we-btn-primary" id="we-memory-catchup-now" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-forward-fast"></i> 一键追平到最新</button>
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--we-text2);cursor:pointer;" title="开启“当前层不填表”时，默认追平到延迟区之前；勾选此项可强制追平到当前最新一层">
+          <input type="checkbox" id="we-memory-catchup-include-current" ${coverage?.effectiveDelayFloors > 0 ? '' : 'checked'}> 含当前层
+        </label>
+        <button class="we-btn" id="we-memory-minutes-stop" type="button"><i class="fa-solid fa-stop"></i> 停止</button>
+      </div>
+      <details class="we-api-adv-fold" style="margin-top:8px;">
+        <summary>手动指定范围填表（人物 / 实体 / 持续事实 / 角色弧光 / 纪要）</summary>
+        <div style="padding-top:8px;">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>起始楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
+            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>结束楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
+            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>每批轮数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
+          </div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 8px;font-size:11px;color:var(--we-text2);">
+            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite" checked> 覆盖范围内已有填表数据（人物/实体/事实/弧光/纪要一并重算）</label>
+          </div>
+          <button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button>
+        </div>
+      </details>
+      <div class="we-hint" id="we-memory-home-fill-status" style="margin-top:6px;">${h(statusMsg)}</div>
+    </div>`;
+  }
+
   function renderMemoryHomeView() {
     const state = window.MEMORY_ENGINE_DATA?.loadState?.() || {};
     const settings = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {};
@@ -810,7 +862,7 @@ window.WORLD_ENGINE_UI = (function() {
       { view: 'people', label: '人物', sub: '人物记忆 · 弧光 · 别名', poem: '知人者智' },
       { view: 'entities', label: '实体', sub: '组织 · 物件 · 能力 · 地点', poem: '名者，实之宾也' },
       { view: 'facts', label: '事实', sub: '持续事实 · 契约与状态', poem: '言出必践' },
-      { view: 'minutes', label: '纪要', sub: '阶段纪要 · 范围填表 · 一键追平', poem: '纪事者必提其要' }
+      { view: 'minutes', label: '纪要', sub: '阶段纪要 · 关键转折 · 历史召回', poem: '纪事者必提其要' }
     ];
     const nav = rows.map((row, index) => {
       const selected = _memorySelectedNavView === row.view ? ' we-nav-row--selected' : '';
@@ -825,6 +877,7 @@ window.WORLD_ENGINE_UI = (function() {
     }).join('');
     return '<div class="we-memory-home">'
       + renderMemoryCore(state, settings)
+      + renderMemoryHomeFillControls(state, settings)
       + '<div class="we-nav-list we-memory-nav-list">' + nav + '</div>'
       + '</div>';
   }
@@ -1061,49 +1114,7 @@ window.WORLD_ENGINE_UI = (function() {
       ? 8 : Math.max(0, parseInt(settings.smallSummaryInjectLimit) || 0);
     const validIds = items.filter(item => item.status !== 'stale' && item.status !== 'failed').map(item => item.id);
     const recentIdSet = new Set(directLimit > 0 ? validIds.slice(-directLimit) : []);
-    const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
-    const isBusy = window.MEMORY_ENGINE?.isRunning?.() === true;
-    const statusMsg = window.MEMORY_ENGINE?.getSummaryBackfillStatus?.()?.message || '';
-    const latestLayer = coverage && coverage.latestLayer >= 0 ? coverage.latestLayer : 0;
-    const defaultStart = Math.max(coverage?.firstEligibleLayer ?? 0, parseInt(settings.backfillStartLayer) || 0);
-    const defaultEnd = parseInt(settings.backfillEndLayer) > 0 ? parseInt(settings.backfillEndLayer) : latestLayer;
-    const defaultBatch = Math.max(1, parseInt(settings.smallSummaryEveryX) || 1);
-    const delayBadge = coverage?.effectiveDelayFloors > 0
-      ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 轮）</span>` : '';
-    const coverageText = coverage
-      ? `当前至第 ${Math.max(0, coverage.latestLayer)} 层 · 已填表 ${coverage.coveredAiCount}/${coverage.totalAiCount} 个 AI 层${(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) > 0 ? ` · 待补填 ${coverage.uncoveredCombinedCount ?? coverage.uncoveredCount} 层` : ' · 已全部覆盖'}${coverage.staleCount > 0 ? ` · 待重建 ${coverage.staleCount} 条` : ''}`
-      : `共 ${items.length} 条纪要`;
-
-    const toolbar = `<div class="we-section" style="margin-bottom:10px;padding:10px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
-        <div style="font-size:12px;color:var(--we-text2);">${h(coverageText)}</div>
-        ${delayBadge}
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-        <button class="we-btn we-btn-primary" id="we-memory-catchup-now" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-forward-fast"></i> 一键追平到最新</button>
-        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--we-text2);cursor:pointer;" title="开启“当前层不填表”时，默认追平到延迟区之前；勾选此项可强制追平到当前最新一层">
-          <input type="checkbox" id="we-memory-catchup-include-current" ${coverage?.effectiveDelayFloors > 0 ? '' : 'checked'}> 含当前层
-        </label>
-        <button class="we-btn" id="we-memory-minutes-stop" type="button"><i class="fa-solid fa-stop"></i> 停止</button>
-        <button class="we-btn" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button>
-      </div>
-      <details class="we-api-adv-fold" style="margin-top:8px;">
-        <summary>手动指定范围填表（楼层区间）</summary>
-        <div style="padding-top:8px;">
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>起始楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
-            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>结束楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
-            <div class="we-input-group" style="flex:1;min-width:78px;margin-bottom:4px;"><label>每批轮数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
-          </div>
-          <div style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 8px;font-size:11px;color:var(--we-text2);">
-            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-overwrite" checked> 覆盖范围内已有填表</label>
-            <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="we-memory-range-include-memory" checked> 同步提取人物/实体/事实/弧光</label>
-          </div>
-          <button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button>
-        </div>
-      </details>
-      <div class="we-hint" id="we-memory-minutes-action-status" style="margin-top:6px;">${h(statusMsg)}</div>
-    </div>`;
+    const pageActions = `<div class="we-memory-page-actions"><button class="we-btn we-btn-primary" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button></div>`;
 
     const editor = (item, isNew) => `<div class="we-memory-editor">
       <div class="we-memory-form-grid"><div class="we-input-group"><label>起始楼层</label><input class="we-memory-small-start" type="number" min="0" value="${h(String(item.startLayer ?? 0))}"></div><div class="we-input-group"><label>结束楼层</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div></div>
@@ -1136,7 +1147,7 @@ window.WORLD_ENGINE_UI = (function() {
     </div>`;
     }).join('');
     const countHint = items.length > 1 ? `<div class="we-hint">共 ${items.length} 条纪要，默认展开最新一条。</div>` : '';
-    return `${toolbar}${countHint}${draft}${cards || '<div class="we-empty">尚未生成纪要，可点击上方“一键追平到最新”或“手动指定范围填表”。</div>'}`;
+    return `${pageActions}${countHint}${draft}${cards || '<div class="we-empty">尚未生成纪要，可在记忆引擎首页点击“一键追平到最新”或“手动指定范围填表”。</div>'}`;
   }
 
   function renderMemorySubView(view) {
@@ -1456,8 +1467,11 @@ window.WORLD_ENGINE_UI = (function() {
         const includeCurrent = document.getElementById('we-memory-catchup-include-current')?.checked === true;
         catchupNow.disabled = true;
         try {
-          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.({ includeCurrentFloor: includeCurrent });
-          showToast(res?.message || (res?.alreadyCaughtUp ? '纪要已是最新' : '纪要追平完成'));
+          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.({
+            includeCurrentFloor: includeCurrent,
+            includeMemory: true
+          });
+          showToast(res?.message || (res?.alreadyCaughtUp ? '全要素填表已是最新' : '一键追平填表完成'));
           refresh();
         } catch (error) {
           showToast(`一键追平失败：${error?.message || error}`, true);
@@ -1474,12 +1488,11 @@ window.WORLD_ENGINE_UI = (function() {
         const endLayer = Math.max(0, parseInt(endRaw, 10) || 0);
         const batchSize = Math.max(1, parseInt(document.getElementById('we-memory-range-batch')?.value, 10) || 1);
         const overwrite = document.getElementById('we-memory-range-overwrite')?.checked !== false;
-        const includeMemory = document.getElementById('we-memory-range-include-memory')?.checked === true;
         rangeFillBtn.disabled = true;
         try {
           const res = await window.MEMORY_ENGINE?.fillSummaryRange?.({
             startLayer, endLayer, explicitZeroEnd: String(endRaw ?? '').trim() === '0',
-            batchSize, overwrite, includeMemory
+            batchSize, overwrite, includeMemory: true
           });
           showToast(res?.message || (res?.stopped ? '范围填表已停止' : `范围填表完成（共 ${res?.completedBatches || 0} 批）`));
           refresh();
@@ -1495,9 +1508,9 @@ window.WORLD_ENGINE_UI = (function() {
       minutesStop.onclick = () => {
         if (window.MEMORY_ENGINE?.isRunning?.()) {
           window.MEMORY_ENGINE.stopBackfill?.();
-          showToast('已请求停止当前纪要任务');
+          showToast('已请求停止当前填表任务');
         } else {
-          showToast('当前没有运行中的纪要任务');
+          showToast('当前没有运行中的填表任务');
         }
       };
     }
@@ -1867,7 +1880,7 @@ window.WORLD_ENGINE_UI = (function() {
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button class="we-btn we-btn-primary" id="we-memory-run-now" type="button"><i class="fa-solid fa-brain"></i> 提取本轮记忆</button>
-        <button class="we-btn" id="we-memory-catchup-settings-btn" type="button"><i class="fa-solid fa-forward-fast"></i> 一键追平纪要</button>
+        <button class="we-btn" id="we-memory-catchup-settings-btn" type="button"><i class="fa-solid fa-forward-fast"></i> 一键追平填表</button>
       </div>
       <div class="we-hint" id="we-memory-task-status" style="margin-top:8px;">${_memoryRunningLabel ? '正在进行' + h(_memoryRunningLabel) : '当前没有运行中的记忆任务'}</div>`;
 
@@ -1984,7 +1997,7 @@ window.WORLD_ENGINE_UI = (function() {
       </div>`;
 
     const backfillBody = `
-      <div style="font-size:11px;color:var(--we-text3);margin-bottom:6px;">支持全量重填、手动指定楼层范围填表与一键追平。两类重填彼此独立：人物/实体重填不会清理纪要；纪要重填不会改写人物与实体。</div>
+      <div style="font-size:11px;color:var(--we-text3);margin-bottom:6px;">「一键追平到最新」与「指定范围填表」均会按楼层同步填齐全部数据（人物 / 实体 / 持续事实 / 角色弧光 / 纪要 / 向量）；下方亦保留独立全量重填入口。</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <div class="we-input-group" style="flex:1;min-width:90px;margin-bottom:0;"><label>起始楼层（范围用）</label>
           <input type="number" id="we-memory-backfill-start" min="0" step="1" value="${backfillStart}"></div>
@@ -2002,7 +2015,7 @@ window.WORLD_ENGINE_UI = (function() {
       <div class="we-hint" id="we-memory-person-backfill-status" style="margin:6px 0;"></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;">
         <button class="we-btn we-btn-primary" id="we-memory-settings-catchup" type="button">⚡ 一键追平到最新</button>
-        <button class="we-btn we-btn-primary" id="we-memory-settings-range-fill" type="button">▶ 指定范围填纪要</button>
+        <button class="we-btn we-btn-primary" id="we-memory-settings-range-fill" type="button">▶ 指定范围填表</button>
         <button class="we-btn" id="we-memory-summary-backfill-start" type="button">▶ 重填全部纪要</button>
         <button class="we-btn" id="we-memory-backfill-start" type="button">▶ 重填人物与实体</button>
         <button class="we-btn" id="we-memory-backfill-stop" type="button">■ 停止</button>
@@ -6277,10 +6290,10 @@ window.WORLD_ENGINE_UI = (function() {
       memoryCatchupSettingsBtn.onclick = async () => {
         memoryCatchupSettingsBtn.disabled = true;
         try {
-          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.();
-          showToast(res?.message || (res?.alreadyCaughtUp ? '纪要已是最新' : '纪要追平完成'));
+          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.({ includeMemory: true });
+          showToast(res?.message || (res?.alreadyCaughtUp ? '全要素填表已是最新' : '一键追平填表完成'));
           refresh();
-        } catch (error) { showToast(`纪要追平失败：${error?.message || error}`, true); }
+        } catch (error) { showToast(`一键追平失败：${error?.message || error}`, true); }
         finally { memoryCatchupSettingsBtn.disabled = false; }
       };
     }
@@ -6289,8 +6302,8 @@ window.WORLD_ENGINE_UI = (function() {
       memorySettingsCatchup.onclick = async () => {
         memorySettingsCatchup.disabled = true;
         try {
-          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.({ includeCurrentFloor: false });
-          showToast(res?.message || (res?.alreadyCaughtUp ? '纪要已是最新' : '纪要追平完成'));
+          const res = await window.MEMORY_ENGINE?.catchUpToLatest?.({ includeCurrentFloor: false, includeMemory: true });
+          showToast(res?.message || (res?.alreadyCaughtUp ? '全要素填表已是最新' : '一键追平填表完成'));
           refresh();
         } catch (error) { showToast(`一键追平失败：${error?.message || error}`, true); }
         finally { memorySettingsCatchup.disabled = false; }
@@ -6302,11 +6315,11 @@ window.WORLD_ENGINE_UI = (function() {
         const startLayer = Math.max(0, parseInt(document.getElementById('we-memory-backfill-start')?.value, 10) || 0);
         const endRaw = document.getElementById('we-memory-backfill-end')?.value;
         const endLayer = Math.max(0, parseInt(endRaw, 10) || 0);
-        const batchSize = Math.max(1, parseInt(document.getElementById('we-memory-summary-backfill-small-every')?.value, 10) || 1);
+        const batchSize = Math.max(1, parseInt(document.getElementById('we-memory-small-summary-every')?.value, 10) || 1);
         memorySettingsRangeFill.disabled = true;
         try {
           const res = await window.MEMORY_ENGINE?.fillSummaryRange?.({
-            startLayer, endLayer, explicitZeroEnd: false, batchSize, overwrite: true
+            startLayer, endLayer, explicitZeroEnd: false, batchSize, overwrite: true, includeMemory: true
           });
           showToast(res?.message || (res?.stopped ? '范围填表已停止' : `范围填表完成（共 ${res?.completedBatches || 0} 批）`));
           refresh();

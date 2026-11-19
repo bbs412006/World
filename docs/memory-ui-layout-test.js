@@ -22,8 +22,16 @@ assert.ok(
   ui.includes('we-memory-catchup-now') &&
   ui.includes('we-memory-range-fill-start') &&
   ui.includes('we-memory-range-start') &&
-  ui.includes('we-memory-range-end'),
+  ui.includes('we-memory-range-end') &&
+  ui.includes('we-memory-home-fill-status'),
   '记忆界面应包含当前层不填表、自动回退重填、直注纪要上限、一键追平与手动指定范围填表控件'
+);
+const homeFn = ui.slice(ui.indexOf('function renderMemoryHomeView()'), ui.indexOf('const MEMORY_VIEW_META'));
+assert.ok(homeFn.includes('renderMemoryHomeFillControls('), '一键追平与手动指定范围填表应放在记忆引擎首页');
+const minutesFn = ui.slice(ui.indexOf('function renderMemoryMinutes(state)'), ui.indexOf('function renderMemorySubView(view)'));
+assert.ok(
+  !minutesFn.includes('we-memory-catchup-now') && !minutesFn.includes('we-memory-range-fill-start'),
+  '纪要子页不应再重复放置全要素一键追平与范围填表工具栏'
 );
 assert.match(css, /\.we-memory-entity-group > \.we-memory-record-body/, '实体分类需要独立布局样式');
 

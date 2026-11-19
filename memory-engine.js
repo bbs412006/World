@@ -3241,7 +3241,7 @@ window.MEMORY_ENGINE = (function() {
 
   function setSummaryBackfillStatus(current, total, message) {
     summaryBackfillStatus = { running: backfillRunning, current, total, message: message || '' };
-    for (const id of ['we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
+    for (const id of ['we-memory-home-fill-status', 'we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
       const element = document.getElementById(id);
       if (element) element.textContent = summaryBackfillStatus.message;
     }
@@ -3477,13 +3477,13 @@ window.MEMORY_ENGINE = (function() {
     }
 
     backfillRunning = true;
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('一键追平纪要前自动备份');
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('一键追平填表前自动备份');
     data().saveCheckpoint(data().loadState());
     let completedBatches = 0, addedSmall = 0;
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const batch = batches[i];
-        setSummaryBackfillStatus(i, batches.length, `正在追平纪要 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
+        setSummaryBackfillStatus(i, batches.length, `正在追平填表 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
         const curState = data().loadState();
         const curSmall = coveredDialogueAiLayersSet(curState);
         const curMem = includeMemory ? coveredMemoryAiLayersSet(curState) : curSmall;
