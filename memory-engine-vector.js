@@ -248,7 +248,7 @@ window.MEMORY_ENGINE_VECTOR = (function() {
           key: `small:${s.id}`,
           kind: 'small',
           refId: s.id,
-          label: `纪要[楼层 ${s.startLayer}-${s.endLayer}]`,
+          label: `纪要[楼层 ${Number(s.startLayer) === Number(s.endLayer) ? s.endLayer : `${s.startLayer}-${s.endLayer}`}]`,
           text,
           textHash: hashText(`${model}||small||${text}`)
         });

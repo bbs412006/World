@@ -397,6 +397,27 @@ async function main() {
   ui._test.captureInput({dataset:{...timeDS,outlineConditionField:'basis'},value:'storyDay',type:'select-one'});
   assert.strictEqual(timeNode.trigger.value,0,'切回总天数不得沿用ISO字符串');
   assert.ok(ui.render().includes('剧情总天数阈值'));
+
+  // 回归校验：剧情大纲检查完成/错误等日志通过短时 toast 提示，不再常驻顶部横幅；仅任务运行中短暂展示进度
+  await ui._test.handleAction('discard-editor');
+  await ui._test.handleAction('view-home');
+  const toasts = [];
+  sandbox.WORLD_ENGINE_UI.showToast = (msg, isError, duration) => { toasts.push({ msg, isError: Boolean(isError), duration }); };
+  let releaseCheck;
+  sandbox.OUTLINE_ENGINE.checkNow = () => new Promise(resolve => { releaseCheck = () => resolve({ ok: true, checked: true, completed: [], proposals: [] }); });
+  const pendingCheck = ui._test.handleAction('check-now');
+  for (let i = 0; i < 10 && !releaseCheck; i++) await Promise.resolve();
+  assert.ok(ui.render().includes('正在检查新增正文…'), '运行期间允许短暂显示当前进度');
+  releaseCheck();
+  await pendingCheck;
+  assert.strictEqual(ui._test.draftFor().message, '正文检查完成。节点状态与调整建议已更新。');
+  assert.ok(!ui.render().includes('正文检查完成。节点状态与调整建议已更新。'), '正文检查完成后日志不得持续显示在面板顶部');
+  assert.ok(toasts.some(t => t.msg === '正文检查完成。节点状态与调整建议已更新。' && t.isError === false), '完成后应通过短时 toast 提示');
+  sandbox.OUTLINE_ENGINE.checkNow = async () => ({ ok: false, reason: 'no-sources' });
+  await ui._test.handleAction('check-now');
+  assert.ok(!ui.render().includes('暂无可用于判断的新增正文。'), '错误/跳过提示同样不得常驻顶部');
+  assert.ok(toasts.some(t => t.msg === '暂无可用于判断的新增正文。' && t.isError === true), '错误提示应通过错误样式 toast 提示');
+
   assert.ok(refreshes > 0);
   console.log('outline UI tests passed: canonical multi-track editing, condition controls, stable references, scheduling projections, author visibility, journal recovery and confirmed v2 imports; v1 draft/API/escaping checks retained');
 }

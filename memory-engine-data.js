@@ -177,13 +177,29 @@ window.MEMORY_ENGINE_DATA = (function() {
     }
     next.ongoing_facts = normalizeOngoingFacts(next.ongoing_facts);
     next.character_arcs = normalizeCharacterArcs(next.character_arcs);
+    const resolveAiRecordBounds = item => {
+      const fallbackStart = Number.isFinite(Number(item?.startLayer)) ? Number(item.startLayer) : 0;
+      const fallbackEnd = Number.isFinite(Number(item?.endLayer)) ? Number(item.endLayer) : fallbackStart;
+      if (item?.kind === 'manual_snapshot' || item?.source === 'world_engine') {
+        return { startLayer: fallbackStart, endLayer: fallbackEnd };
+      }
+      const aiLayers = (Array.isArray(item?.sourceRefs) ? item.sourceRefs : [])
+        .filter(ref => ref && !ref.synthetic && ref.role === 'assistant' && Number.isFinite(Number(ref.layer)))
+        .map(ref => Number(ref.layer));
+      if (!aiLayers.length) return { startLayer: fallbackStart, endLayer: fallbackEnd };
+      return {
+        startLayer: Math.min(...aiLayers),
+        endLayer: Math.max(...aiLayers)
+      };
+    };
     if (!next.event_memory || typeof next.event_memory !== 'object' || Array.isArray(next.event_memory)) next.event_memory = {};
     if (!Array.isArray(next.event_memory.small_summaries)) next.event_memory.small_summaries = [];
     next.event_memory.small_summaries = next.event_memory.small_summaries.map((item, index) => {
+      const bounds = resolveAiRecordBounds(item);
       const normalizedItem = {
         id: String(item?.id || `small_${String(index + 1).padStart(6, '0')}`),
-        startLayer: Number.isFinite(Number(item?.startLayer)) ? Number(item.startLayer) : 0,
-        endLayer: Number.isFinite(Number(item?.endLayer)) ? Number(item.endLayer) : 0,
+        startLayer: bounds.startLayer,
+        endLayer: bounds.endLayer,
         content: String(item?.content || '').trim(),
         keywords: unique(item?.keywords),
         entityNames: unique(item?.entityNames),
@@ -231,15 +247,17 @@ window.MEMORY_ENGINE_DATA = (function() {
           createdAt: Number(timeline.root?.createdAt) || Date.now(),
           base: rootBase
         },
-        nodes: (Array.isArray(timeline.nodes) ? timeline.nodes : []).map((node, index) => ({
+        nodes: (Array.isArray(timeline.nodes) ? timeline.nodes : []).map((node, index) => {
+          const nBounds = resolveAiRecordBounds(node);
+          return {
           id: clean(node?.id) || `memory_${String(index + 1).padStart(6, '0')}`,
           kind: clean(node?.kind) || 'memory',
           ...(node?.source === 'world_engine' ? { source: 'world_engine' } : {}),
           ...(clean(node?.sourceKey) ? { sourceKey: clean(node.sourceKey) } : {}),
           ...(clean(node?.worldCommitId) ? { worldCommitId: clean(node.worldCommitId) } : {}),
           originChatId: clean(node?.originChatId || originChatId),
-          startLayer: Number.isFinite(Number(node?.startLayer)) ? Number(node.startLayer) : 0,
-          endLayer: Number.isFinite(Number(node?.endLayer)) ? Number(node.endLayer) : 0,
+          startLayer: nBounds.startLayer,
+          endLayer: nBounds.endLayer,
           sourceRefs: Array.isArray(node?.sourceRefs) ? clone(node.sourceRefs) : [],
           sourceDigest: clean(node?.sourceDigest),
           personal: Array.isArray(node?.personal) ? clone(node.personal) : [],
@@ -253,7 +271,8 @@ window.MEMORY_ENGINE_DATA = (function() {
           revision: Math.max(1, parseInt(node?.revision) || 1),
           createdAt: Number(node?.createdAt) || Date.now(),
           updatedAt: Number(node?.updatedAt) || Number(node?.createdAt) || Date.now()
-        })),
+        };
+        }),
         migratedFromLegacy: timeline.migratedFromLegacy === true
       };
     }

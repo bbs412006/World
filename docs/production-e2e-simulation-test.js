@@ -363,7 +363,7 @@ async function runAll() {
     // 预埋陷阱 C：第 3-4 层的联合请求中模型“偷懒”只写了 small_summary，漏写了人物/实体/事实，触发独立补提！
     let fallbackTriggeredFor34 = false;
     env.setApiHandler(async prompt => {
-      if (prompt.includes('楼层 3 至 4') && prompt.includes('"small_summary": ""')) {
+      if ((prompt.includes('【总结范围】\n楼层 4\n') || prompt.includes('楼层 3 至 4')) && prompt.includes('"small_summary": ""')) {
         return JSON.stringify({ small_summary: '第3-4层模型偷懒只返回了纪要。'.repeat(50) });
       }
       if (!prompt.includes('"small_summary": ""')) {

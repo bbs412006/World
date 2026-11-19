@@ -73,6 +73,12 @@ window.MEMORY_ENGINE = (function() {
       .map(entry => entry.item);
   }
 
+  function formatLayerSpan(startLayer, endLayer, sep = '-') {
+    const s = Number.isFinite(Number(startLayer)) ? Number(startLayer) : 0;
+    const e = Number.isFinite(Number(endLayer)) ? Number(endLayer) : s;
+    return s === e ? String(e) : `${s}${sep}${e}`;
+  }
+
   function formatMessages(messages, startLayer) {
     const ctx = context();
     return (messages || []).map((message, i) => {
@@ -89,9 +95,11 @@ window.MEMORY_ENGINE = (function() {
     const all = chat(), count = Math.max(1, parseInt(rounds) || 1) * 2;
     const start = Math.max(ignoreFirstLayer(settings()) ? 1 : 0, all.length - count);
     const end = Math.max(start, all.length - 1);
+    const aiInSlice = all.map((m, idx) => (idx >= start && idx <= end && m && !m.is_user ? idx : -1)).filter(idx => idx >= 0);
     return {
-      startLayer: start,
-      endLayer: end,
+      startLayer: aiInSlice.length ? aiInSlice[0] : start,
+      endLayer: aiInSlice.length ? aiInSlice[aiInSlice.length - 1] : end,
+      dialogueStart: start,
       conversation: formatMessages(all.slice(start), start),
       sourceRefs: timelineApi()?.captureRange?.(start, end) || []
     };
@@ -126,7 +134,8 @@ window.MEMORY_ENGINE = (function() {
     const end = aiLayers.at(-1);
     return {
       conversation: formatMessages(all.slice(start, end + 1), start),
-      startLayer: start,
+      startLayer: firstAi,
+      dialogueStart: start,
       endLayer: end
     };
   }
@@ -152,7 +161,7 @@ window.MEMORY_ENGINE = (function() {
     const historySmallSummaries = smallCount ? eligibleSmall.slice(-smallCount) : [];
     const parts = [];
     if (historySmallSummaries.length) parts.push(`【前置纪要】\n${historySmallSummaries.map((item, index) =>
-      `${index + 1}. [楼层 ${Number(item?.startLayer) || 0}-${Number(item?.endLayer) || 0}] ${clean(item?.content)}`
+      `${index + 1}. [楼层 ${formatLayerSpan(item?.startLayer, item?.endLayer)}] ${clean(item?.content)}`
     ).join('\n')}`);
     if (raw.conversation) parts.push(`【近期正文】\n${filterConversation(raw.conversation, st)}`);
     return { historySmallSummaries, raw, text: parts.join('\n\n') };
@@ -1403,7 +1412,22 @@ window.MEMORY_ENGINE = (function() {
   }
 
   function sourceBounds(refs, fallbackLayer) {
-    const layers = (refs || []).map(ref => Number(ref?.layer)).filter(Number.isFinite);
+    const list = Array.isArray(refs) ? refs : [];
+    const all = chat();
+    // 楼层记录只看 AI 实际楼层号（例如第 13 层是 AI 回复，直接记为 startLayer=13, endLayer=13，不把前置用户输入层算入范围）
+    const aiLayers = list
+      .filter(ref => {
+        if (!ref || ref.synthetic) return false;
+        if (ref.role === 'assistant') return true;
+        if (ref.role === 'user') return false;
+        const l = Number(ref.layer);
+        return Number.isFinite(l) && all[l] && !all[l].is_user;
+      })
+      .map(ref => Number(ref.layer))
+      .filter(Number.isFinite);
+    const layers = aiLayers.length
+      ? aiLayers
+      : list.map(ref => Number(ref?.layer)).filter(Number.isFinite);
     const fallback = Number.isFinite(Number(fallbackLayer)) ? Number(fallbackLayer) : currentLayer();
     return {
       startLayer: layers.length ? Math.min(...layers) : fallback,
@@ -1504,8 +1528,12 @@ window.MEMORY_ENGINE = (function() {
   function appendTimelineNode(state, extracted, task, options) {
     const timeline = ensureTimelineState(state), api = timelineApi();
     let refs = Array.isArray(task?.sourceRefs) ? clone(task.sourceRefs) : [];
-    if (!refs.length && Number.isFinite(Number(task?.startLayer)) && Number.isFinite(Number(task?.endLayer))) {
-      refs = api?.captureRange?.(Number(task.startLayer), Number(task.endLayer)) || [];
+    if (!refs.length && task?.kind !== 'world_link' && Number.isFinite(Number(task?.startLayer)) && Number.isFinite(Number(task?.endLayer))) {
+      const rawStart = Number(task.startLayer);
+      const captureStart = Number.isFinite(Number(task?.dialogueStart))
+        ? Number(task.dialogueStart)
+        : (rawStart > 0 && chat()[rawStart - 1]?.is_user ? rawStart - 1 : rawStart);
+      refs = api?.captureRange?.(captureStart, Number(task.endLayer)) || [];
     }
     // 世界引擎联动等合成输入没有真实聊天正文，用跨聊天唯一的合成来源记录身份。
     if (!refs.length) {
@@ -2165,13 +2193,15 @@ window.MEMORY_ENGINE = (function() {
       .filter(index => index >= 0).slice(0, Math.max(1, parseInt(maxAi) || 1));
     if (!aiLayers.length) return null;
     const firstAi = aiLayers[0], finish = aiLayers.at(-1);
-    const start = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
+    const dialogueStart = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
     return {
-      startLayer: start,
+      startLayer: firstAi,
       endLayer: finish,
+      dialogueStart,
+      aiLayers,
       aiCount: aiLayers.length,
-      conversation: formatMessages(all.slice(start, finish + 1), start),
-      sourceRefs: timelineApi()?.captureRange?.(start, finish) || []
+      conversation: formatMessages(all.slice(dialogueStart, finish + 1), dialogueStart),
+      sourceRefs: timelineApi()?.captureRange?.(dialogueStart, finish) || []
     };
   }
 
@@ -2930,15 +2960,15 @@ window.MEMORY_ENGINE = (function() {
       for (let i = 0; i < run.length; i += size) {
         const chunk = run.slice(i, i + size);
         const firstAi = chunk[0], finish = chunk[chunk.length - 1];
-        const candidateStart = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
-        const start = Number.isFinite(Number(minStartBound)) ? Math.max(Number(minStartBound), candidateStart) : candidateStart;
+        const dialogueStart = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
         batches.push({
-          startLayer: start,
+          startLayer: firstAi,
           endLayer: finish,
+          dialogueStart,
           aiLayers: chunk,
           aiCount: chunk.length,
-          conversation: formatMessages(all.slice(start, finish + 1), start),
-          sourceRefs: timelineApi()?.captureRange?.(start, finish) || []
+          conversation: formatMessages(all.slice(dialogueStart, finish + 1), dialogueStart),
+          sourceRefs: timelineApi()?.captureRange?.(dialogueStart, finish) || []
         });
       }
     }
@@ -3002,6 +3032,7 @@ window.MEMORY_ENGINE = (function() {
     return {
       chatTotalLayers: all.length,
       firstEligibleLayer,
+      firstAiLayer: allAi.length ? allAi[0] : -1,
       latestLayer,
       latestAiLayer,
       effectiveDelayFloors,
@@ -3550,7 +3581,7 @@ window.MEMORY_ENGINE = (function() {
         text: `【近期事件纪要】\n${recentSmall.map(item => {
           const isWorldDup = item.source === 'world_engine' && worldDigestTrim && clean(item.content) === worldDigestTrim;
           const prefix = isWorldDup ? '[世界同步] ' : '';
-          return `- [楼层 ${item.startLayer}-${item.endLayer}] ${prefix}${item.content}`;
+          return `- [楼层 ${formatLayerSpan(item.startLayer, item.endLayer)}] ${prefix}${item.content}`;
         }).join('\n')}`
       });
     }
@@ -3577,7 +3608,7 @@ window.MEMORY_ENGINE = (function() {
               item.keywords?.length ? `#${item.keywords.slice(0, 3).join(' #')}` : '',
               vecScore > 0 ? `语义 ${(vecScore * 100).toFixed(0)}%` : ''
             ].filter(Boolean).join(' · ');
-            return `- [楼层 ${item.startLayer}-${item.endLayer}${tags ? ` · ${tags}` : ''}] ${item.content}`;
+            return `- [楼层 ${formatLayerSpan(item.startLayer, item.endLayer)}${tags ? ` · ${tags}` : ''}] ${item.content}`;
           }).join('\n')}`
         });
       }
@@ -4236,7 +4267,7 @@ window.MEMORY_ENGINE = (function() {
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const batch = batches[i];
-        setSummaryBackfillStatus(i, batches.length, `正在范围填表 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
+        setSummaryBackfillStatus(i, batches.length, `正在范围填表 ${i + 1} / ${batches.length}（楼层 ${formatLayerSpan(batch.startLayer, batch.endLayer, '–')}）`);
         const res = await runIncrementalFillBatch(batch, {
           overwrite,
           includeMemory,
@@ -4252,7 +4283,7 @@ window.MEMORY_ENGINE = (function() {
       const stopped = !backfillRunning;
       setSummaryBackfillStatus(completedBatches, batches.length, stopped
         ? `范围填表已停止（已完成 ${completedBatches}/${batches.length} 批）`
-        : `范围填表完成（楼层 ${startLayer}–${endLayer}，共 ${completedBatches} 批）`);
+        : `范围填表完成（楼层 ${formatLayerSpan(startLayer, endLayer, '–')}，共 ${completedBatches} 批）`);
       return { completedBatches, totalBatches: batches.length, addedSmall, stopped, state: data().loadState() };
     } catch (error) {
       setSummaryBackfillStatus(completedBatches, batches.length, `范围填表失败：${error?.message || error}`);
@@ -4335,7 +4366,7 @@ window.MEMORY_ENGINE = (function() {
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const batch = batches[i];
-        setSummaryBackfillStatus(i, batches.length, `正在追平填表 ${i + 1} / ${batches.length}（楼层 ${batch.startLayer}–${batch.endLayer}）`);
+        setSummaryBackfillStatus(i, batches.length, `正在追平填表 ${i + 1} / ${batches.length}（楼层 ${formatLayerSpan(batch.startLayer, batch.endLayer, '–')}）`);
         // 一键追平严格走纯增量逐层自动填表，绝不删除任何已有的旧楼层记忆节点
         const res = await runIncrementalFillBatch(batch, {
           overwrite: false,

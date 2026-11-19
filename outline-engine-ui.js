@@ -74,18 +74,26 @@ window.OUTLINE_ENGINE_UI = (function() {
     return drafts.get(id);
   }
 
-  function notify(message, error, draft) {
+  function setNotice(draft, message, error) {
     const current = draft || draftFor();
     current.message = String(message || '');
     current.error = Boolean(error);
+    if (current.message && !current.busy && !current.fetchingModels) {
+      window.WORLD_ENGINE_UI?.showToast?.(current.message, current.error, current.error ? 4500 : 3000);
+    }
+  }
+
+  function notify(message, error, draft) {
+    setNotice(draft, message, error);
     refresh();
   }
 
   async function run(action, label) {
     const originId = chatId(), draft = draftFor(originId);
     if (draft.busy) return;
+    const runningLabel = label || '正在处理…';
     draft.busy = true;
-    draft.message = label || '正在处理…';
+    draft.message = runningLabel;
     draft.error = false;
     refresh();
     try {
@@ -95,6 +103,9 @@ window.OUTLINE_ENGINE_UI = (function() {
       draft.error = true;
     } finally {
       draft.busy = false;
+      if (draft.message && draft.message !== runningLabel) {
+        window.WORLD_ENGINE_UI?.showToast?.(draft.message, Boolean(draft.error), draft.error ? 4500 : 3000);
+      }
       refresh();
     }
   }
@@ -241,7 +252,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     draft.inlineEdit = null;
     draft.confirmDeleteTrackId = null;
     engine()?.applyInjection?.();
-    if (message) { draft.message = message; draft.error = false; }
+    if (message) setNotice(draft, message, false);
     return true;
   }
 
@@ -1360,11 +1371,11 @@ window.OUTLINE_ENGINE_UI = (function() {
     const phases = { ready: '可继续', preview: '历史预览', 'pending-rebuild': '等待显式重建', blocked: '恢复受阻', rebuilding: '正在重建', uninitialized: '尚未建立联合基线', disabled: '联合历史未启用' };
     return `<section class="we-section we-outline-recovery">
       <div class="we-section-title">世界、记忆与剧情联合历史</div>
-      <p class="we-outline-message${status.phase === 'blocked' ? ' is-error' : ''}">${h(phases[status.phase] || status.phase || '状态待确认')}${status.reason ? ` · ${h(status.reason)}` : ''}</p>
+      <p class="we-outline-message${status.blocked ? ' is-error' : ''}">${h(phases[status.phase] || status.phase || '状态待确认')}${status.reason ? ` · ${h(status.reason)}` : ''}</p>
       <dl><dt>初始基线</dt><dd>${h(status.baselineLayer ?? '未建立')}</dd><dt>可恢复起始边界</dt><dd>${h(status.recoverableFromLayer ?? '未建立')}</dd><dt>最后有效楼层</dt><dd>${h(status.lastValidLayer ?? '未记录')}</dd><dt>待重建范围起点</dt><dd>${h(status.pendingFromLayer ?? '无')}</dd><dt>当前提交</dt><dd>${h(status.currentCommitId || '无')} · 分支 ${h(status.branchId || '无')}</dd><dt>完整 journal</dt><dd>${h(status.journalCount ?? commits.length)} 个提交 · ${h(status.snapshotCount ?? 0)} 份历史快照</dd></dl>
       <p class="we-outline-hint">联合 journal 保存世界与剧情自动状态，并撤下失效的来源记忆；普通滚动备份是保存点，两者用途不同。作者大纲与手动标记在回退时保留。</p>
-      <div class="we-outline-actions">${button('history-audit', '审计当前原文')}${button('history-export', '导出联合历史备份')}${button('history-reset-baseline', '保留当前世界重设基线', '', status.phase === 'blocked' ? 'primary' : '')}${button('history-rebuild', '从待重建边界批量重建', '', status.phase === 'blocked' ? '' : 'primary')}</div>
-      ${status.phase === 'blocked' ? '<p class="we-outline-hint">提示：若旧消息曾被删改或消息 ID 未及时保存导致受阻，可直接点击「保留当前世界重设基线」解锁继续推演（保留现有世界与大纲、不重跑旧楼）；若想按现有原文从头推翻重演，请点「从待重建边界批量重建」。</p>' : ''}
+      <div class="we-outline-actions">${button('history-audit', '审计当前原文')}${button('history-export', '导出联合历史备份')}${button('history-reset-baseline', '保留当前世界重设基线', '', status.blocked ? 'primary' : '')}${button('history-rebuild', '从待重建边界批量重建', '', status.blocked ? '' : 'primary')}</div>
+      ${status.blocked ? '<p class="we-outline-hint">提示：若旧消息曾被删改或消息 ID 未及时保存导致暂停，可直接点击「保留当前世界重设基线」立刻解锁继续推演（保留现有世界与大纲、不重跑旧楼）；若想按现有原文从断点重演对齐，请点「从待重建边界批量重建」。</p>' : ''}
       <label class="we-outline-field"><span>导入联合历史备份（先预览再确认）</span><input id="we-outline-history-file" type="file" accept=".json,application/json"></label>
       <div class="we-outline-table-scroll"><table><thead><tr><th>提交／分支</th><th>位置</th><th>类型与状态</th><th>恢复</th></tr></thead><tbody>${commits.map(commit => `<tr><td>${h(commit.id)}<small>${h(commit.branchId || '')}</small></td><td>${h(commit.layer ?? '—')}</td><td>${h(commit.kind || '')} · ${h(commit.status || '')}</td><td>${button('history-restore', '恢复此提交', ` data-outline-commit="${h(commit.id)}"`)}</td></tr>`).join('') || '<tr><td colspan="4">尚无联合提交记录</td></tr>'}</tbody></table></div>
     </section>`;
@@ -1403,6 +1414,23 @@ window.OUTLINE_ENGINE_UI = (function() {
     return `${subTopbar('剧情调试', VIEW_META.debug.poem)}${renderDebugBody()}`;
   }
 
+  function renderHistoryPausedBanner(draft) {
+    if (draft.view === 'recovery' || (draft.settingsOpen && draft.settingsTab === 'archive')) return '';
+    let status = null;
+    try { status = history()?.getStatus?.(); } catch (_) {}
+    if (!status?.blocked) return '';
+    const title = status.phase === 'pending-rebuild' ? '联合历史待重新对账（推演已暂停）' : '联合历史恢复受阻（推演已暂停）';
+    return `<section class="we-section we-outline-temporal" role="alert">
+      <strong>${h(title)}</strong>
+      ${status.reason ? `<p>${h(status.reason)}</p>` : ''}
+      <p class="we-outline-hint">不想重跑旧楼可直接「重设基线解锁」继续聊；需要按变更后正文补齐推演可点「批量重建」。</p>
+      <div class="we-outline-actions">
+        ${button('history-reset-baseline', '重设基线解锁', '', 'primary')}
+        ${button('history-rebuild', '批量重建对账')}
+      </div>
+    </section>`;
+  }
+
   function render() {
     const draft = draftFor(), current = state(), running = draft.busy || Boolean(engine()?.isRunning?.()) || isRebuilding(), enabled = settings().engineEnabled === true;
     const views = {
@@ -1422,9 +1450,11 @@ window.OUTLINE_ENGINE_UI = (function() {
         : draft.textOpen
           ? renderTextImport(draft)
           : (views[draft.view] || views.home)();
-    // 模块运行状态已并入首页核心卡；二级页与设置页顶部不再常驻状态条，保持三模块层级一致
+    // 模块运行状态已并入首页核心卡；操作完成日志改走短时 toast 提示，顶部仅在任务运行中短暂展示进度条
+    const showProgressBanner = Boolean(draft.message && (draft.busy || draft.fetchingModels));
     return `<div class="we-outline-root">
-      ${draft.message ? `<p role="status" class="we-outline-message${draft.error ? ' is-error' : ''}">${h(draft.message)}</p>` : ''}
+      ${renderHistoryPausedBanner(draft)}
+      ${showProgressBanner ? `<p role="status" class="we-outline-message">${h(draft.message)}</p>` : ''}
       ${renderTemporalNotice(current)}
       ${renderImportReview(draft)}
       ${body}
@@ -1838,7 +1868,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     else if (action === 'edit-plan') startEditor();
     else if (action === 'close-editor') draft.editorOpen = false;
-    else if (action === 'rebase-editor') { draft.expectedRevision = current.revision; draft.expectedPlanSnapshot = JSON.stringify(current.plan); draft.message = '已保留草稿并采用当前大纲作为保存基底。'; draft.error = false; }
+    else if (action === 'rebase-editor') { draft.expectedRevision = current.revision; draft.expectedPlanSnapshot = JSON.stringify(current.plan); setNotice(draft, '已保留草稿并采用当前大纲作为保存基底。', false); }
     else if (action === 'discard-editor') { if (!window.confirm || window.confirm('放弃当前未保存的大纲草稿？')) { draft.editorOpen = false; draft.plan = null; draft.confirmBatchDeleteTrackId = null; } }
     else if (action === 'open-text') { draft.textOpen = true; draft.editorOpen = false; draft.settingsOpen = false; draft.inlineEdit = null; }
     else if (action === 'close-text') draft.textOpen = false;
@@ -1916,7 +1946,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       engine()?.abort?.(); const next = state(); next.authorFlags = { ...(next.authorFlags || {}), [id]: draft.newFlagValue }; data().saveState(next); draft.newFlagId = ''; engine()?.applyInjection?.();
     } else if (action === 'save-plan') {
       commitReviewedPlan(draft.plan, draft.expectedRevision, draft.expectedPlanSnapshot);
-      draft.plan = null; draft.editorOpen = false; draft.confirmBatchDeleteTrackId = null; draft.message = '大纲已保存。'; draft.error = false;
+      draft.plan = null; draft.editorOpen = false; draft.confirmBatchDeleteTrackId = null; setNotice(draft, '大纲已保存。', false);
       engine()?.applyInjection?.();
     } else if (action === 'copy-world-api') {
       const worldCfg = window.WORLD_ENGINE_API?.getSettings?.(true);
@@ -1925,8 +1955,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       draft.settingsDraft.connectionMode = worldCfg.connectionMode === 'proxy' ? 'proxy' : 'direct';
       draft.settingsDraft.apiUrl = String(worldCfg.apiUrl || '');
       draft.settingsDraft.apiKey = String(worldCfg.apiKey || '');
-      draft.message = '已填入世界引擎连接信息（仅一次性复制，需点「保存设置」生效）。';
-      draft.error = false;
+      setNotice(draft, '已填入世界引擎连接信息（仅一次性复制，需点「保存设置」生效）。', false);
     } else if (action === 'test-api') {
       const api = window.WORLD_ENGINE_API;
       if (!api?.testConnection) throw new Error('连接测试接口尚未就绪。');
@@ -1939,8 +1968,7 @@ window.OUTLINE_ENGINE_UI = (function() {
         const res = await api.testConnection(cfg, { module: 'outline' });
         draft.apiTestStatus = `连接成功（${res.durationMs}ms）：${res.preview || '已收到响应'}`;
         draft.apiTestError = false;
-        draft.message = '剧情大纲 API 连接测试成功。';
-        draft.error = false;
+        setNotice(draft, '剧情大纲 API 连接测试成功。', false);
       } catch (err) {
         draft.apiTestStatus = `连接失败：${err?.message || err}`;
         draft.apiTestError = true;
@@ -1960,8 +1988,8 @@ window.OUTLINE_ENGINE_UI = (function() {
         api.setNextRequestMeta?.({ module: 'outline', purpose: '获取模型列表' });
         const models = await api.fetchModelList(cfg);
         draft.fetchedModels = Array.isArray(models) ? models : [];
-        draft.message = draft.fetchedModels.length ? `获取到 ${draft.fetchedModels.length} 个模型。` : '模型列表为空。';
-        draft.error = false;
+        draft.fetchingModels = false;
+        setNotice(draft, draft.fetchedModels.length ? `获取到 ${draft.fetchedModels.length} 个模型。` : '模型列表为空。', false);
       } finally {
         draft.fetchingModels = false;
       }
@@ -1996,21 +2024,21 @@ window.OUTLINE_ENGINE_UI = (function() {
       await run(async origin => { const plan = await engine().organizeText(text); origin.preview = clone(plan); origin.previewRevision = revision; origin.previewPlanSnapshot = snapshot; origin.message = '整理完成。请检查预览后确认采用，或先进入结构编辑。'; }, '正在整理剧情文本…');
     } else if (action === 'adopt-preview') {
       commitReviewedPlan(draft.preview, draft.previewRevision, draft.previewPlanSnapshot);
-      draft.preview = null; draft.textOpen = false; draft.message = '已采用整理后的大纲。';
+      draft.preview = null; draft.textOpen = false; setNotice(draft, '已采用整理后的大纲。', false);
       engine()?.applyInjection?.();
     } else if (action === 'edit-preview') { startEditor(draft.preview, draft.previewRevision, draft.previewPlanSnapshot); draft.textOpen = false; }
     else if (action === 'discard-preview') draft.preview = null;
     else if (action === 'check-now') {
       await run(async origin => {
         const result = await engine().checkNow();
-        const reasons = { disabled: '请先启用剧情模块。', busy: '已有剧情任务正在运行。', generating: '正文正在生成，请在回复完成后检查。', 'no-current-chapter': '当前章还没有可检查的节点。', 'no-sources': '暂无可用于判断的新增正文。', 'already-checked': '这些正文已经检查过，无需重复。', 'final-chapter-complete': '全部必要剧情已完成。', 'stale-result': '正文或大纲已变化，本次结果未写入。', aborted: '检查已停止。' };
+        const reasons = { disabled: '请先启用剧情模块。', busy: '已有剧情任务正在运行。', generating: '正文正在生成，请在回复完成后检查。', 'recovery-required': '联合历史恢复受阻，请先处理顶部提示。', 'world-busy': '世界引擎正在推演，请稍后再检查。', 'no-current-chapter': '当前章还没有可检查的节点。', 'no-sources': '暂无可用于判断的新增正文。', 'already-checked': '这些正文已经检查过，无需重复。', 'outline-complete': '全部必要剧情已完成。', 'final-chapter-complete': '全部必要剧情已完成。', 'stale-result': '正文或大纲已变化，本次结果未写入。', aborted: '检查已停止。' };
         origin.message = result?.reason ? (reasons[result.reason] || `检查结果：${result.reason}`) : '正文检查完成。节点状态与调整建议已更新。';
         origin.error = result?.ok === false && result?.reason !== 'aborted';
       }, '正在检查新增正文…');
     } else if (action === 'abort') { if (isRebuilding()) { if (!window.WORLD_ENGINE?.abortLinkedRebuild) throw new Error('联合重建停止接口尚未就绪。'); await window.WORLD_ENGINE.abortLinkedRebuild(); } engine()?.abort?.(); notify('已发送停止信号。'); }
     else if (action === 'accept-proposal') { engine()?.abort?.(); await engine().applyProposal(ds.outlineProposal, current.revision); notify('已采纳剧情调整建议。'); }
     else if (action === 'dismiss-proposal') { await engine().dismissProposal(ds.outlineProposal); notify('已拒绝此建议。'); }
-    else if (action === 'export-full') { const bundle = history()?.exportBundle?.() || null; download({ ...data().exportData(), bundle }, `outline-linked-full-${Date.now()}.json`); if (!bundle?.bundle) draft.message = '已导出剧情数据；当前尚无联合历史基线，因此此文件没有历史 journal。'; }
+    else if (action === 'export-full') { const bundle = history()?.exportBundle?.() || null; download({ ...data().exportData(), bundle }, `outline-linked-full-${Date.now()}.json`); if (!bundle?.bundle) setNotice(draft, '已导出剧情数据；当前尚无联合历史基线，因此此文件没有历史 journal。', false); }
     else if (action === 'export-plan') download({ __outlineEnginePlan: true, schemaVersion: data().SCHEMA_VERSION || 2, plan: current.plan }, `outline-plan-${Date.now()}.json`);
     else if (action === 'cancel-json-import') draft.pendingJson = null;
     else if (action === 'confirm-json-import') {
@@ -2024,7 +2052,7 @@ window.OUTLINE_ENGINE_UI = (function() {
         catch (error) { data().saveState(before); throw error; }
       }
       await window.WORLD_ENGINE_STORE?.flush?.();
-      draft.pendingJson = null; draft.inlineEdit = null; draft.message = '已按确认范围完成导入。'; engine()?.applyInjection?.();
+      draft.pendingJson = null; draft.inlineEdit = null; setNotice(draft, '已按确认范围完成导入。', false); engine()?.applyInjection?.();
     } else if (action === 'history-export') {
       if (!history()?.exportBundle) throw new Error('联合历史模块尚未就绪。');
       const value = history().exportBundle(); if (!value?.bundle) throw new Error('尚未建立联合历史基线，请先启用剧情模块并建立历史记录。'); download(value, `story-linked-history-${Date.now()}.json`);
@@ -2055,11 +2083,11 @@ window.OUTLINE_ENGINE_UI = (function() {
       if (!window.confirm || window.confirm(`从待重建边界 ${status.pendingFromLayer ?? status.lastValidLayer ?? '当前有效位置'} 批量重建世界、记忆与剧情？此操作会调用已配置API，作者计划与手动标记保留。`)) await run(async (origin, id) => { ensureCurrentChat(id); await history().rebuild(); origin.message = '批量重建已返回，请核对联合历史状态与剩余待重建范围。'; }, '正在批量重建联合历史…');
     } else if (action === 'snapshot-create') {
       if (!cache()?.createSnapshot?.(draft.snapshotName.trim() || '剧情存档')) throw new Error('未能创建存档，请检查当前聊天与剧情数据。');
-      draft.snapshotName = ''; draft.message = '剧情存档已创建。';
+      draft.snapshotName = ''; setNotice(draft, '剧情存档已创建。', false);
     } else if (action === 'snapshot-restore') {
       if (!window.confirm || window.confirm('恢复此剧情存档？当前剧情状态将替换为存档内容。')) {
         if (!(await cache()?.restoreSnapshot?.(ds.outlineSnapshot))) throw new Error('恢复存档失败。');
-        draft.inlineEdit = null; engine()?.applyInjection?.(); draft.message = '剧情存档已恢复。';
+        draft.inlineEdit = null; engine()?.applyInjection?.(); setNotice(draft, '剧情存档已恢复。', false);
       }
     } else if (action === 'snapshot-rename') {
       const snap = cache()?.listSnapshots?.().find(item => item.id === ds.outlineSnapshot);
@@ -2088,7 +2116,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (Number(file.size) > sizeLimit * 1024 * 1024) throw new Error(`文件超过 ${sizeLimit} MB，请先精简内容。`);
     const text = await file.text();
     ensureCurrentChat(originId);
-    if (kind === 'text') { draft.sourceText = text; draft.message = '文本已载入，点击 AI 整理并预览后再确认采用。'; }
+    if (kind === 'text') { draft.sourceText = text; setNotice(draft, '文本已载入，点击 AI 整理并预览后再确认采用。', false); }
     else {
       let payload;
       try { payload = JSON.parse(text); } catch (_) { throw new Error('JSON 格式无效，尚未导入任何内容。'); }
@@ -2099,7 +2127,7 @@ window.OUTLINE_ENGINE_UI = (function() {
       if (kind === 'snapshot') {
         if (!window.confirm || window.confirm('将这份剧情快照导入当前聊天的存档列表？')) {
           if (!cache()?.importSnapshot?.(payload)) throw new Error('文件不是有效的剧情存档。');
-          draft.message = '剧情存档已导入列表；点击恢复后才替换当前进度。';
+          setNotice(draft, '剧情存档已导入列表；点击恢复后才替换当前进度。', false);
         }
       } else {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('文件不包含有效的大纲对象。');
@@ -2117,7 +2145,7 @@ window.OUTLINE_ENGINE_UI = (function() {
           if (validation && !validation.valid) throw new Error(validation.errors.join('\n'));
           draft.pendingJson = { kind: 'data', payload: clone(payload), plan, warnings: validation?.warnings || [], sourceChatId: payload.chatId || payload.state?.originChatId || '', sameChat: String(payload.chatId || payload.state?.originChatId || '') === originId, includeProgress: false };
         }
-        draft.message = 'JSON 已读取。请确认导入范围后再写入。';
+        setNotice(draft, 'JSON 已读取。请确认导入范围后再写入。', false);
       }
     }
     refresh();

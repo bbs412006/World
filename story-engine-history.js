@@ -239,9 +239,26 @@ window.STORY_ENGINE_HISTORY = (function() {
       if (target !== bundle.headId) {
         let frame = materialize(bundle, target); const commit = bundle.journal.find(item => item.id === target);
         const length = commit?.prefixLength ?? bundle.baseline.prefixLength;
+        const fullChain = pathTo(bundle, bundle.headId);
+        const targetIdx = fullChain.findIndex(item => item.id === target);
+        const droppedCommits = targetIdx >= 0 ? fullChain.slice(targetIdx + 1) : fullChain;
+        const hadMultiRoundDropped = droppedCommits.some(item =>
+          (item.sourceRefs || []).filter(r => r && !r.synthetic && r.role === 'assistant').length > 1
+        );
+        const droppedWorldCount = droppedCommits.filter(item => item.kind === 'world').length;
+        const trailingRefs = source.slice(length);
+        const trailingAiCount = trailingRefs.filter(r => r && r.role === 'assistant').length;
+        // 以下常见操作自动放行继续，不再误锁 pending-rebuild：
+        // 1) 删除末尾 AI 回复但保留待回复的用户发言（trailingAiCount === 0）；
+        // 2) 仅微调或直接切换最新单轮正文（trailingAiCount === 1 且未拆散任何多轮大批次提交，且仅撤回最后 1 次单轮世界提交）。
+        const canAutoContinue = trailingRefs.length === 0
+          || trailingAiCount === 0
+          || (trailingAiCount === 1 && !hadMultiRoundDropped && droppedWorldCount <= 1);
         bundle.headId = target; bundle.branchId = uid('branch');
-        bundle.recovery = source.length > length ? { status: 'pending-rebuild', reason: '保留正文超出最后完整有效提交，后续结果需显式重新对账',
-          pendingFromLayer: length, pendingMessageIds: source.slice(length).map(ref => ref.messageId) } : { status: 'ready', reason: '' };
+        bundle.recovery = canAutoContinue
+          ? { status: 'ready', reason: '' }
+          : { status: 'pending-rebuild', reason: '保留正文超出最后完整有效提交，后续结果需显式重新对账',
+              pendingFromLayer: length, pendingMessageIds: trailingRefs.map(ref => ref.messageId) };
         frame = retainIndependent(bundle, frame, length, hashes[length]);
         write(bundle, frame); changed = true;
       }

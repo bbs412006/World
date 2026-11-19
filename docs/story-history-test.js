@@ -305,8 +305,39 @@ async function resetBaselineAndPersistenceHardening() {
   assert.strictEqual(committed.worldState.round, 3);
 }
 
+async function tailUserOrLatestRoundEditAutoContinue() {
+  // 1) 删掉最后一条 AI 回复但保留末尾待回复的用户发言：自动回退且保持 ready（不误锁 pending-rebuild）
+  const h = harness();
+  h.step('第一轮抵达渡口。');
+  h.step('第二轮进入酒肆。');
+  h.step('第三轮见到线人。');
+  assert.strictEqual(h.core.loadState().round, 3);
+  h.ctx.chat.pop(); // 仅删掉第 3 轮 AI 回复（L6），保留第 3 轮用户消息（L5）
+  const res1 = h.history.reconcile();
+  assert.strictEqual(h.core.loadState().round, 2, '删掉第3轮AI回复后应回退至第2轮');
+  assert.strictEqual(res1.status.phase, 'ready', '末尾仅余待回复用户消息不应锁死为 pending-rebuild');
+  assert.strictEqual(res1.status.blocked, false);
+  // 随后 AI 重新生成回复，应能顺畅提交新第 3 轮
+  h.ctx.chat.push({ is_user: false, mes: '第三轮重写：线人在桥头现身。' });
+  const end1 = h.ctx.chat.length - 1;
+  const tok1 = h.history.captureWorldStep({ mode: 'forward', sourceRefs: h.timeline.captureRange(end1 - 1, end1), beforeWorld: h.core.loadState() });
+  h.history.commitWorldStep(tok1, { worldState: { ...tok1.beforeWorld, round: 3, worldDigest: '桥头会面' } });
+  assert.strictEqual(h.core.loadState().round, 3);
+
+  // 2) 直接编辑最新单轮 AI 正文（或直接点最新楼层切 Swipe，未触发 GENERATION_STARTED）：回退基底且保持 ready
+  h.ctx.chat[end1].mes = '第三轮微调错别字：线人在石桥头现身。';
+  h.ctx.chat[end1].swipe_id = 1;
+  const res2 = h.history.reconcile();
+  assert.strictEqual(h.core.loadState().round, 2, '修改最新单轮正文后应自动回退至第2轮干净基底');
+  assert.strictEqual(res2.status.phase, 'ready', '仅修改最新单轮正文应自动放行继续推演，不再锁死 pending-rebuild');
+  assert.strictEqual(res2.status.blocked, false);
+  const tok2 = h.history.captureWorldStep({ mode: 'forward', sourceRefs: h.timeline.captureRange(end1 - 1, end1), beforeWorld: h.core.loadState() });
+  h.history.commitWorldStep(tok2, { worldState: { ...tok2.beforeWorld, round: 3, worldDigest: '石桥头会面' } });
+  assert.strictEqual(h.core.loadState().round, 3);
+}
+
 (async () => {
-  for (const test of [bulkTailAndFullJournal, middleAndPartialBatch, replaceCancelAndLateToken, limitsCorruptionAndExternalEdit, importAndExplicitRebuild, privateFactsCluesAndKnowledge, independentRecordsAndTemporalNotice, resetBaselineAndPersistenceHardening]) {
+  for (const test of [bulkTailAndFullJournal, middleAndPartialBatch, replaceCancelAndLateToken, limitsCorruptionAndExternalEdit, importAndExplicitRebuild, privateFactsCluesAndKnowledge, independentRecordsAndTemporalNotice, resetBaselineAndPersistenceHardening, tailUserOrLatestRoundEditAutoContinue]) {
     await test(); console.log(test.name + ': passed');
   }
   console.log('story-history-test: all passed');

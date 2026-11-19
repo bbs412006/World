@@ -310,13 +310,14 @@ window.STORY_ENGINE_BRIDGE = (function() {
           if (mem.ongoingFacts?.length) {
             mLines.push('当前持续事实：' + mem.ongoingFacts.slice(-8).map(f => `[${f.category}·${f.subject}] ${f.fact}`).join('；'));
           }
+          const spanText = s => Number(s.startLayer) === Number(s.endLayer) ? `${s.endLayer}` : `${s.startLayer}-${s.endLayer}`;
           const keySmalls = mem.keySmallSummaries?.slice(-4) || [];
           if (keySmalls.length) {
-            mLines.push('关键历史纪要：\n' + keySmalls.map(s => `- [楼层${s.startLayer}-${s.endLayer}] ${cut(s.content, 180)}`).join('\n'));
+            mLines.push('关键历史纪要：\n' + keySmalls.map(s => `- [楼层${spanText(s)}] ${cut(s.content, 180)}`).join('\n'));
           }
           const smalls = mem.recentSmallSummaries?.slice(-6) || [];
           if (smalls.length) {
-            mLines.push('近期事件纪要：\n' + smalls.map(s => `- [楼层${s.startLayer}-${s.endLayer}] ${cut(s.content, 200)}`).join('\n'));
+            mLines.push('近期事件纪要：\n' + smalls.map(s => `- [楼层${spanText(s)}] ${cut(s.content, 200)}`).join('\n'));
           }
           if (mem.peopleRoster?.length) {
             const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));

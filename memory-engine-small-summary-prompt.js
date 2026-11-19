@@ -29,9 +29,14 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
     const targetMinChars = minChars * aiCount;
     const referenceContext = clean(input.referenceContext);
     const small = Array.isArray(input.historySmallSummaries) ? input.historySmallSummaries : [];
+    const formatSpan = (s, e) => {
+      const a = Number.isFinite(Number(s)) ? Number(s) : 0;
+      const b = Number.isFinite(Number(e)) ? Number(e) : a;
+      return a === b ? String(b) : `${a}-${b}`;
+    };
     const history = small.length
       ? `【前置纪要】\n${small.map((item, index) =>
-        `${index + 1}. [楼层 ${Number(item?.startLayer) || 0}-${Number(item?.endLayer) || 0}] ${clean(item?.content)}`
+        `${index + 1}. [楼层 ${formatSpan(item?.startLayer, item?.endLayer)}] ${clean(item?.content)}`
       ).join('\n')}`
       : '';
     const reference = referenceContext || history;
@@ -39,7 +44,8 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
     const conversation = input.reuseConversation === true
       ? '沿用同一请求前文人物/实体任务中的【待提取对话】；该对话即为本次总结范围，不再重复附录。'
       : (clean(input.conversation) || '（空）');
-    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}${outlineFocus ? `【当前公开章节与焦距提示（仅作主题对齐，未在正文中发生的内容不得写进纪要）】\n${outlineFocus}\n\n` : ''}【总结范围】\n楼层 ${startLayer} 至 ${endLayer}\n\n【字数要求】\nsmall_summary 正文最低不少于 ${targetMinChars} 字（单层最低 ${minChars} 字 × 本次 ${aiCount} 个 AI 层），请完整展开本层的关键对话原意、人物互动、组织/物品/地点细节、线索与阶段结果，切勿简略概括。\n\n【待总结对话】\n${conversation}`;
+    const rangeLabel = startLayer === endLayer ? `楼层 ${endLayer}` : `楼层 ${startLayer} 至 ${endLayer}`;
+    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}${outlineFocus ? `【当前公开章节与焦距提示（仅作主题对齐，未在正文中发生的内容不得写进纪要）】\n${outlineFocus}\n\n` : ''}【总结范围】\n${rangeLabel}\n\n【字数要求】\nsmall_summary 正文最低不少于 ${targetMinChars} 字（单层最低 ${minChars} 字 × 本次 ${aiCount} 个 AI 层），请完整展开本层的关键对话原意、人物互动、组织/物品/地点细节、线索与阶段结果，切勿简略概括。\n\n【待总结对话】\n${conversation}`;
   }
 
   return { SYSTEM_PROMPT, buildUserPrompt };

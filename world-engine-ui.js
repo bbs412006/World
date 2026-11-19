@@ -279,15 +279,24 @@ window.WORLD_ENGINE_UI = (function() {
   }
 
   function showToast(msg, isError, duration) {
+    if (typeof document === 'undefined' || !document.body || typeof document.createElement !== 'function') return;
     const id = 'we-toast';
-    let el = document.getElementById(id);
-    if (el) el.remove();
+    const removeEl = node => {
+      if (!node) return;
+      if (typeof node.remove === 'function') node.remove();
+      else node.parentNode?.removeChild?.(node);
+    };
+    let el = document.getElementById?.(id);
+    if (el) removeEl(el);
     el = document.createElement('div');
     el.id = id;
     el.className = 'we-toast' + (isError ? ' error' : '');
     el.textContent = msg;
-    document.body.appendChild(el);
-    if (duration !== 0) setTimeout(() => el.remove(), duration || 3000);
+    document.body.appendChild?.(el);
+    if (duration !== 0) {
+      const timer = setTimeout(() => removeEl(el), duration || 3000);
+      if (typeof timer?.unref === 'function') timer.unref();
+    }
   }
 
   function renderSharedApiFieldsHtml(settings, options) {
@@ -860,25 +869,62 @@ window.WORLD_ENGINE_UI = (function() {
       <div class="we-core-status" id="we-memory-core-status">${h(statusMsg)}</div>`;
   }
 
+  function formatUiLayerSpan(startLayer, endLayer) {
+    const s = Number.isFinite(Number(startLayer)) ? Number(startLayer) : 0;
+    const e = Number.isFinite(Number(endLayer)) ? Number(endLayer) : s;
+    return s === e ? String(e) : `${s}–${e}`;
+  }
+
+  function getAiChatStats(ignoreOpening) {
+    try {
+      const chat = SillyTavern.getContext()?.chat || [];
+      let latestAnyAi = -1;
+      const eligible = [];
+      for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        if (!msg || msg.is_user) continue;
+        latestAnyAi = i;
+        if (ignoreOpening && i === 0) continue;
+        eligible.push(i);
+      }
+      return {
+        latestAiLayer: eligible.length ? eligible[eligible.length - 1] : latestAnyAi,
+        firstAiLayer: eligible.length ? eligible[0] : (latestAnyAi >= 0 ? latestAnyAi : 0),
+        totalAiCount: eligible.length
+      };
+    } catch (_) {
+      return { latestAiLayer: -1, firstAiLayer: 0, totalAiCount: 0 };
+    }
+  }
+
   /** 「填表」分页：覆盖进度 + 一键追平（含当前层选项）+ 指定范围填表 + 运行状态。 */
   function renderMemoryFillPage(state, settings) {
     const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
+    const aiStats = getAiChatStats(settings.firstLayerIsAiOpening !== false);
     const isBusy = window.MEMORY_ENGINE?.isRunning?.() === true;
     const statusMsg = window.MEMORY_ENGINE?.getSummaryBackfillStatus?.()?.message || '';
-    const latestLayer = coverage && coverage.latestLayer >= 0 ? coverage.latestLayer : 0;
-    const defaultStart = Math.max(coverage?.firstEligibleLayer ?? 0, parseInt(settings.backfillStartLayer) || 0);
-    const defaultEnd = parseInt(settings.backfillEndLayer) > 0 ? parseInt(settings.backfillEndLayer) : latestLayer;
+    const latestAi = coverage
+      ? (coverage.latestAiLayer >= 0 ? coverage.latestAiLayer : 0)
+      : (aiStats.latestAiLayer >= 0 ? aiStats.latestAiLayer : 0);
+    const firstAi = coverage
+      ? (coverage.firstAiLayer >= 0 ? coverage.firstAiLayer : 0)
+      : aiStats.firstAiLayer;
+    const defaultStart = parseInt(settings.backfillStartLayer) > 0 ? parseInt(settings.backfillStartLayer) : firstAi;
+    const defaultEnd = parseInt(settings.backfillEndLayer) > 0 ? parseInt(settings.backfillEndLayer) : latestAi;
     const defaultBatch = Math.max(1, parseInt(settings.smallSummaryEveryX) || 1);
-    const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : 0;
+    const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : aiStats.totalAiCount;
     const uncoveredAll = coverage ? Number(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) || 0 : 0;
     const coveredAi = totalAi > 0
       ? Math.max(0, totalAi - uncoveredAll)
       : (coverage ? Number(coverage.coveredAiCount) || 0 : 0);
     const delayBadge = coverage?.effectiveDelayFloors > 0
-      ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 轮）</span>` : '';
+      ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 层 AI）</span>` : '';
+    const latestAiText = (coverage ? coverage.latestAiLayer : aiStats.latestAiLayer) >= 0
+      ? `第 ${latestAi} 层`
+      : '暂无 AI 层';
     const facts = [
-      ['当前楼层', coverage ? `第 ${Math.max(0, coverage.latestLayer)} 层` : '—'],
-      ['已填表', coverage ? `${coveredAi}/${totalAi} 个 AI 层` : '—'],
+      ['当前 AI 楼层', latestAiText],
+      ['AI 实际层数', `共 ${totalAi} 层（已填 ${coveredAi}/${totalAi}）`],
       ['待补填', coverage ? (uncoveredAll > 0 ? `${uncoveredAll} 层` : '已全部覆盖') : '—'],
       ['待重建', coverage && coverage.staleCount > 0 ? `${coverage.staleCount} 条` : '无']
     ].map(([k, v]) => `<div class="we-fill-fact"><span>${k}</span><strong>${h(v)}</strong></div>`).join('');
@@ -886,7 +932,7 @@ window.WORLD_ENGINE_UI = (function() {
     return `<div class="we-section">
         <div class="we-section-title">覆盖进度${delayBadge ? ` ${delayBadge}` : ''}</div>
         <div class="we-fill-facts">${facts}</div>
-        <div class="we-hint">填表范围包含人物档案、实体、持续事实、角色弧光与阶段纪要，均按层增量落表。</div>
+        <div class="we-hint">楼层仅按 AI 回复实际楼层号记录与统计（不计入用户输入层）；填表包含人物档案、实体、持续事实、角色弧光与阶段纪要。</div>
       </div>
       <div class="we-section">
         <div class="we-section-title">一键追平</div>
@@ -901,9 +947,9 @@ window.WORLD_ENGINE_UI = (function() {
       <div class="we-section">
         <div class="we-section-title">指定范围填表</div>
         <div class="we-memory-form-grid we-fill-range-grid">
-          <div class="we-input-group"><label>起始楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
-          <div class="we-input-group"><label>结束楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
-          <div class="we-input-group"><label>每批轮数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
+          <div class="we-input-group"><label>起始 AI 楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
+          <div class="we-input-group"><label>结束 AI 楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
+          <div class="we-input-group"><label>每批 AI 层数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(defaultBatch))}"></div>
         </div>
         <label class="we-fill-check we-fill-check-block"><input type="checkbox" id="we-memory-range-overwrite"> 覆盖重填范围内已有记录（不勾选时与自动填表一致，逐层纯增量补漏）</label>
         <div class="we-fill-row"><button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button></div>
@@ -1203,7 +1249,7 @@ window.WORLD_ENGINE_UI = (function() {
     const pageActions = `<div class="we-memory-page-actions"><button class="we-btn we-btn-primary" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button></div>`;
 
     const editor = (item, isNew) => `<div class="we-memory-editor">
-      <div class="we-memory-form-grid"><div class="we-input-group"><label>起始楼层</label><input class="we-memory-small-start" type="number" min="0" value="${h(String(item.startLayer ?? 0))}"></div><div class="we-input-group"><label>结束楼层</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div></div>
+      <div class="we-memory-form-grid"><div class="we-input-group"><label>起始 AI 楼层</label><input class="we-memory-small-start" type="number" min="0" value="${h(String(item.startLayer ?? 0))}"></div><div class="we-input-group"><label>结束 AI 楼层（单层填相同楼数）</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div></div>
       <div class="we-input-group"><label>纪要关键词（用 / 分隔，用于超出直注窗口后精准召回）</label><input class="we-memory-small-keywords" type="text" value="${h((item.keywords || []).join(' / '))}" placeholder="例如：青铜虎符 / 青石渡"></div>
       <div class="we-input-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input class="we-memory-small-key" type="checkbox" ${item.impactLevel === 'key' ? 'checked' : ''}> 标记为关键转折事件（优先召回与大纲参考）</label></div>
       <div class="we-input-group"><label>纪要内容</label><textarea class="we-memory-small-content" rows="6">${h(item.content || '')}</textarea><div class="we-hint">API 单层纪要最低目标 ${minChars} 字（可在记忆设置中调整），超出时完整保留；最新 ${directLimit} 条有效纪要直接注入，更早纪要自动进入关键词与语义召回池。</div></div>
@@ -1226,7 +1272,7 @@ window.WORLD_ENGINE_UI = (function() {
         ? '已失效（待回退重填）'
         : (recentIdSet.has(item.id) ? '直接注入中' : '历史召回池');
       return `<div class="${memoryRecordClass(collapseKey, '', defaultCollapsed)}" data-small-id="${h(item.id)}">
-      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${badges}第 ${index + 1} 条 · 楼层 ${h(String(item.startLayer))}–${h(String(item.endLayer))}</div><div class="we-memory-record-meta">${stateLabel} · ${h(item.id)}</div></div>
+      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${badges}第 ${index + 1} 条 · 楼层 ${h(formatUiLayerSpan(item.startLayer, item.endLayer))}</div><div class="we-memory-record-meta">${stateLabel} · ${h(item.id)}</div></div>
         <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-edit-small" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-small" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
       </div>
       ${memoryRecordBody(collapseKey, _memoryEditingSmall === item.id ? editor(item, false) : `<div class="we-memory-summary-text">${h(item.content || '（内容为空）')}</div>${keywordsHtml}`, defaultCollapsed)}
@@ -2843,11 +2889,16 @@ window.WORLD_ENGINE_UI = (function() {
     动荡失序: '乾坤含疮痍', 崩坏边缘: '坤轴欹将折'
   };
 
-  /** 刷新头部的「第X轮 + 稳定度小字」 */
+  /** 刷新头部的「第X轮 + AI实际楼层与AI总层数 + 稳定度小字」 */
   function updatePanelHeader(state, layer) {
     const roundEl = document.getElementById('we-header-round');
     if (roundEl) {
-      const layerText = (layer !== undefined && layer !== null && layer !== '-') ? ' · 第 ' + layer + ' 层' : '';
+      const ws = window.WORLD_ENGINE_API?.getSettings?.() || {};
+      const aiStats = getAiChatStats(ws.firstLayerIsAiOpening !== false);
+      const shownLayer = aiStats.latestAiLayer >= 0
+        ? aiStats.latestAiLayer
+        : ((layer !== undefined && layer !== null && layer !== '-') ? layer : null);
+      const layerText = shownLayer !== null ? ` · 第 ${shownLayer} 层（共 ${aiStats.totalAiCount} 层 AI）` : '';
       roundEl.textContent = '第 ' + ((state && state.round) || 0) + ' 轮' + layerText;
     }
     const moodEl = document.getElementById('we-header-mood');
@@ -2944,6 +2995,26 @@ window.WORLD_ENGINE_UI = (function() {
     resources: { label: '资源', sub: '经济 · 秘密',                   poem: '地藏无尽藏' }
   };
 
+  /** 仅在联合历史处于受阻/待重建暂停态时才显示一键解锁自救条，常态下不占首页空间。 */
+  function renderWorldHistoryPausedBanner() {
+    try {
+      if (window.STORY_ENGINE_PROJECTION?.active?.() !== true) return '';
+      const status = window.STORY_ENGINE_HISTORY?.getStatus?.();
+      if (!status?.blocked) return '';
+      const title = status.phase === 'pending-rebuild' ? '联合历史待对账（推演已暂停）' : '联合历史恢复受阻（推演已暂停）';
+      return '<div class="we-section" id="we-world-history-banner" style="border-color:color-mix(in srgb, var(--we-danger) 55%, var(--we-border));margin-bottom:10px;">'
+        + '<div class="we-section-title" style="color:var(--we-danger);margin-bottom:4px;">' + h(title) + '</div>'
+        + (status.reason ? '<div style="font-size:12px;color:var(--we-text2);margin-bottom:6px;">' + h(status.reason) + '</div>' : '')
+        + '<div class="we-hint" style="margin-bottom:8px;">不想重跑旧楼可直接「重设基线解锁」继续聊；需要按改动后的正文补推可点「批量重建」。</div>'
+        + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+        + '<button type="button" class="we-btn we-btn-primary" id="we-world-history-reset">重设基线解锁</button>'
+        + '<button type="button" class="we-btn" id="we-world-history-rebuild">批量重建对账</button>'
+        + '</div></div>';
+    } catch (_) {
+      return '';
+    }
+  }
+
   /** 世界首页：仅「世界核心 + 纵轴导航」；世界摘要等具体内容下沉到「局势」分页。 */
   function renderHomeView(s, layer, scope) {
     const stab = computeWorldStability(s);
@@ -2960,12 +3031,13 @@ window.WORLD_ENGINE_UI = (function() {
       rows.push({ label: '大纲', sub: outlineInfo.sub, poem: '草蛇灰线，伏脉千里', attr: 'data-face="outline"', jump: true, selected: _selectedNavView === 'face:outline' });
     }
 
-    return renderWorldCore(s) + renderHomeNav(rows, '', '--we-tier-color:' + tierColor + ';');
+    return renderWorldHistoryPausedBanner() + renderWorldCore(s) + renderHomeNav(rows, '', '--we-tier-color:' + tierColor + ';');
   }
 
   /** 展开模式主页：世界核心 + 世界摘要 + 所有 section 平铺（如存档点） */
   function renderHomeViewExpanded(s, layer, scope) {
-    return renderWorldCore(s)
+    return renderWorldHistoryPausedBanner()
+      + renderWorldCore(s)
       + renderWorldDigest(s, scope)
       + renderOutlineExpandedEntry()
       + renderSection('天下大势', 'trends', renderWorldTrends(s.worldTrends, scope))
@@ -4090,13 +4162,22 @@ window.WORLD_ENGINE_UI = (function() {
 
   function updateMemoryPanelHeader() {
     const state = window.MEMORY_ENGINE_DATA?.loadState?.() || {};
+    const settings = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {};
+    const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
+    const aiStats = getAiChatStats(settings.firstLayerIsAiOpening !== false);
     const eventMemory = state.event_memory || {};
     const memoryLayer = Number.isFinite(Number(state.chatLayer)) ? Math.max(0, Number(state.chatLayer)) : 0;
     const summaryLayer = Number.isFinite(Number(eventMemory.small_summary_layer))
       ? Math.max(0, Number(eventMemory.small_summary_layer)) : 0;
     const summaryCount = Array.isArray(eventMemory.small_summaries) ? eventMemory.small_summaries.length : 0;
+    const totalAi = coverage ? Number(coverage.totalAiCount) || 0 : aiStats.totalAiCount;
+    const latestAi = coverage ? coverage.latestAiLayer : aiStats.latestAiLayer;
+    const uncoveredAll = coverage ? Number(coverage.uncoveredCombinedCount ?? coverage.uncoveredCount) || 0 : 0;
+    const coveredAi = totalAi > 0 ? Math.max(0, totalAi - uncoveredAll) : 0;
     const roundEl = document.getElementById('we-header-round');
-    if (roundEl) roundEl.textContent = '';
+    if (roundEl) {
+      roundEl.textContent = latestAi >= 0 ? `第 ${latestAi} 层 · 共 ${totalAi} 层 AI` : `共 ${totalAi} 层 AI`;
+    }
     const moodEl = document.getElementById('we-header-mood');
     if (!moodEl) return;
     const dot = moodEl.querySelector('.we-header-dot');
@@ -4106,7 +4187,7 @@ window.WORLD_ENGINE_UI = (function() {
       dot.style.boxShadow = '0 0 6px var(--we-accent)';
     }
     if (text) {
-      text.textContent = `人物/实体至第 ${memoryLayer} 层 · 纪要至第 ${summaryLayer} 层 · 共 ${summaryCount} 条纪要`;
+      text.textContent = `已填 ${coveredAi}/${totalAi} 层 · 至第 ${Math.max(memoryLayer, summaryLayer)} 层 · 共 ${summaryCount} 条纪要`;
       text.style.color = 'var(--we-text2)';
     }
   }
@@ -5651,6 +5732,48 @@ window.WORLD_ENGINE_UI = (function() {
         refresh();
       };
     });
+
+    // ===== 联合历史受阻/待对账快捷解锁事件 =====
+    const worldHistoryResetBtn = document.getElementById('we-world-history-reset');
+    if (worldHistoryResetBtn) {
+      worldHistoryResetBtn.onclick = async () => {
+        if (!window.STORY_ENGINE_HISTORY?.resetBaseline) return;
+        if (!confirm('保留当前世界状态与作者大纲，并以当前聊天正文重设联合基线以解除推演暂停？')) return;
+        worldHistoryResetBtn.disabled = true;
+        try {
+          window.STORY_ENGINE_HISTORY.resetBaseline();
+          await window.MEMORY_ENGINE_TIMELINE?.flushSave?.();
+          await window.WORLD_ENGINE_STORE?.flush?.();
+          window.OUTLINE_ENGINE?.applyInjection?.();
+          window.WORLD_ENGINE?.applyInjection?.();
+          window.MEMORY_ENGINE?.applyInjection?.();
+          showToast('已保留当前世界并重设基线，推演已恢复');
+          refresh();
+        } catch (err) {
+          showToast('重设基线失败：' + (err?.message || err), true);
+        } finally {
+          worldHistoryResetBtn.disabled = false;
+        }
+      };
+    }
+    const worldHistoryRebuildBtn = document.getElementById('we-world-history-rebuild');
+    if (worldHistoryRebuildBtn) {
+      worldHistoryRebuildBtn.onclick = async () => {
+        if (!window.STORY_ENGINE_HISTORY?.rebuild) return;
+        const st = window.STORY_ENGINE_HISTORY.getStatus?.() || {};
+        if (!confirm(`从待重建边界 ${st.pendingFromLayer ?? st.lastValidLayer ?? '当前有效位置'} 批量重建世界、记忆与剧情？`)) return;
+        worldHistoryRebuildBtn.disabled = true;
+        try {
+          await window.STORY_ENGINE_HISTORY.rebuild();
+          showToast('批量重建已完成');
+          refresh();
+        } catch (err) {
+          showToast('批量重建失败：' + (err?.message || err), true);
+        } finally {
+          worldHistoryRebuildBtn.disabled = false;
+        }
+      };
+    }
 
     // ===== 导航事件 =====
     const backBtn = document.getElementById('we-btn-back');
@@ -7387,9 +7510,11 @@ window.WORLD_ENGINE_UI = (function() {
     });
   }
 
-  /** 获取当前对话层数 */
+  /** 获取当前 AI 实际对话楼层号（忽略末尾未回复的用户输入层） */
   function getChatLayer() {
     try {
+      const stats = getAiChatStats(false);
+      if (stats.latestAiLayer >= 0) return stats.latestAiLayer;
       const ctx = SillyTavern.getContext();
       const chat = ctx?.chat || [];
       return Math.max(0, chat.length - 1);
@@ -8138,7 +8263,7 @@ window.WORLD_ENGINE_UI = (function() {
   }
 
   return {
-    buildPanel, buildInputButton, showPanel, hidePanel, togglePanel, refresh, setStatus,
+    buildPanel, buildInputButton, showPanel, hidePanel, togglePanel, refresh, setStatus, showToast,
     setEvolvingUI, setMemoryEvolvingUI, setInjectedScope, updateBallControls,
     registerEngineFace, renderLastPromptViewer, bindPromptSegToggle, refreshRequestLogs,
     listEngineFaces: () => { ensureBuiltinEngineFaces(); return _engineFaceOrder.map(id => ({ ...getEngineFace(id) })); },

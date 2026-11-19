@@ -2622,12 +2622,16 @@
   position: fixed;
   bottom: 80px;
   right: 20px;
+  max-width: min(440px, calc(100vw - 40px));
   background: var(--we-card);
   border: 1px solid var(--we-border);
   color: var(--we-text);
   padding: 7px 14px;
   border-radius: 8px;
   font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
   z-index: 10002;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
   pointer-events: none;
