@@ -11,10 +11,20 @@ assert.match(ui, /_memoryCollapsedRecords\.add\(key\)/, '记忆数据首次展�
 assert.match(ui, /entity-category:\$\{type\}/, '实体必须按类型生成独立分类');
 for (const label of ['组织', '物品', '能力', '地点']) assert.ok(ui.includes(label), `缺少实体分类：${label}`);
 assert.match(ui, /const cards = items\.map\(\(item, index\)/, '纪要必须渲染全部数据');
-assert.match(ui, /const cards = items\.map\(\(big, index\)/, '总述必须渲染全部数据');
-assert.match(ui, /defaultCollapsed = index !== items\.length - 1/g, '纪要和总述必须只默认展开最新一条');
+assert.ok(!ui.includes('renderMemoryOverview'), '去除总述后不应保留总述渲染视图');
+assert.match(ui, /defaultCollapsed = index !== items\.length - 1/g, '纪要必须只默认展开最新一条');
 assert.match(ui, /we-memory-record-head" data-memory-collapse-key=/, '记忆卡片标题栏必须支持整块点击');
-assert.match(ui, /默认展开最新一条/, '纪要和总述应提示默认展开最新数据');
+assert.match(ui, /默认展开最新一条/, '纪要应提示默认展开最新数据');
+assert.ok(
+  ui.includes('we-memory-skip-current-floor') &&
+  ui.includes('we-memory-auto-refill-history') &&
+  ui.includes('we-memory-small-summary-inject-limit') &&
+  ui.includes('we-memory-catchup-now') &&
+  ui.includes('we-memory-range-fill-start') &&
+  ui.includes('we-memory-range-start') &&
+  ui.includes('we-memory-range-end'),
+  '记忆界面应包含当前层不填表、自动回退重填、直注纪要上限、一键追平与手动指定范围填表控件'
+);
 assert.match(css, /\.we-memory-entity-group > \.we-memory-record-body/, '实体分类需要独立布局样式');
 
 assert.ok(ui.includes('持续事实') && ui.includes('角色弧光'), '记忆界面应集成持续事实与角色弧光视图');

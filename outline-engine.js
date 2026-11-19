@@ -380,9 +380,16 @@ window.OUTLINE_ENGINE = (function() {
     if (useMemory) {
       try {
         const memory = window.MEMORY_ENGINE_DATA?.loadState?.();
-        const summaries = memory?.event_memory?.big_summaries || [];
-        const latest = summaries.filter(item => item.status !== 'stale').slice(-1);
-        if (latest.length) parts.push('记忆背景（不得作为原文证据）：' + JSON.stringify(latest).slice(0, 1400));
+        const validSmalls = (memory?.event_memory?.small_summaries || []).filter(item => item.status !== 'stale' && item.status !== 'failed' && clean(item.content));
+        const recent = validSmalls.slice(-5);
+        const recentIds = new Set(recent.map(item => item.id));
+        const keyEarlier = validSmalls.filter(item => item.impactLevel === 'key' && !recentIds.has(item.id)).slice(-3);
+        const facts = (memory?.ongoing_facts || []).filter(item => item.status === 'active').slice(-6);
+        const memLines = [];
+        if (facts.length) memLines.push('当前持续事实：' + facts.map(f => `[${f.category || '状态'}·${f.subject || '全局'}] ${f.fact}`).join('；'));
+        if (keyEarlier.length) memLines.push('关键历史纪要：' + keyEarlier.map(s => `[楼层${s.startLayer}-${s.endLayer}] ${s.content}`).join('；'));
+        if (recent.length) memLines.push('近期事件纪要：' + recent.map(s => `[楼层${s.startLayer}-${s.endLayer}] ${s.content}`).join('；'));
+        if (memLines.length) parts.push('记忆背景（不得作为原文证据）：' + memLines.join('\n').slice(0, 1400));
       } catch (_) { /* 不依赖记忆引擎运行。 */ }
     }
     return parts.join('\n');

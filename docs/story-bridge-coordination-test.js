@@ -127,7 +127,6 @@ for (const file of [
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js',
   'memory-engine.js',
   'story-engine-bridge.js'
 ]) {

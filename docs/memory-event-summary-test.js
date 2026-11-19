@@ -20,13 +20,11 @@ const settings = {
   evolveReadRounds: 2,
   manualReadRounds: 2,
   smallSummaryEveryX: 2,
-  bigSummaryEveryX: 1,
-  bigSummaryInjectLimit: 3,
+  smallSummaryInjectLimit: 8,
   hideCoveredRawText: true,
   recentRawRounds: 3,
   referenceRawRounds: 0,
   referenceSmallSummaryCount: 4,
-  referenceBigSummaryCount: 1,
   injectIntoWorldEngine: false,
   worldEngineMemoryLimit: 1,
   injectIntoPrompt: true,
@@ -38,7 +36,6 @@ const settings = {
   apiAutoRetries: 0,
   backfillBatchSize: 2,
   summaryBackfillSmallEveryX: 2,
-  summaryBackfillBigEveryX: 1,
   backfillRetries: 0,
   backfillEndLayer: 0,
   filterRegex: ''
@@ -104,7 +101,6 @@ for (const filename of [
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js',
   'memory-engine.js'
 ]) {
   vm.runInNewContext(fs.readFileSync(path.join(root, filename), 'utf8'), sandbox, { filename });
@@ -152,34 +148,23 @@ for (const filename of [
     originChatId: 'summary-test',
     status: 'valid'
   }));
-  contextState.event_memory.big_summaries = Array.from({ length: 3 }, (_, index) => ({
-    id: `big_${String(index + 1).padStart(6, '0')}`,
-    startLayer: index * 10 + 1,
-    endLayer: index * 10 + 10,
-    content: `总述${index + 1}`,
-    childIds: contextState.event_memory.small_summaries
-      .slice(index * 5, index * 5 + 5).map(item => item.id),
-    originChatId: 'summary-test',
-    status: 'valid'
-  }));
   const history = sandbox.MEMORY_ENGINE._test.buildSmallHistoryContext(contextState, { startLayer: 35 });
-  assert.deepStrictEqual(history.historyBigSummaries.map(item => item.content), ['总述2']);
   assert.deepStrictEqual(history.historySmallSummaries.map(item => item.content), ['纪要14', '纪要15', '纪要16', '纪要17'],
-    '参考链必须按“更早总述→前置纪要→本轮”取值，且不同层正文范围不得重叠');
+    '参考链必须按“前置纪要→本轮”取值，且不同层正文范围不得重叠');
   const prompt = sandbox.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.buildUserPrompt({
     startLayer: 35,
     endLayer: 36,
     conversation: '第18轮用户正文\n第18轮角色正文',
     ...history
   });
-  assert.ok(prompt.includes('总述2') && prompt.includes('纪要14') && prompt.includes('纪要17'));
+  assert.ok(prompt.includes('纪要14') && prompt.includes('纪要17'));
   assert.ok(prompt.includes('第18轮用户正文') && prompt.includes('第18轮角色正文'),
     '历史参考之外必须同时携带当前这一轮的完整正文');
 
   const rawReference = sandbox.MEMORY_ENGINE._test.buildTaskReferenceContext(
     contextState,
     { startLayer: 3 },
-    { ...settings, referenceRawRounds: 1, referenceSmallSummaryCount: 0, referenceBigSummaryCount: 0 }
+    { ...settings, referenceRawRounds: 1, referenceSmallSummaryCount: 0 }
   );
   assert.ok(rawReference.text.includes('进入城镇。') && rawReference.text.includes('发现城门已经关闭。'),
     '追加一轮正文参考时必须带上该轮用户输入与 AI 回复');
@@ -188,21 +173,10 @@ for (const filename of [
 
 {
   const longSmall = '纪'.repeat(201);
-  const longBig = '述'.repeat(2001);
-  const lengthPrompt = sandbox.MEMORY_ENGINE_BIG_SUMMARY_PROMPT.buildUserPrompt({
-    summaries: [{ content: '甲'.repeat(600) }, { content: '乙'.repeat(600) }]
-  });
-  assert.ok(lengthPrompt.includes('不超过 600 字'), '总述 Prompt 必须写入计算后的具体上限');
-  assert.ok(!lengthPrompt.includes('本批纪要正文合计'), '总述 Prompt 不应暴露纪要合计字数');
   assert.strictEqual(
     sandbox.MEMORY_ENGINE._test.parseResponse(JSON.stringify({ small_summary: longSmall }), { small: {} }).smallSummary,
     longSmall,
     '纪要超过提示目标时必须完整接受，不得截断或拒绝'
-  );
-  assert.strictEqual(
-    sandbox.MEMORY_ENGINE._test.parseResponse(JSON.stringify({ big_summary: longBig }), { big: {} }).bigSummary,
-    longBig,
-    '总述超过提示目标时必须完整接受，不得截断或拒绝'
   );
 }
 
@@ -320,30 +294,23 @@ for (const filename of [
 
   const refreshesBeforeCombined = memoryRefreshes;
   const combined = await sandbox.MEMORY_ENGINE.manualSmallSummary();
-  assert.strictEqual(calls.length, 2, '达到阈值时应先生成并保存小总结，再独立请求大总结');
+  assert.strictEqual(calls.length, 1, '去除总述后手动纪要只应请求一次纪要 API');
   assert.ok(calls[0].includes('世界进程的纪要记录员'));
   assert.ok(!calls[0].includes('这是角色卡的开场白'), '初始化纪要必须忽略第 0 层 AI 开场白');
   assert.ok(calls[0].includes('守卫说明北方发生叛乱'), '忽略开场白后仍应读取窗口内最新的 AI 回复');
-  assert.ok(!calls[0].includes('世界进程的总述编纂者'));
   assert.ok(!calls[0].includes('"personal_memory": []'), '未到人物实体任务时不应携带人物实体输出字段');
-  assert.ok(calls[1].includes('世界进程的总述编纂者'));
-  assert.ok(!calls[1].includes('既有故事总览'), '总述只能读取本批尚未整理的纪要');
-  assert.ok(!calls[1].includes('世界进程的纪要记录员'));
-  assert.ok(!calls[1].includes('【最新对话片段】'), '大总结只能读取已落库的小总结与既有大总结');
-  assert.deepStrictEqual(runningLabels.slice(0, 2), ['纪要', '总述']);
-  assert.deepStrictEqual(startSignals.slice(0, 4), ['status', 'ui', 'status', 'ui'],
+  assert.ok(!calls[0].includes('"big_summary"'), '不得包含已移除的总述字段');
+  assert.deepStrictEqual(runningLabels.slice(0, 1), ['纪要']);
+  assert.deepStrictEqual(startSignals.slice(0, 2), ['status', 'ui'],
     '顶部提示必须先于记忆球运行态刷新，否则会清除自动动画类');
   assert.strictEqual(combined.addedSmall, 1);
-  assert.strictEqual(combined.updatedBig, 1);
-  assert.strictEqual(memoryRefreshes, refreshesBeforeCombined + 2,
-    '纪要与随后独立总述各自完成本地解析落库后，都必须自动刷新记忆面板');
+  assert.strictEqual(memoryRefreshes, refreshesBeforeCombined + 1,
+    '纪要完成本地解析落库后，必须自动刷新记忆面板');
   let state = sandbox.MEMORY_ENGINE_DATA.loadState();
   assert.strictEqual(state.event_memory.small_summaries.length, 1);
-  assert.strictEqual(state.event_memory.big_summary_cursor, 1);
-  assert.strictEqual(state.event_memory.big_summaries.length, 1);
+  assert.strictEqual(state.event_memory.big_summaries, undefined);
   const checkpointAfterCombined = sandbox.MEMORY_ENGINE_DATA.loadCheckpoint();
-  assert.strictEqual(checkpointAfterCombined.event_memory.small_summaries.length, 0,
-    '链式大总结不得覆盖小总结请求之前建立的 checkpoint');
+  assert.strictEqual(checkpointAfterCombined.event_memory.small_summaries.length, 0);
 
   settings.firstLayerIsAiOpening = false;
   sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
@@ -359,48 +326,36 @@ for (const filename of [
   runningLabels.length = 0;
   await sandbox.MEMORY_ENGINE.backfillSummaries();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.strictEqual(state.personal_memory[0].names[0], '保留人物', '大小总结回填不得清理人物实体');
+  assert.strictEqual(state.personal_memory[0].names[0], '保留人物', '纪要回填不得清理人物实体');
   assert.ok(state.event_memory.small_summaries.length > 0);
-  assert.strictEqual(state.event_memory.big_summaries.length, state.event_memory.small_summaries.length,
-    '每批一条纪要时应逐条追加总述，不得滚动覆盖');
+  assert.strictEqual(state.event_memory.big_summaries, undefined);
 
   const summaryBeforePersonBackfill = JSON.stringify(state.event_memory);
   calls.length = 0;
   await sandbox.MEMORY_ENGINE.backfill();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.strictEqual(JSON.stringify(state.event_memory), summaryBeforePersonBackfill, '人物实体回填不得清理大小总结');
+  assert.strictEqual(JSON.stringify(state.event_memory), summaryBeforePersonBackfill, '人物实体回填不得清理纪要');
   assert.ok(state.personal_memory.some(item => item.names.includes('角色')));
 
-  state.event_memory.big_summary_cursor = Math.max(0, state.event_memory.small_summaries.length - 1);
-  sandbox.MEMORY_ENGINE_DATA.saveState(state);
-  calls.length = 0;
-  await sandbox.MEMORY_ENGINE.manualBigSummary();
-  assert.strictEqual(calls.length, 1);
-  assert.ok(calls[0].includes('世界进程的总述编纂者'));
-  assert.ok(!calls[0].includes('世界进程的纪要记录员'), '手动大总结只应携带大总结 Prompt');
-  assert.ok(!calls[0].includes('"personal_memory": []'));
-
+  // 旧存档包含 big_summary / big_summaries 时应平滑兼容忽略，不崩溃且保留纪要
   const legacy = sandbox.MEMORY_ENGINE_DATA.defaultState();
-  delete legacy.event_memory.big_summaries;
+  legacy.event_memory.small_summaries = [{ id: 'small_000001', startLayer: 1, endLayer: 2, content: '旧纪要保留' }];
   legacy.event_memory.big_summary = { startLayer: 1, endLayer: 4, content: '旧版滚动总述' };
+  legacy.event_memory.big_summaries = [{ startLayer: 1, endLayer: 4, content: '旧版总述列表' }];
   sandbox.MEMORY_ENGINE_DATA.saveState(legacy);
-  assert.strictEqual(sandbox.MEMORY_ENGINE_DATA.loadState().event_memory.big_summaries[0].content, '旧版滚动总述',
-    '旧版单条总述必须自动迁移为总述列表');
+  const loadedLegacy = sandbox.MEMORY_ENGINE_DATA.loadState();
+  assert.strictEqual(loadedLegacy.event_memory.small_summaries[0].content, '旧纪要保留');
+  assert.strictEqual(loadedLegacy.event_memory.big_summaries, undefined, '读取旧存档时应清理已弃用的总述字段');
 
   const portable = sandbox.MEMORY_ENGINE_DATA.defaultState();
   portable.chatLayer = 99;
   portable.event_memory.small_summary_layer = 88;
+  const importedLongSmall = '用户手工合并：' + '长'.repeat(700);
   portable.event_memory.small_summaries = [
     { id: 'small_000001', startLayer: 1, endLayer: 2, content: '旧纪要一' },
     { id: 'small_000002', startLayer: 3, endLayer: 4, content: '旧纪要二' },
-    { id: 'small_000003', startLayer: 5, endLayer: 6, content: '尚未整理纪要' }
+    { id: 'small_000003', startLayer: 5, endLayer: 6, content: importedLongSmall }
   ];
-  const importedLongSummary = '用户手工合并：' + '长'.repeat(700);
-  portable.event_memory.big_summaries = [
-    { id: 'big_000001', startLayer: 1, endLayer: 2, content: '旧总述' },
-    { id: 'big_000002', startLayer: 3, endLayer: 4, content: importedLongSummary }
-  ];
-  portable.event_memory.big_summary_cursor = 2;
   const imported = sandbox.MEMORY_ENGINE_DATA.importData({
     __memoryEngineData: true,
     chatId: 'another-chat',
@@ -409,39 +364,16 @@ for (const filename of [
   });
   assert.strictEqual(imported.chatLayer, chat.length - 1, '跨聊天导入的人物实体进度必须衔接当前最后一层');
   assert.strictEqual(imported.event_memory.small_summary_layer, chat.length - 1, '跨聊天导入的纪要进度必须衔接当前最后一层');
-  assert.strictEqual(imported.event_memory.big_summary_cursor, 2, '总述整理游标对应导入纪要，不能按聊天楼层重置');
-  assert.strictEqual(imported.event_memory.big_summaries[1].content, importedLongSummary, 'JSON 导入的超长总述不得截断');
+  assert.strictEqual(imported.event_memory.small_summaries[2].content, importedLongSmall, 'JSON 导入的超长纪要不得截断');
   assert.strictEqual(sandbox.MEMORY_ENGINE_DATA.loadCheckpoint().chatLayer, chat.length - 1, '导入存档点也必须重定位到当前聊天');
 
-  settings.bigSummaryInjectLimit = 1;
+  settings.smallSummaryInjectLimit = 1;
+  settings.recallArchivedSmallLimit = 0;
   sandbox.MEMORY_ENGINE.applyInjection();
-  assert.ok(injectionContent.includes(importedLongSummary), '应完整注入最新总述');
-  assert.ok(!injectionContent.includes('旧总述'), '超过上限的旧总述不应注入');
-  assert.ok(injectionContent.includes('尚未整理纪要'), '未整理纪要不受总述条数上限影响');
-  settings.bigSummaryInjectLimit = 3;
-
-  const structuredInjection = sandbox.MEMORY_ENGINE_DATA.defaultState();
-  structuredInjection.event_memory.small_summaries = Array.from({ length: 5 }, (_, index) => ({
-    id: `covered_small_${index + 1}`,
-    startLayer: index * 2 + 1,
-    endLayer: index * 2 + 2,
-    content: index === 4 ? 'pending-minute' : `covered-minute-${index + 1}`,
-    status: 'valid'
-  }));
-  structuredInjection.event_memory.big_summaries = Array.from({ length: 4 }, (_, index) => ({
-    id: `overview_${index + 1}`,
-    startLayer: index * 2 + 1,
-    endLayer: index * 2 + 2,
-    content: `overview-content-${index + 1}`,
-    childIds: [`covered_small_${index + 1}`],
-    status: 'valid'
-  }));
-  sandbox.MEMORY_ENGINE_DATA.saveState(structuredInjection);
-  sandbox.MEMORY_ENGINE.applyInjection();
-  assert.ok(!injectionContent.includes('overview-content-1'), '超过上限的旧总述不应注入');
-  assert.ok(!injectionContent.includes('covered-minute-1'), '旧总述退出注入窗口后，其已整理纪要不得重新注入');
-  assert.ok(injectionContent.includes('overview-content-2'), '上限内的最近总述应继续注入');
-  assert.ok(injectionContent.includes('pending-minute'), '真正未整理的纪要应继续注入');
+  assert.ok(injectionContent.includes(importedLongSmall), '应完整注入最新纪要');
+  assert.ok(!injectionContent.includes('旧纪要一'), '超过直注上限且关闭召回时旧纪要不应直接注入');
+  settings.smallSummaryInjectLimit = 8;
+  settings.recallArchivedSmallLimit = 3;
 
   const latest = sandbox.MEMORY_ENGINE_DATA.defaultState();
   latest.personal_memory = [
@@ -453,11 +385,6 @@ for (const filename of [
   latest.event_memory.small_summaries = Array.from({ length: 12 }, (_, index) => ({
     id: `small_${String(index + 1).padStart(6, '0')}`, startLayer: index * 2 + 1, endLayer: index * 2 + 2, content: `纪要${index + 1}`
   }));
-  latest.event_memory.big_summaries = [
-    { id: 'big_000001', startLayer: 1, endLayer: 10, content: '总述一' },
-    { id: 'big_000002', startLayer: 11, endLayer: 20, content: '总述二' }
-  ];
-  latest.event_memory.big_summary_cursor = 10;
   latest.entity_memory.organization = [{
     id: 'org_000001', name: '青石盟', description: '控制青石城商路。',
     history: [{ time: '昨日', event: '青石盟封锁北门。' }, { time: '今日', event: '青石盟开始盘查行人。' }]
@@ -465,14 +392,10 @@ for (const filename of [
   sandbox.MEMORY_ENGINE_DATA.saveState(latest);
   const oldCheckpoint = JSON.parse(JSON.stringify(latest));
   oldCheckpoint.event_memory.small_summaries = oldCheckpoint.event_memory.small_summaries.slice(0, 5);
-  oldCheckpoint.event_memory.big_summaries = oldCheckpoint.event_memory.big_summaries.slice(0, 1);
-  oldCheckpoint.event_memory.big_summary_cursor = 5;
   sandbox.MEMORY_ENGINE_DATA.saveCheckpoint(oldCheckpoint);
   const exported = sandbox.MEMORY_ENGINE_DATA.exportData();
   assert.strictEqual(exported.counts.state.minutes, 12, '完整 JSON 的 state 必须是最新当前纪要');
-  assert.strictEqual(exported.counts.state.overviews, 2, '完整 JSON 的 state 必须是最新当前总述');
   assert.strictEqual(exported.counts.checkpoint.minutes, 5, '完整 JSON 必须同时保留并明确标记旧 checkpoint 纪要数');
-  assert.strictEqual(exported.counts.checkpoint.overviews, 1, '完整 JSON 必须同时保留并明确标记旧 checkpoint 总述数');
   assert.strictEqual(JSON.stringify(exported.state.personal_memory[0].memories[0].known_by), JSON.stringify(['乙']), '当前状态导出必须把内部知识索引还原成 known_by');
   assert.strictEqual(JSON.stringify(exported.checkpoint.personal_memory[0].memories[0].known_by), JSON.stringify(['乙']), '存档点导出也必须保留 known_by');
   const roundTripped = sandbox.MEMORY_ENGINE_DATA.importData(exported);
@@ -494,7 +417,7 @@ for (const filename of [
   const injectedOldHistory = worldMemory.includes('青石盟封锁北门。');
   assert.ok(injectedNewHistory || injectedOldHistory, '世界状态命中的实体必须按指数概率注入一条历史');
   assert.notStrictEqual(injectedNewHistory, injectedOldHistory, '世界引擎每个匹配条目的概率注入上限必须生效');
-  assert.ok(!worldMemory.includes('纪要1') && !worldMemory.includes('总述一'), '注入世界引擎时不得携带纪要或总述');
+  assert.ok(!worldMemory.includes('纪要1'), '注入世界引擎时不得携带纪要');
   settings.injectIntoWorldEngine = false;
   assert.strictEqual(sandbox.MEMORY_ENGINE.buildWorldEngineContext({ factions: [{ name: '青石盟' }] }), '', '关闭跨引擎注入后必须返回空内容');
 
@@ -521,15 +444,13 @@ for (const filename of [
   );
   listeners.get('generation_ended')();
   await new Promise(resolve => setTimeout(resolve, 1600));
-  assert.strictEqual(calls.length, 2, '从进入聊天的基线起新增满 X 轮后，才生成纪要并独立生成总述');
+  assert.strictEqual(calls.length, 1, '从进入聊天的基线起新增满 X 轮后，只生成纪要且不请求总述');
   assert.ok(calls[0].includes('"small_summary": ""'));
   assert.ok(!calls[0].includes('"personal_memory": []'));
-  assert.ok(!calls[0].includes('事件记忆的总述整理器'));
-  assert.ok(calls[1].includes('"big_summary": ""'));
-  assert.ok(!calls[1].includes('"personal_memory": []'));
-  assert.deepStrictEqual(runningLabels, ['纪要', '总述']);
+  assert.ok(!calls[0].includes('"big_summary"'));
+  assert.deepStrictEqual(runningLabels, ['纪要']);
 
-  console.log('✓ 事件记忆大小总结测试通过');
+  console.log('✓ 事件记忆纪要测试通过');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

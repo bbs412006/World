@@ -82,7 +82,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 
 不得增加其他顶层字段或条目字段。`;
 
-  // 供组合任务使用：保留完整条目结构，但不限制同一次请求追加纪要或总述字段。
+  // 供组合任务使用：保留完整条目结构，但不限制同一次请求追加纪要字段。
   const TASK_PROMPT = SYSTEM_PROMPT.replace(/【输出格式】[\s\S]*$/, `【本任务输出字段与结构】
 统一 JSON 对象中必须包含以下两个字段，并严格使用下列条目结构：
 
@@ -112,7 +112,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 每个 entity_updates 数组项同理只携带一条 event，并单独填写该 event 的 time。
 
 约束：
-1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates、small_summary（及 keywords/entities/impact）或 big_summary（及 keywords），请按统一输出模板一并填写。
+1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按统一输出模板一并填写。
 2. 没有对应内容时，数组返回 []。
 3. PersonalMemory 只能包含 name、known_by、memory、time。
 4. EntityUpdate 只能包含 type、name、aliases、description、event、time。

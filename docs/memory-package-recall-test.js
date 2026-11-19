@@ -22,14 +22,12 @@ const settings = {
   firstLayerIsAiOpening: true,
   evolveMode: 'auto',
   smallSummaryEveryX: 1,
-  bigSummaryEveryX: 1,
-  bigSummaryInjectLimit: 2,
+  smallSummaryInjectLimit: 1,
   summaryDelayFloors: 0,
   hideCoveredRawText: true,
   recentRawRounds: 1,
   referenceRawRounds: 0,
   referenceSmallSummaryCount: 4,
-  referenceBigSummaryCount: 1,
   injectIntoPrompt: true,
   injectIntoWorldEngine: true,
   worldEngineMemoryLimit: 4,
@@ -140,7 +138,6 @@ for (const file of [
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js',
   'memory-engine.js'
 ]) {
   vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), sandbox, { filename: file });
@@ -148,7 +145,7 @@ for (const file of [
 sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
 
 (async () => {
-  // 1. 提取结构化持续事实、角色弧光与纪要关键词，并自动合并大总述
+  // 1. 提取结构化持续事实、角色弧光与纪要关键词（不再生成总述）
   await sandbox.MEMORY_ENGINE.manualExtract();
   let state = sandbox.MEMORY_ENGINE_DATA.loadState();
   assert.strictEqual(state.ongoing_facts.length, 1);
@@ -158,11 +155,11 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   assert.strictEqual(state.character_arcs[0].progressPct, 35);
   assert.deepStrictEqual(Array.from(state.event_memory.small_summaries[0].keywords), ['青铜虎符', '青石渡', '北境暗桩']);
   assert.strictEqual(state.event_memory.small_summaries[0].impactLevel, 'key');
-  assert.strictEqual(state.event_memory.big_summaries.length, 1);
+  assert.strictEqual(state.event_memory.big_summaries, undefined, '去除总述后不应生成 big_summaries');
   assert.ok(injection.includes('【长期持续事实】'), '应注入持续事实区块');
   assert.ok(injection.includes('[角色弧光 35% · 利害同盟]'), '应注入角色弧光定位');
 
-  // 2. 小纪要已归入大总述后，当后续对话提及“青铜虎符”关键词时，应按需从已折叠纪要中精确唤醒细节
+  // 2. 早期纪要退出直注窗口（smallSummaryInjectLimit=1）后，后续对话提及“青铜虎符”应按关键词精准唤醒
   chat.push(
     { is_user: true, name: '林墨', mes: '半月后茶楼碰头，林墨再次提起青铜虎符的下落。' },
     { is_user: false, name: '沈清秋', mes: '沈清秋颔首致意，准备摊牌。' }
@@ -173,7 +170,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   assert.strictEqual(state.ongoing_facts[0].status, 'resolved', '旧契约事实应被标记为 resolved');
   assert.strictEqual(state.ongoing_facts[1].status, 'active', '新状态事实应生效');
   assert.strictEqual(state.character_arcs[0].progressPct, 100, '百分比超过 100 应自动钳位到 100');
-  assert.ok(injection.includes('【关键词召回历史细节】'), '应凭关键词从已归入总述的早期纪要唤醒青铜虎符细节');
+  assert.ok(injection.includes('【关键词召回历史细节】'), '应凭关键词从超出直注窗口的早期纪要唤醒青铜虎符细节');
   assert.ok(injection.includes('沈清秋在青石渡把青铜虎符交给林墨'), '唤醒的旧纪要正文应准确命中');
 
   // 3. 验证字符总预算控制（memoryInjectMaxChars）
@@ -207,7 +204,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   assert.strictEqual(imported.character_arcs[0].originChatId, 'pkg-test-b');
 
   // 5. 验证延迟总结楼层（summaryDelayFloors=1）：仅剩未超出延迟区的新回复时不应提前调用总结 API
-  sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ summaryDelayFloors: 1, bigSummaryEveryX: 99 });
+  sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ summaryDelayFloors: 1 });
   const beforeDelayCalls = apiCallCount;
   chat.push(
     { is_user: true, name: '林墨', mes: '试探一问。' },

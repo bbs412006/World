@@ -25,16 +25,12 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
     const startLayer = Number.isFinite(Number(input.startLayer)) ? Number(input.startLayer) : 0;
     const endLayer = Number.isFinite(Number(input.endLayer)) ? Number(input.endLayer) : startLayer;
     const referenceContext = clean(input.referenceContext);
-    const big = Array.isArray(input.historyBigSummaries) ? input.historyBigSummaries : [];
     const small = Array.isArray(input.historySmallSummaries) ? input.historySmallSummaries : [];
-    const history = [
-      big.length ? `【最近一条总述】\n${big.map((item, index) =>
+    const history = small.length
+      ? `【前置纪要】\n${small.map((item, index) =>
         `${index + 1}. [楼层 ${Number(item?.startLayer) || 0}-${Number(item?.endLayer) || 0}] ${clean(item?.content)}`
-      ).join('\n')}` : '',
-      small.length ? `【最近四条纪要】\n${small.map((item, index) =>
-        `${index + 1}. [楼层 ${Number(item?.startLayer) || 0}-${Number(item?.endLayer) || 0}] ${clean(item?.content)}`
-      ).join('\n')}` : ''
-    ].filter(Boolean).join('\n\n');
+      ).join('\n')}`
+      : '';
     const reference = referenceContext || history;
     const outlineFocus = clean(input.outlineFocusHint);
     const conversation = input.reuseConversation === true

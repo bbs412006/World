@@ -115,7 +115,6 @@ for (const file of [
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js',
   'memory-engine-vector.js',
   'memory-engine.js'
 ]) {
@@ -126,6 +125,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
   engineEnabled: true,
   injectIntoPrompt: true,
   searchDepth: 5,
+  smallSummaryInjectLimit: 0,
   recallArchivedSmallLimit: 3,
   vectorEnabled: true,
   vectorAutoMaintain: true,
@@ -143,7 +143,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
 });
 
 (async () => {
-  // 预置 2 条已被大总述折叠的早期纪要 + 1 个未在当前正文直接点名的实体，且故意让字面关键词与当前对话零重合
+  // 预置 2 条超出直注窗口进入历史召回池的早期纪要 + 1 个未在当前正文直接点名的实体，且故意让字面关键词与当前对话零重合
   const state = sandbox.MEMORY_ENGINE_DATA.defaultState();
   state.event_memory.small_summaries = [
     {
@@ -161,17 +161,6 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
       endLayer: 4,
       content: '船老大送来一份旧海图与远洋补给清单。',
       keywords: ['海图'],
-      status: 'valid',
-      revision: 1
-    }
-  ];
-  state.event_memory.big_summaries = [
-    {
-      id: 'big_000001',
-      startLayer: 1,
-      endLayer: 4,
-      content: '早年众人在江南与海港各自收集过若干杂项物件。',
-      childIds: ['small_000001', 'small_000002'],
       status: 'valid',
       revision: 1
     }

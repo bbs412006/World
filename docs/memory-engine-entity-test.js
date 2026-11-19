@@ -33,7 +33,7 @@ global.WORLD_ENGINE_API = { callApi: async () => { apiCalls++; return apiRespons
 global.WORLD_ENGINE_UI = { setMemoryEvolvingUI: () => {} };
 
 for (const file of ['memory-engine-settings.js', 'memory-engine-data.js', 'memory-engine-prompt.js',
-  'memory-engine-small-summary-prompt.js', 'memory-engine-big-summary-prompt.js', 'memory-engine.js']) {
+  'memory-engine-small-summary-prompt.js', 'memory-engine.js']) {
   vm.runInThisContext(fs.readFileSync(path.join(root, file), 'utf8'), { filename: file });
 }
 WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({ apiAutoRetries: 3, injectIntoWorldEngine: true }));

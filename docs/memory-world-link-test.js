@@ -59,8 +59,7 @@ const sandbox = {
 sandbox.window = sandbox;
 
 for (const file of [
-  'memory-engine-data.js', 'memory-engine-prompt.js', 'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js', 'memory-engine.js'
+  'memory-engine-data.js', 'memory-engine-prompt.js', 'memory-engine-small-summary-prompt.js', 'memory-engine.js'
 ]) {
   vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), sandbox, { filename: file });
 }
@@ -86,7 +85,7 @@ for (const file of [
   assert.strictEqual(state.event_memory.small_summaries.length, 1);
   assert.strictEqual(state.event_memory.small_summaries[0].content, '世界摘要A');
   assert.strictEqual(state.event_memory.small_summaries[0].source, 'world_engine');
-  assert.strictEqual(state.event_memory.big_summaries[0].content, '总述A');
+  assert.strictEqual(state.event_memory.big_summaries, undefined);
   assert.ok(JSON.stringify(state).includes('版本A'));
 
   assert.strictEqual(state.event_memory.small_summaries[0].sourceKey, 'world-link-test:20');
@@ -109,12 +108,11 @@ for (const file of [
   });
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
   const serialized = JSON.stringify(state);
-  assert.ok(!serialized.includes('摘要A') && !serialized.includes('版本A') && !serialized.includes('总述A'),
-    '同楼层重 roll 后不得残留旧人物、实体、纪要或总述');
-  assert.ok(serialized.includes('摘要B') && serialized.includes('版本B') && serialized.includes('总述B'));
+  assert.ok(!serialized.includes('摘要A') && !serialized.includes('版本A'),
+    '同楼层重 roll 后不得残留旧人物、实体或世界同步纪要');
+  assert.ok(serialized.includes('摘要B') && serialized.includes('版本B'));
   assert.ok(serialized.includes('ordinary-summary-19-20') && serialized.includes('ordinary'));
   assert.strictEqual(state.event_memory.small_summaries.length, 2, '重 roll 应只替换世界摘要纪要');
-  assert.strictEqual(state.event_memory.big_summaries.length, 1, '受影响总述应重算而不是追加');
 
   const items = Array.from({ length: 5 }, (_, index) => `记忆${index}`); // 旧 → 新
   const newest = sandbox.MEMORY_ENGINE._test.exponentialMemorySample(items, 1, () => 0.5, 10000);
@@ -125,18 +123,15 @@ for (const file of [
   );
   assert.deepStrictEqual(Array.from(oldestWins), ['记忆0'], '最旧记忆必须保留可由 1d10000 命中的非零机会');
 
-  // 撤回已消费位置之前的世界纪要，不能把原本未消费的尾部纪要吞掉。
+  // 撤回世界同步纪要不得误伤普通对话纪要。
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
   state.event_memory = { small_summaries: ['A', 'B', 'C', 'D'].map((id, index) => ({ id, startLayer: index, endLayer: index,
-    content: '纪要' + id, status: 'valid', revision: 1, ...(id === 'A' ? { worldCommitId: 'removed-commit' } : {}) })),
-    big_summaries: [{ id: 'overview-old', content: '旧总述', childIds: ['A', 'B', 'C'], status: 'valid' }], big_summary_cursor: 3, small_summary_layer: 3 };
+    content: '纪要' + id, status: 'valid', revision: 1, ...(id === 'A' ? { worldCommitId: 'removed-commit', source: 'world_engine' } : {}) })),
+    small_summary_layer: 3 };
   sandbox.MEMORY_ENGINE_DATA.saveState(state);
   sandbox.MEMORY_ENGINE.invalidateWorldCommits(['removed-commit']);
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.strictEqual(state.event_memory.big_summary_cursor, 2);
-  await sandbox.MEMORY_ENGINE.manualBigSummary();
-  state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.deepStrictEqual(Array.from(state.event_memory.big_summaries.at(-1).childIds), ['D'], '未消费纪要D仍必须进入下一篇总述');
+  assert.deepStrictEqual(Array.from(state.event_memory.small_summaries.map(item => item.id)), ['B', 'C', 'D'], '撤回世界提交只移除对应世界纪要');
 
   vm.runInNewContext(fs.readFileSync(path.join(root, 'memory-engine-timeline.js'), 'utf8'), sandbox, { filename: 'memory-engine-timeline.js' });
   chat.push({ is_user: true, name: '甲', mes: '我看到了货单。' }, { is_user: false, name: '角色', mes: '甲记住这份货单。' });
@@ -151,10 +146,9 @@ for (const file of [
     current.timeline.nodes = [{ id: 'cancel-node', kind: 'world_link', source: 'world_engine', sourceKey: 'world-link-test:2', worldCommitId: 'cancel-commit',
       startLayer: 2, endLayer: 2, sourceDigest: 'cancel-source', sourceRefs: [{ chatId: 'world-link-test', messageId: 'cancel-world-source', synthetic: true, hash: 'cancel' }], status: 'valid',
       personal: [{ name: ['甲'], known_by: [], memory: '甲记住CANCEL_WORLD事实。', time: '' }], entities: {} }];
-    const small = { id: 'cancel-minute', source: 'world_engine', worldCommitId: 'cancel-commit', content: 'CANCEL_WORLD纪要', revision: 1, status: 'valid', sourceDigest: '' };
-    const ordinary = { id: 'ordinary-minute', content: '原始普通纪要', revision: 1, status: 'valid', sourceRefs: refs, sourceDigest: 'ordinary-digest' };
-    const digest = sandbox.MEMORY_ENGINE_TIMELINE.hashText('cancel-minute:1:|ordinary-minute:1:ordinary-digest');
-    current.event_memory = { small_summaries: [small, ordinary], big_summaries: [{ id: 'cancel-overview', content: 'CANCEL_WORLD和原始普通纪要的总述', status: 'valid', childIds: ['cancel-minute', 'ordinary-minute'], childDigest: digest }], big_summary_cursor: 2 };
+    const small = { id: 'cancel-minute', source: 'world_engine', worldCommitId: 'cancel-commit', startLayer: 2, endLayer: 2, content: 'CANCEL_WORLD纪要', revision: 1, status: 'valid', sourceDigest: '' };
+    const ordinary = { id: 'ordinary-minute', startLayer: 1, endLayer: 2, content: '原始普通纪要', revision: 1, status: 'valid', sourceRefs: refs, sourceDigest: 'ordinary-digest' };
+    current.event_memory = { small_summaries: [small, ordinary], small_summary_layer: 2 };
     delete current.world_commit_archive;
     return sandbox.MEMORY_ENGINE.replayTimeline(current);
   };
@@ -170,19 +164,19 @@ for (const file of [
   await sandbox.MEMORY_ENGINE.prepareHistoryForGeneration();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
   assert(JSON.stringify(state.personal_memory).includes('CANCEL_WORLD'));
-  assert.strictEqual(state.event_memory.big_summaries.find(item => item.id === 'cancel-overview').status, 'valid');
+  assert(state.event_memory.small_summaries.some(item => item.id === 'cancel-minute' && item.status === 'valid'));
   assert(sandbox.MEMORY_ENGINE.applyInjection({ isReroll: true }).includes('CANCEL_WORLD'));
   assert.strictEqual(apiCalls, callsBeforeCancel, '可信原commit恢复不需要重提取API');
   // 真删楼导致commit仍inactive，贡献必须持续不注入。
   committedActive = false; sandbox.MEMORY_ENGINE.invalidateWorldCommits(['cancel-commit']);
   await sandbox.MEMORY_ENGINE.prepareHistoryForGeneration();
   assert(!sandbox.MEMORY_ENGINE.applyInjection({ isReroll: true }).includes('CANCEL_WORLD'));
-  // preview期间普通纪要被编辑但revision未增加，不能因此恢复包含旧普通内容的总述。
+  // preview期间普通纪要被编辑后，原可信世界commit恢复仍不丢失可信世界记忆。
   state = sandbox.MEMORY_ENGINE_DATA.loadState(); state.event_memory.small_summaries.find(item => item.id === 'ordinary-minute').content = '编辑后的普通纪要'; sandbox.MEMORY_ENGINE_DATA.saveState(state);
   committedActive = true; await sandbox.MEMORY_ENGINE.prepareHistoryForGeneration();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert(!state.event_memory.big_summaries.some(item => item.status === 'valid' && item.content.includes('原始普通纪要')), '不能恢复子纪要已变化的坏总述');
   assert(JSON.stringify(state.personal_memory).includes('CANCEL_WORLD'), '普通纪要编辑不丢失可信世界记忆');
+  assert(state.event_memory.small_summaries.some(item => item.id === 'ordinary-minute' && item.content === '编辑后的普通纪要'), '恢复世界提交不得覆盖已编辑的普通纪要');
   const listeners = new Map();
   sandbox.SillyTavern.getContext = () => ({ chat, event_types: {}, eventSource: { on(name, handler) { listeners.set(name, handler); } } });
   sandbox.MEMORY_ENGINE.init(); listeners.get('message_swiped')();
@@ -196,8 +190,7 @@ for (const file of [
   state.event_memory = { small_summaries: [
     { id: 'unprovenanced', content: 'OLD_ROOT_SUMMARY', status: 'valid' },
     { id: 'provenanced', content: '真实货单纪要', status: 'valid', sourceRefs: refs }
-  ], big_summaries: [{ id: 'big-old', content: 'OLD_ROOT_OVERVIEW', status: 'valid' },
-    { id: 'big-valid', content: '真实货单总述', childIds: ['provenanced'], status: 'valid' }], big_summary_cursor: 2 };
+  ], small_summary_layer: 2 };
   sandbox.MEMORY_ENGINE_DATA.saveState(state);
   sandbox.MEMORY_ENGINE_DATA.saveCheckpoint(state);
   sandbox.MEMORY_ENGINE_DATA.saveLinkCheckpoint({ layer: 2, baseState: state });

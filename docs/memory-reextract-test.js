@@ -21,9 +21,7 @@ const settings = {
   firstLayerIsAiOpening: true,
   referenceRawRounds: 1,
   referenceSmallSummaryCount: 2,
-  referenceBigSummaryCount: 1,
-  bigSummaryEveryX: 1,
-  bigSummaryInjectLimit: 3,
+  smallSummaryInjectLimit: 8,
   maxTokens: 2000,
   temperature: 0.2,
   apiAutoRetries: 0,
@@ -91,7 +89,6 @@ for (const filename of [
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',
-  'memory-engine-big-summary-prompt.js',
   'memory-engine.js'
 ]) vm.runInNewContext(fs.readFileSync(path.join(root, filename), 'utf8'), sandbox, { filename });
 
@@ -109,13 +106,6 @@ function seedState() {
     }
   ];
   state.event_memory.small_summary_layer = 6;
-  state.event_memory.big_summary_cursor = 1;
-  state.event_memory.big_summaries = [{
-    id: 'big_000001', startLayer: 1, endLayer: 2, content: '更早总述内容',
-    childIds: ['small_000001'],
-    childDigest: hashText(`small_000001:1:${digestRefs(oldSmallRefs)}`),
-    sourceRefs: oldSmallRefs, originChatId: 'other-chat', status: 'valid', revision: 1
-  }];
   state.timeline = {
     originChatId: 'reextract-test',
     root: {
@@ -164,14 +154,13 @@ function seedState() {
     });
   };
   const result = await sandbox.MEMORY_ENGINE.manualReextract();
-  assert.strictEqual(calls.length, 2, '重新推演后满足阈值时必须继续执行总述推演');
+  assert.strictEqual(calls.length, 1, '去除总述后重新推演只应调用一次人物/实体与纪要联合请求');
   assert.ok(calls[0].prompt.includes('目标轮用户正文') && calls[0].prompt.includes('目标轮角色正文'), '必须重做刚才的目标正文');
   assert.ok(calls[0].prompt.includes('辅助轮用户正文') && calls[0].prompt.includes('辅助轮角色正文'), '必须按 X 设置携带辅助正文');
   assert.ok(calls[0].prompt.includes('更早纪要内容'), '必须按 Y 设置携带前置纪要');
-  assert.ok(calls[0].prompt.includes('更早总述内容'), '必须按 Z 设置携带前置总述');
-  assert.ok(calls.every(call => call.signal), '重新推演和后续总述都必须可中止');
-  assert.ok(result.added >= 3, '成功结果必须返回人物记忆、纪要和总述的真实更新数');
-  assert.strictEqual(result.updatedBig, 1);
+  assert.ok(!calls[0].prompt.includes('"big_summary"'), '不得包含已移除的总述字段');
+  assert.ok(calls.every(call => call.signal), '重新推演必须可中止');
+  assert.ok(result.added >= 2, '成功结果必须返回人物记忆与纪要的真实更新数');
   assert.ok(uiStates.some(item => item.active && item.running), '重新推演必须立即刷新运行动效');
 
   seedState();

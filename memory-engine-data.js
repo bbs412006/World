@@ -64,9 +64,7 @@ window.MEMORY_ENGINE_DATA = (function() {
       character_arcs: [],
       event_memory: {
         small_summaries: [],
-        big_summaries: [],
-        small_summary_layer: null,
-        big_summary_cursor: 0
+        small_summary_layer: null
       },
       round: 0,
       chatLayer: null,
@@ -178,33 +176,14 @@ window.MEMORY_ENGINE_DATA = (function() {
       if (item?.worldCommitId) normalizedItem.worldCommitId = clean(item.worldCommitId);
       return normalizedItem;
     }).filter(item => item.content);
-    // 0.4.x 只有一条滚动 big_summary；升级后迁移成可追加的 big_summaries。
-    const legacyBig = next.event_memory.big_summary;
-    const bigSource = Array.isArray(next.event_memory.big_summaries)
-      ? next.event_memory.big_summaries
-      : (legacyBig && typeof legacyBig === 'object' ? [legacyBig] : []);
-    next.event_memory.big_summaries = bigSource.map((item, index) => ({
-      id: String(item?.id || `big_${String(index + 1).padStart(6, '0')}`),
-      startLayer: Number.isFinite(Number(item?.startLayer)) ? Number(item.startLayer) : 0,
-      endLayer: Number.isFinite(Number(item?.endLayer)) ? Number(item.endLayer) : 0,
-      content: String(item?.content || '').trim(),
-      keywords: unique(item?.keywords),
-      childIds: Array.isArray(item?.childIds) ? item.childIds.map(String) : [],
-      childDigest: clean(item?.childDigest),
-      sourceRefs: Array.isArray(item?.sourceRefs) ? clone(item.sourceRefs) : [],
-      originChatId: clean(item?.originChatId),
-      status: ['valid', 'stale', 'pending', 'failed'].includes(item?.status) ? item.status : 'valid',
-      revision: Math.max(1, parseInt(item?.revision) || 1)
-    })).filter(item => item.content);
+    // v1.3.0 起已去除总述（big_summaries），仅保留纪要；读取旧存档时平滑忽略旧总述字段。
     delete next.event_memory.big_summary;
+    delete next.event_memory.big_summaries;
+    delete next.event_memory.big_summary_cursor;
     next.event_memory.small_summary_layer = next.event_memory.small_summary_layer !== null
       && next.event_memory.small_summary_layer !== ''
       && Number.isFinite(Number(next.event_memory.small_summary_layer))
       ? Number(next.event_memory.small_summary_layer) : null;
-    next.event_memory.big_summary_cursor = Math.min(
-      next.event_memory.small_summaries.length,
-      Math.max(0, parseInt(next.event_memory.big_summary_cursor) || 0)
-    );
     next.round = Math.max(0, parseInt(next.round) || 0);
     next.chatLayer = next.chatLayer !== null && next.chatLayer !== '' && Number.isFinite(Number(next.chatLayer))
       ? Number(next.chatLayer) : null;
@@ -328,38 +307,21 @@ window.MEMORY_ENGINE_DATA = (function() {
       entities: ENTITY_TYPES.reduce((sum, type) => sum + (state.entity_memory?.[type]?.length || 0), 0),
       facts: (state.ongoing_facts || []).filter(item => item.status !== 'resolved').length,
       arcs: state.character_arcs?.length || 0,
-      minutes: state.event_memory?.small_summaries?.length || 0,
-      overviews: state.event_memory?.big_summaries?.length || 0
+      minutes: state.event_memory?.small_summaries?.length || 0
     };
   }
   function exportMemoryPackage() {
     const portable = portableState(loadState());
     const validSmall = (portable.event_memory?.small_summaries || []).filter(item => item.status !== 'stale' && item.status !== 'failed');
-    const validBig = (portable.event_memory?.big_summaries || []).filter(item => item.status !== 'stale' && item.status !== 'failed');
-    const smallIdMap = new Map();
-    const cleanSmall = validSmall.map((item, idx) => {
-      const nextId = `small_${String(idx + 1).padStart(6, '0')}`;
-      smallIdMap.set(item.id, nextId);
-      return {
-        id: nextId,
-        startLayer: 0,
-        endLayer: 0,
-        content: item.content,
-        keywords: unique(item.keywords),
-        entityNames: unique(item.entityNames),
-        impactLevel: item.impactLevel === 'key' ? 'key' : 'normal',
-        ...(clean(item.outlineChapterTitle) ? { outlineChapterTitle: clean(item.outlineChapterTitle) } : {}),
-        status: 'valid',
-        revision: 1
-      };
-    });
-    const cleanBig = validBig.map((item, idx) => ({
-      id: `big_${String(idx + 1).padStart(6, '0')}`,
+    const cleanSmall = validSmall.map((item, idx) => ({
+      id: `small_${String(idx + 1).padStart(6, '0')}`,
       startLayer: 0,
       endLayer: 0,
       content: item.content,
       keywords: unique(item.keywords),
-      childIds: (item.childIds || []).map(id => smallIdMap.get(id)).filter(Boolean),
+      entityNames: unique(item.entityNames),
+      impactLevel: item.impactLevel === 'key' ? 'key' : 'normal',
+      ...(clean(item.outlineChapterTitle) ? { outlineChapterTitle: clean(item.outlineChapterTitle) } : {}),
       status: 'valid',
       revision: 1
     }));
@@ -369,9 +331,7 @@ window.MEMORY_ENGINE_DATA = (function() {
       ongoing_facts: (portable.ongoing_facts || []).map(({ sourceRefs, originChatId, worldCommitId, ...rest }) => rest),
       character_arcs: (portable.character_arcs || []).map(({ originChatId, ...rest }) => rest),
       event_memory: {
-        small_summaries: cleanSmall,
-        big_summaries: cleanBig,
-        big_summary_cursor: Math.min(cleanSmall.length, cleanBig.reduce((acc, item) => acc + item.childIds.length, 0))
+        small_summaries: cleanSmall
       }
     };
     return {
@@ -414,27 +374,6 @@ window.MEMORY_ENGINE_DATA = (function() {
       originChatId: getChatId(),
       status: 'valid'
     }));
-    const smallMap = new Map(rebased.event_memory.small_summaries.map(item => [item.id, item]));
-    const hashFn = window.MEMORY_ENGINE_TIMELINE?.hashText;
-    rebased.event_memory.big_summaries = (rebased.event_memory.big_summaries || []).map(item => {
-      const children = (item.childIds || []).map(id => smallMap.get(id)).filter(Boolean);
-      const validIds = children.length === (item.childIds || []).length ? children.map(c => c.id) : [];
-      const childDigest = validIds.length && typeof hashFn === 'function'
-        ? hashFn(children.map(c => `${c.id}:${c.revision || 1}:${c.sourceDigest || ''}`).join('|'))
-        : '';
-      return {
-        ...item,
-        childIds: validIds,
-        childDigest,
-        sourceRefs: [],
-        originChatId: getChatId(),
-        status: 'valid'
-      };
-    });
-    const covered = new Set((rebased.event_memory.big_summaries || []).flatMap(item => item.childIds || []));
-    let cursor = 0;
-    while (cursor < rebased.event_memory.small_summaries.length && covered.has(rebased.event_memory.small_summaries[cursor].id)) cursor++;
-    rebased.event_memory.big_summary_cursor = cursor;
     rebased.ongoing_facts = (rebased.ongoing_facts || []).map(item => ({
       ...item,
       startLayer: rebased.chatLayer,

@@ -79,7 +79,6 @@
         'memory-engine-data.js',
         'memory-engine-prompt.js',
         'memory-engine-small-summary-prompt.js',
-        'memory-engine-big-summary-prompt.js',
         'memory-engine.js'
       ],
       contracts: {
@@ -88,7 +87,6 @@
         MEMORY_ENGINE_DATA: ['loadState', 'saveState'],
         MEMORY_ENGINE_PROMPT: ['buildUserPrompt'],
         MEMORY_ENGINE_SMALL_SUMMARY_PROMPT: ['buildUserPrompt'],
-        MEMORY_ENGINE_BIG_SUMMARY_PROMPT: ['buildUserPrompt'],
         MEMORY_ENGINE: ['init', 'applyInjection', 'abort', 'isRunning']
       }
     },

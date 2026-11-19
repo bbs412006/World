@@ -1,7 +1,7 @@
 // memory-engine-settings.js — 记忆引擎独立设置（只复用 API/调度等实现，不共享配置值）
 window.MEMORY_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'memory_engine_settings';
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
   const DEFAULTS = Object.freeze({
     apiUrl: '',
     apiKey: '',
@@ -22,14 +22,14 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     evolveReadRounds: 1,
     manualReadRounds: 1,
     smallSummaryEveryX: 1,
-    bigSummaryEveryX: 5,
-    bigSummaryInjectLimit: 3,
+    smallSummaryInjectLimit: 8,
+    skipCurrentFloorSummary: false,
     summaryDelayFloors: 0,
+    autoRefillOnHistoryChange: true,
     hideCoveredRawText: true,
     recentRawRounds: 1,
     referenceRawRounds: 1,
     referenceSmallSummaryCount: 5,
-    referenceBigSummaryCount: 1,
     injectIntoPrompt: true,
     injectIntoWorldEngine: false,
     worldEngineMemoryLimit: 5,
@@ -75,8 +75,8 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     autoBackup: false,
     backfillBatchSize: 5,
     summaryBackfillSmallEveryX: 5,
-    summaryBackfillBigEveryX: 5,
     backfillRetries: 2,
+    backfillStartLayer: 0,
     backfillEndLayer: 0
   });
 
@@ -115,13 +115,16 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       evolveReadRounds: 1,
       manualReadRounds: 1,
       smallSummaryEveryX: clampInt(merged.smallSummaryEveryX, 1, 1, 20),
-      bigSummaryEveryX: clampInt(merged.bigSummaryEveryX, 5, 1, 100),
-      bigSummaryInjectLimit: clampInt(merged.bigSummaryInjectLimit, 3, 1, 50),
+      smallSummaryInjectLimit: clampInt(merged.smallSummaryInjectLimit, 8, 0, 50),
+      skipCurrentFloorSummary: merged.skipCurrentFloorSummary === true,
       summaryDelayFloors: clampInt(merged.summaryDelayFloors, 0, 0, 10),
+      autoRefillOnHistoryChange: merged.autoRefillOnHistoryChange !== false,
       recentRawRounds: clampInt(merged.recentRawRounds, 1, 0, 50),
       referenceRawRounds: clampInt(merged.referenceRawRounds, 1, 0, 20),
       referenceSmallSummaryCount: clampInt(merged.referenceSmallSummaryCount, 5, 0, 50),
-      referenceBigSummaryCount: clampInt(merged.referenceBigSummaryCount, 1, 0, 20),
+      backfillStartLayer: clampInt(merged.backfillStartLayer, 0, 0, 100000),
+      backfillEndLayer: clampInt(merged.backfillEndLayer, 0, 0, 100000),
+      summaryBackfillSmallEveryX: clampInt(merged.summaryBackfillSmallEveryX, 5, 1, 50),
       memoryInjectMaxChars: clampInt(merged.memoryInjectMaxChars, 3500, 500, 20000),
       recallArchivedSmallLimit: clampInt(merged.recallArchivedSmallLimit, 3, 0, 10),
       injectOngoingFactsLimit: clampInt(merged.injectOngoingFactsLimit, 15, 0, 50),

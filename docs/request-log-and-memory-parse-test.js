@@ -66,7 +66,6 @@ function makeSandbox(fetchImpl) {
     'memory-engine-timeline.js',
     'memory-engine-prompt.js',
     'memory-engine-small-summary-prompt.js',
-    'memory-engine-big-summary-prompt.js',
     'memory-engine.js'
   ]) {
     vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), sandbox, { filename: file });
