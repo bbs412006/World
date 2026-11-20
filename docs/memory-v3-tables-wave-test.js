@@ -13,6 +13,7 @@ function createEnv(initialChat) {
   const listeners = new Map();
   const calls = [];
   let injection = '';
+  const injectionSlots = {};
   let apiHandler = null;
   const chat = initialChat.map(m => ({ ...m }));
   const types = {
@@ -43,7 +44,10 @@ function createEnv(initialChat) {
         }
       }
     },
-    setExtensionPrompt(_name, content) { injection = content; },
+    setExtensionPrompt(name, content, position, depth) {
+      injectionSlots[name] = { content, position, depth };
+      injection = Object.values(injectionSlots).map(s => s.content).filter(Boolean).join('\n\n');
+    },
     saveChatConditional() { return Promise.resolve(); }
   };
 
@@ -100,6 +104,7 @@ function createEnv(initialChat) {
     chat,
     calls,
     getInjection: () => injection,
+    getInjectionSlots: () => plain(injectionSlots),
     setApiHandler(fn) { apiHandler = fn; }
   };
 }
@@ -521,7 +526,147 @@ function makeChat(rounds) {
     console.log('✓ 9. 无选项表/无角色交互选项 + 一键清空所有表数据（含自动备份与重置水位）通过');
   }
 
-  console.log('\n🎉 核心 7 表 + Wave 智能追平 + 纠错重试 + 同步删楼回退 + shujuku 可编辑提示词专项测试全部通过！');
+  // 10. 冷热双层注入（热层近深度 depth=1 实时状态 + 冷层高深度 depth=999 长期档案）与单层兼容切换
+  {
+    const env = createEnv(makeChat(2));
+    const dataApi = env.sandbox.MEMORY_ENGINE_DATA;
+    const settingsApi = env.sandbox.MEMORY_ENGINE_SETTINGS;
+    const st = dataApi.defaultState();
+    st.tables.global_state = [dataApi.normalizeTableRow('global_state', {
+      current_major_region: '江南', current_minor_region: '临安', current_location: '青石渡', cur_time: '2026-09-01 18:00'
+    }, 1)];
+    st.tables.protagonist_info = [dataApi.normalizeTableRow('protagonist_info', {
+      name: '林墨', identity_text: '散修剑客', current_condition: '精力充沛', location_name: '青石渡'
+    }, 1)];
+    st.tables.quests_events = [dataApi.normalizeTableRow('quests_events', {
+      quest_name: '护送密函', quest_type: '主线任务', issuer: '沈清秋', detail_desc: '三日内送至临安府', current_progress: '刚启程'
+    }, 1)];
+    st.tables.important_characters = [
+      dataApi.normalizeTableRow('important_characters', {
+        name: '沈清秋', brief_intro: '江南药师', presence_status: '在场', appearance: '青衫配竹簪', location_name: '青石渡'
+      }, 1),
+      dataApi.normalizeTableRow('important_characters', {
+        name: '周长老', brief_intro: '天机阁长老', presence_status: '离场', appearance: '白须道袍', location_name: '天机阁'
+      }, 2)
+    ];
+    st.tables.protagonist_skills = [dataApi.normalizeTableRow('protagonist_skills', {
+      skill_name: '听潮剑意', skill_type: '主动', skill_level: '二层', effect_desc: '借水势出剑'
+    }, 1)];
+    st.tables.inventory = [dataApi.normalizeTableRow('inventory', {
+      item_name: '断潮剑', quantity: '1', category: '武器', description: '玄铁短剑'
+    }, 1)];
+    st.tables.chronicle = [dataApi.normalizeTableRow('chronicle', {
+      code_index: 'AM0001', startLayer: 2, endLayer: 2, summary: '青石渡领受密函', chronicle_text: '林墨在青石渡接过沈清秋交付的密函。'
+    }, 1)];
+    dataApi.saveState(st);
+
+    // 默认冷热双层模式
+    const dualCombined = env.sandbox.MEMORY_ENGINE.applyInjection();
+    const slots = env.getInjectionSlots();
+    const hot = slots['memory-engine-memory'];
+    const cold = slots['memory-engine-memory-cold'];
+    assert.ok(hot && cold, '冷热双层注入应同时注册热层与冷层两个槽位');
+    assert.strictEqual(hot.position, 1);
+    assert.strictEqual(hot.depth, 1, '热层默认应注入在 depth=1');
+    assert.strictEqual(cold.position, 1);
+    assert.strictEqual(cold.depth, 999, '冷层默认应注入在 depth=999');
+    assert.ok(hot.content.startsWith('【长期记忆数据库·实时状态'), '热层应使用实时状态哨兵头');
+    assert.ok(cold.content.startsWith('【长期记忆数据库·长期档案'), '冷层应使用长期档案哨兵头');
+    assert.ok(hot.content.includes('<全局状态>') && hot.content.includes('<主角信息>') && hot.content.includes('<当前任务与事件>') && hot.content.includes('<重要角色详情>'), '热层应包含时空/主角/任务/在场角色详情');
+    assert.ok(!hot.content.includes('<近期纪要>') && !hot.content.includes('<背包物品>') && !hot.content.includes('<主角技能>'), '热层不应夹带冷层历史档案');
+    assert.ok(cold.content.includes('<已登场重要角色索引>') && cold.content.includes('<主角技能>') && cold.content.includes('<背包物品>') && cold.content.includes('<近期纪要>'), '冷层应包含角色索引/技能/物品/纪要');
+    assert.ok(!cold.content.includes('<全局状态>') && !cold.content.includes('<主角信息>'), '冷层不应重复包含热层实时状态');
+    assert.ok(dualCombined.includes('断潮剑') && dualCombined.includes('青石渡'), '合并返回文本应覆盖冷热两层');
+
+    // 支持自定义冷热位置与深度（例如冷层切 IN_PROMPT = 0，热层切 depth=2）
+    settingsApi.patchSettings({ hotInjectDepth: 2, coldInjectPosition: 0 });
+    env.sandbox.MEMORY_ENGINE.applyInjection();
+    const customSlots = env.getInjectionSlots();
+    assert.strictEqual(customSlots['memory-engine-memory'].depth, 2, '热层自定义深度应生效');
+    assert.strictEqual(customSlots['memory-engine-memory-cold'].position, 0, '冷层切换 IN_PROMPT 应生效');
+
+    // 切换回单层模式时应自动清空冷层槽位
+    settingsApi.patchSettings({ injectLayerMode: 'single', hotInjectDepth: 1 });
+    env.sandbox.MEMORY_ENGINE.applyInjection();
+    const singleSlots = env.getInjectionSlots();
+    assert.ok(singleSlots['memory-engine-memory'].content.includes('<全局状态>') && singleSlots['memory-engine-memory'].content.includes('<近期纪要>'), '单层模式应将全部区块合并至热层槽位');
+    assert.strictEqual(singleSlots['memory-engine-memory-cold'].content, '', '切换单层模式后必须清空冷层槽位防止重复注入');
+
+    // 切回双层后清空所有表数据必须同时清空两个槽位
+    settingsApi.patchSettings({ injectLayerMode: 'dual', coldInjectPosition: 1, coldInjectDepth: 999 });
+    env.sandbox.MEMORY_ENGINE.applyInjection();
+    env.sandbox.MEMORY_ENGINE.clearAllTableData();
+    const clearedSlots = env.getInjectionSlots();
+    assert.strictEqual(clearedSlots['memory-engine-memory'].content, '');
+    assert.strictEqual(clearedSlots['memory-engine-memory-cold'].content, '');
+    console.log('✓ 10. 冷热双层注入（分槽深度/位置自定义 + 单层兼容切换 + 清空双槽）通过');
+  }
+
+  // 11. 角色卡设定 ($C) + 用户人设 ($U) + 开场白 + 空表 Init Trigger 注入与技能/物品/任务初始化通过
+  {
+    const env = createEnv([
+      { is_user: false, name: '旁白', mes: '夜雨初歇，你背负家传寒霜剑踏入青石镇，脑海中回响着师父嘱托寻找失落玉简的誓言。' },
+      { is_user: true, name: '林墨', mes: '我推开客栈木门，环顾四周。' },
+      { is_user: false, name: '旁白', mes: '掌柜抬头打量了你一眼，递来一碗热茶。' }
+    ]);
+    env.ctx.characterId = 0;
+    env.ctx.characters = [{
+      name: '青石仙途',
+      description: '主角林墨初始掌握【御剑诀（主动·入门）】，随身携带【寒霜剑×1（武器）】【聚气丹×3（消耗品）】。开局主线任务：追查青石镇失落玉简的下落。',
+      scenario: '乱世修仙界·青石镇客栈'
+    }];
+    env.ctx.powerUserSettings = {
+      persona_description: '林墨，青云宗外门弟子，体质偏寒，自带被动技能【冰心诀（被动·一层）】。'
+    };
+
+    let capturedPrompt = '';
+    env.setApiHandler(async prompt => {
+      capturedPrompt = prompt;
+      return JSON.stringify({
+        global_state: { current_major_region: '修仙界', current_minor_region: '青石镇', current_location: '客栈', cur_time: '第一日 夜晚' },
+        protagonist_info: { name: '林墨', identity_text: '青云宗外门弟子', location_name: '客栈', current_condition: '冒雨初抵' },
+        important_characters: { upsert: [{ name: '掌柜', brief_intro: '青石镇客栈掌柜', presence_status: '在场', location_name: '客栈' }], delete: [] },
+        protagonist_skills: {
+          upsert: [
+            { skill_name: '御剑诀', skill_type: '主动', skill_level: '入门', effect_desc: '驱动飞剑攻敌' },
+            { skill_name: '冰心诀', skill_type: '被动', skill_level: '一层', effect_desc: '稳固心神抗寒' }
+          ],
+          delete: []
+        },
+        inventory: {
+          upsert: [
+            { item_name: '寒霜剑', quantity: '1', category: '武器', description: '家传寒铁长剑' },
+            { item_name: '聚气丹', quantity: '3', category: '消耗品', description: '恢复灵气' }
+          ],
+          delete: []
+        },
+        quests_events: {
+          upsert: [
+            { quest_name: '追查失落玉简', quest_type: '主线任务', issuer: '师父', detail_desc: '在青石镇寻找失落玉简下落', current_progress: '刚抵达客栈' }
+          ],
+          delete: []
+        },
+        chronicle: {
+          floor: 2, code_index: 'AM0001', summary: '林墨入客栈歇脚',
+          chronicle_text: '林墨推门进入青石镇客栈并环顾四周，客栈掌柜打量了他一眼后递上一碗热茶。'
+        }
+      });
+    });
+
+    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.ok(capturedPrompt.includes('<背景设定>'), '填表提示词必须包含 <背景设定> 区块');
+    assert.ok(capturedPrompt.includes('<User基础设定>') && capturedPrompt.includes('冰心诀'), '填表提示词必须喂入用户人设 ($U)');
+    assert.ok(capturedPrompt.includes('<角色卡设定>') && capturedPrompt.includes('御剑诀') && capturedPrompt.includes('寒霜剑'), '填表提示词必须喂入角色卡设定 ($C)');
+    assert.ok(capturedPrompt.includes('当前为空（请进行初始化）') && capturedPrompt.includes('Init Trigger（初始化触发规则）'), '空表必须展示 shujuku 风格 Init Trigger 引导模型初始化');
+
+    const finalState = env.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.strictEqual(finalState.tables.protagonist_skills.length, 2, '主角技能表应初始化出 2 项技能');
+    assert.strictEqual(finalState.tables.inventory.length, 2, '背包物品表应初始化出 2 件物品');
+    assert.strictEqual(finalState.tables.quests_events.length, 1, '任务与事件表应初始化出 1 条主线任务');
+    console.log('✓ 11. 角色卡设定($C) + 用户人设($U) + 空表 Init Trigger 触发技能/物品/任务初始化通过');
+  }
+
+  console.log('\n🎉 核心 7 表 + Wave 智能追平 + 纠错重试 + 同步删楼回退 + 冷热双层注入 + 角色卡初始化专项测试全部通过！');
 })().catch(err => {
   console.error('❌ 专项测试失败:', err);
   process.exit(1);

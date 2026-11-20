@@ -3,6 +3,7 @@ window.MEMORY_ENGINE = (function() {
   'use strict';
 
   const INJECTION_NAME = 'memory-engine-memory';
+  const INJECTION_COLD_NAME = 'memory-engine-memory-cold';
   const MUTATION_TRAILING_MS = 1200;
   const MUTATION_MAX_WAIT_MS = 3000;
 
@@ -229,11 +230,72 @@ window.MEMORY_ENGINE = (function() {
     catch (_) { return {}; }
   }
 
-  async function loadWorldbookContext(conversation, stOverride) {
+  function getCardAndPersonaContext(stOverride) {
+    const st = stOverride || settings();
+    if (st.includeCardContextInFill === false) {
+      return { persona: '', characterCard: '', opening: '' };
+    }
+    const ctx = context();
+    const win = typeof window !== 'undefined' ? window : null;
+
+    // 1. 用户人设（对齐 shujuku $U = getPersonaDescription_ACU）
+    let persona = '';
+    try {
+      const rawPersona = clean(
+        ctx?.powerUserSettings?.persona_description
+        || win?.power_user?.persona_description
+        || ''
+      );
+      const userName = clean(ctx?.name1 || win?.name1 || '');
+      if (rawPersona) {
+        persona = userName && !rawPersona.includes(userName)
+          ? `主角/用户名：${userName}\n${rawPersona}`
+          : rawPersona;
+      } else if (userName && userName !== 'User' && userName !== '用户') {
+        persona = `主角/用户名：${userName}`;
+      }
+      if (persona.length > 4000) persona = persona.slice(0, 4000) + '…';
+    } catch (_) { persona = ''; }
+
+    // 2. 角色卡设定（对齐 shujuku $C = getCharDescription_ACU + scenario）
+    let characterCard = '';
+    try {
+      const ch = ctx?.characters?.[ctx?.characterId]
+        || (win?.characters && win?.this_chid !== undefined ? win.characters[win.this_chid] : null)
+        || null;
+      const charName = clean(ch?.name || ch?.data?.name || ctx?.name2 || '');
+      const desc = clean(ch?.description || ch?.data?.description || ctx?.name2_description || '');
+      const personality = clean(ch?.personality || ch?.data?.personality || '');
+      const scenario = clean(ch?.scenario || ch?.data?.scenario || '');
+      const parts = [];
+      if (charName && desc) parts.push(`【角色/世界卡：${charName}】\n${desc}`);
+      else if (desc) parts.push(desc);
+      if (personality && !desc.includes(personality)) parts.push(`【设定补充/性格】\n${personality}`);
+      if (scenario && !desc.includes(scenario)) parts.push(`【场景/开局背景】\n${scenario}`);
+      characterCard = parts.join('\n\n');
+      if (characterCard.length > 12000) characterCard = characterCard.slice(0, 12000) + '…';
+    } catch (_) { characterCard = ''; }
+
+    // 3. 第 0 楼 AI 开场白（当首楼被设为开场白跳过且正在空表初始化时提供给状态表提取初始技能/物品/主线）
+    let opening = '';
+    try {
+      const all = chat();
+      if (st.firstLayerIsAiOpening !== false && all.length > 0 && all[0] && !all[0].is_user && !all[0].is_system) {
+        const rawOpening = clean(filterText(all[0].mes, st));
+        if (rawOpening) {
+          opening = rawOpening.length > 4000 ? rawOpening.slice(0, 4000) + '…' : rawOpening;
+        }
+      }
+    } catch (_) { opening = ''; }
+
+    return { persona, characterCard, opening };
+  }
+
+  async function loadWorldbookContext(scanText, stOverride) {
     const st = stOverride || settings();
     if (!st.worldbookEnabled || !window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection) return '';
     try {
-      return clean(await window.WORLD_ENGINE_WORLDBOOK.buildPromptSection(conversation, 'memory'));
+      return clean(await window.WORLD_ENGINE_WORLDBOOK.buildPromptSection(scanText, 'memory'));
     } catch (_) {
       return '';
     }
@@ -1000,8 +1062,16 @@ window.MEMORY_ENGINE = (function() {
     };
 
     const hints = getBridgeHints();
-    const worldbook = await loadWorldbookContext(batch.conversation, st);
+    const cardCtx = getCardAndPersonaContext(st);
     const refContext = options.skipReference ? '' : previousRawReference(batch.dialogueStart, st);
+    const openingAlreadyPresent = !cardCtx.opening
+      || batch.dialogueStart === 0
+      || (refContext && refContext.includes(cardCtx.opening.slice(0, Math.min(40, cardCtx.opening.length))));
+    const openingContext = openingAlreadyPresent ? '' : cardCtx.opening;
+    const wbScanText = [batch.conversation, cardCtx.persona, cardCtx.characterCard, openingContext, refContext]
+      .filter(Boolean)
+      .join('\n');
+    const worldbook = await loadWorldbookContext(wbScanText, st);
     const aiSetForPrompt = new Set(batch.aiLayers || []);
     const rangeMinPrompt = Number.isFinite(Number(options.overwriteStartLayer)) ? Number(options.overwriteStartLayer) : batch.startLayer;
     const rangeMaxPrompt = Number.isFinite(Number(options.overwriteEndLayer)) ? Number(options.overwriteEndLayer) : batch.endLayer;
@@ -1025,6 +1095,9 @@ window.MEMORY_ENGINE = (function() {
       targetSheets,
       tables: baseState?.tables || data().emptyTables(),
       currentStoryTime: currentStoryTimeFrom(baseState),
+      personaDescription: cardCtx.persona,
+      characterCard: cardCtx.characterCard,
+      openingContext,
       worldbook,
       outlineFocusHint: hints.outlineFocusHint || '',
       worldContextHint: hints.worldContextHint || '',
@@ -2189,9 +2262,26 @@ window.MEMORY_ENGINE = (function() {
     hiddenSyncPromise = p;
   }
 
+  function resolveInjectionPlacement(st) {
+    const mode = st?.injectLayerMode === 'single' ? 'single' : 'dual';
+    const hotPos = [0, 1, 2].includes(Number(st?.hotInjectPosition)) ? Number(st.hotInjectPosition) : 1;
+    const hotDepth = Number.isFinite(Number(st?.hotInjectDepth))
+      ? Math.max(0, Math.min(20, parseInt(st.hotInjectDepth, 10)))
+      : 1;
+    const coldPos = [0, 1, 2].includes(Number(st?.coldInjectPosition)) ? Number(st.coldInjectPosition) : 1;
+    const coldDepth = Number.isFinite(Number(st?.coldInjectDepth))
+      ? Math.max(1, Math.min(9999, parseInt(st.coldInjectDepth, 10)))
+      : 999;
+    return { mode, hotPos, hotDepth, coldPos, coldDepth };
+  }
+
   function clearInjection() {
     const ctx = context();
-    if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, '', 1, 1);
+    const p = resolveInjectionPlacement(settings());
+    if (typeof ctx?.setExtensionPrompt === 'function') {
+      ctx.setExtensionPrompt(INJECTION_NAME, '', p.hotPos, p.hotDepth);
+      ctx.setExtensionPrompt(INJECTION_COLD_NAME, '', p.coldPos, p.coldDepth);
+    }
   }
 
   function applyInjection(options) {
@@ -2228,28 +2318,47 @@ window.MEMORY_ENGINE = (function() {
     })();
     const recalledKeys = new Set((vectorRecall?.hits || []).map(h => h.key));
 
-    const headerLine = '【长期记忆数据库（以下为客观已记录事实，请保持连贯）】\n';
+    const placement = resolveInjectionPlacement(st);
+    const isDual = placement.mode === 'dual';
+    const singleHeader = '【长期记忆数据库（以下为客观已记录事实，请保持连贯）】\n';
+    const hotHeader = '【长期记忆数据库·实时状态（以下为当前客观状态，请严格保持时空与人物连贯）】\n';
+    const coldHeader = '【长期记忆数据库·长期档案（以下为已记录的长期设定与编年纪要，请保持连贯）】\n';
     const budget = Math.max(200, parseInt(st.memoryInjectMaxChars, 10) || 8000);
-    const sections = [];
-    let usedChars = headerLine.length;
-    const pushSection = (title, body) => {
+
+    const hotSections = [];
+    const coldSections = [];
+    const singleSections = [];
+    const hotTitles = [];
+    const coldTitles = [];
+    let usedChars = isDual ? 0 : singleHeader.length;
+
+    const pushSection = (title, body, tier = 'cold') => {
       const text = clean(body);
       if (!text) return false;
+      const targetList = isDual ? (tier === 'hot' ? hotSections : coldSections) : singleSections;
+      const targetTitles = tier === 'hot' ? hotTitles : coldTitles;
+      let overhead = targetList.length > 0 ? 2 : 0;
+      if (isDual && targetList.length === 0) {
+        overhead += (tier === 'hot' ? hotHeader.length : coldHeader.length);
+        if (hotSections.length > 0 || coldSections.length > 0) overhead += 2;
+      }
       const block = `<${title}>\n${text}\n</${title}>`;
-      if (usedChars + block.length + 2 > budget) {
-        const remain = budget - usedChars - title.length * 2 - 12;
+      if (usedChars + overhead + block.length > budget) {
+        const remain = budget - usedChars - overhead - title.length * 2 - 10;
         if (remain < 40) return false;
         const trimmed = `<${title}>\n${text.slice(0, remain)}…\n</${title}>`;
-        sections.push(trimmed);
-        usedChars += trimmed.length + 2;
+        targetList.push(trimmed);
+        targetTitles.push(title);
+        usedChars += overhead + trimmed.length;
         return false;
       }
-      sections.push(block);
-      usedChars += block.length + 2;
+      targetList.push(block);
+      targetTitles.push(title);
+      usedChars += overhead + block.length;
       return true;
     };
 
-    // 1. 全局数据表
+    // 1. 全局数据表（热层 · 实时时空）
     const gs = tables.global_state?.[0];
     if (gs) {
       const locParts = [gs.current_major_region, gs.current_minor_region, gs.current_location].map(clean).filter(Boolean);
@@ -2261,10 +2370,10 @@ window.MEMORY_ENGINE = (function() {
       pushSection('全局状态', [
         locParts.length ? `当前地点：${locParts.join(' · ')}` : '',
         timeParts.length ? timeParts.join('｜') : ''
-      ].filter(Boolean).join('\n'));
+      ].filter(Boolean).join('\n'), 'hot');
     }
 
-    // 2. 主角信息表
+    // 2. 主角信息表（热层 · 实时主角状态）
     const pro = tables.protagonist_info?.[0];
     if (pro) {
       const lines = [
@@ -2274,20 +2383,20 @@ window.MEMORY_ENGINE = (function() {
         pro.appearance ? `外貌：${pro.appearance}` : '',
         pro.belongings ? `随身财物：${pro.belongings}` : ''
       ].filter(Boolean);
-      pushSection('主角信息', lines.join('\n'));
+      pushSection('主角信息', lines.join('\n'), 'hot');
     }
 
-    // 3. 任务与事件表
+    // 3. 任务与事件表（热层 · 当前目标与时限）
     if (tables.quests_events?.length) {
       const qLines = tables.quests_events.map(q => {
         const meta = [q.issuer ? `发布：${q.issuer}` : '', q.current_progress ? `进度：${q.current_progress}` : '', q.time_limit ? `时限：${q.time_limit}` : ''].filter(Boolean).join('｜');
         const extra = [q.reward ? `奖励：${q.reward}` : '', q.penalty ? `惩罚：${q.penalty}` : ''].filter(Boolean).join('｜');
         return `- [${q.quest_type || '支线任务'}] ${q.quest_name}${meta ? `（${meta}）` : ''}：${q.detail_desc || ''}${extra ? ` [${extra}]` : ''}`;
       });
-      pushSection('当前任务与事件', qLines.join('\n'));
+      pushSection('当前任务与事件', qLines.join('\n'), 'hot');
     }
 
-    // 4. 重要角色表（双层注入：全员索引 + 在场/正文提及/向量召回角色详情）
+    // 4. 重要角色表（在场/正文提及/向量召回详情进热层；全员极简索引进冷层）
     if (tables.important_characters?.length) {
       const activeOrMentioned = [];
       const indexLines = [];
@@ -2314,12 +2423,12 @@ window.MEMORY_ENGINE = (function() {
           ].filter(Boolean).join('｜');
           return body ? `${head}\n  ${body}` : head;
         });
-        pushSection('重要角色详情', detailLines.join('\n'));
+        pushSection('重要角色详情', detailLines.join('\n'), 'hot');
       }
-      pushSection('已登场重要角色索引', indexLines.join('\n'));
+      pushSection('已登场重要角色索引', indexLines.join('\n'), 'cold');
     }
 
-    // 5. 主角技能表 & 背包物品表（向量命中的条目优先排前）
+    // 5. 主角技能表 & 背包物品表（冷层 · 中低频长期能力与装备，向量命中优先排前）
     if (tables.protagonist_skills?.length) {
       const sortedSkills = [...tables.protagonist_skills].sort((a, b) => {
         const sa = Number(vectorRecall?.entityScores?.[`ability:${a.rowId}`] || 0);
@@ -2329,7 +2438,7 @@ window.MEMORY_ENGINE = (function() {
       const sLines = sortedSkills.map(s =>
         `- ${s.skill_name} [${s.skill_type || '主动'}${s.skill_level ? `·${s.skill_level}` : ''}]：${s.effect_desc || ''}`
       );
-      pushSection('主角技能', sLines.join('\n'));
+      pushSection('主角技能', sLines.join('\n'), 'cold');
     }
     if (tables.inventory?.length) {
       const sortedItems = [...tables.inventory].sort((a, b) => {
@@ -2340,10 +2449,10 @@ window.MEMORY_ENGINE = (function() {
       const iLines = sortedItems.map(item =>
         `- ${item.item_name} ×${item.quantity || '1'}${item.category ? ` [${item.category}]` : ''}${item.description ? `：${item.description}` : ''}`
       );
-      pushSection('背包物品', iLines.join('\n'));
+      pushSection('背包物品', iLines.join('\n'), 'cold');
     }
 
-    // 6. 纪要表（最近 N 条完整直注 + 早期归档 AM 索引 + 关键词/向量精准召回）
+    // 6. 纪要表（冷层 · 最近 K 条完整直注 + 早期归档 AM 索引 + 关键词/向量精准召回）
     const validChronicle = (tables.chronicle || []).filter(r => r && r.status !== 'stale' && r.status !== 'failed' && clean(r.chronicle_text));
     const injectLimit = Math.max(0, parseInt(st.smallSummaryInjectLimit, 10) ?? 8);
     const recentRows = injectLimit > 0 ? validChronicle.slice(-injectLimit) : [];
@@ -2356,7 +2465,7 @@ window.MEMORY_ENGINE = (function() {
         const head = `[${r.code_index} · 楼层 ${span}${r.time_span ? ` · ${r.time_span}` : ''}]`;
         return `${head} ${r.chronicle_text}${r.key_dialogue ? `\n  重要对话：${r.key_dialogue}` : ''}`;
       });
-      pushSection('近期纪要', lines.join('\n'));
+      pushSection('近期纪要', lines.join('\n'), 'cold');
     }
 
     const recallLimit = Math.max(0, parseInt(st.recallArchivedSmallLimit, 10) || 3);
@@ -2377,7 +2486,7 @@ window.MEMORY_ENGINE = (function() {
         const rLines = recalled.map(r =>
           `[${r.code_index} · 楼层 ${formatLayerSpan(r.startLayer, r.endLayer)}${r.time_span ? ` · ${r.time_span}` : ''}] ${r.chronicle_text}${r.key_dialogue ? `\n  重要对话：${r.key_dialogue}` : ''}`
         );
-        pushSection('记忆回溯', rLines.join('\n'));
+        pushSection('记忆回溯', rLines.join('\n'), 'cold');
       }
     }
 
@@ -2385,15 +2494,24 @@ window.MEMORY_ENGINE = (function() {
       const idxLines = archivedRows.map(r =>
         `- ${r.code_index}${r.time_span ? ` | ${r.time_span}` : ''} | ${r.summary || clean(r.chronicle_text).slice(0, 30)}`
       );
-      pushSection('已发生的事件概览', idxLines.join('\n'));
+      pushSection('已发生的事件概览', idxLines.join('\n'), 'cold');
     }
 
-    const content = sections.length
-      ? `${headerLine}${sections.join('\n\n')}`
+    const hotContent = isDual
+      ? (hotSections.length ? `${hotHeader}${hotSections.join('\n\n')}` : '')
+      : (singleSections.length ? `${singleHeader}${singleSections.join('\n\n')}` : '');
+    const coldContent = isDual
+      ? (coldSections.length ? `${coldHeader}${coldSections.join('\n\n')}` : '')
       : '';
+    const content = isDual
+      ? [coldContent, hotContent].filter(Boolean).join('\n\n')
+      : hotContent;
+    const totalSections = isDual ? (hotSections.length + coldSections.length) : singleSections.length;
+
     const ctx = context();
     if (typeof ctx?.setExtensionPrompt === 'function') {
-      ctx.setExtensionPrompt(INJECTION_NAME, content, 1, 1);
+      ctx.setExtensionPrompt(INJECTION_NAME, hotContent, placement.hotPos, placement.hotDepth);
+      ctx.setExtensionPrompt(INJECTION_COLD_NAME, coldContent, placement.coldPos, placement.coldDepth);
     }
 
     // 同步隐藏已由有效纪要覆盖的旧楼层原文（保留 recentRawRounds 轮原文可见）
@@ -2408,12 +2526,31 @@ window.MEMORY_ENGINE = (function() {
 
     lastInjectionDebug = {
       at: Date.now(),
+      mode: placement.mode,
       chars: content.length,
       budget,
-      sections: sections.length,
+      sections: totalSections,
+      hot: {
+        slot: INJECTION_NAME,
+        position: placement.hotPos,
+        depth: placement.hotDepth,
+        chars: hotContent.length,
+        sections: isDual ? hotSections.length : singleSections.length,
+        titles: isDual ? hotTitles : [...hotTitles, ...coldTitles],
+        content: hotContent
+      },
+      cold: {
+        slot: INJECTION_COLD_NAME,
+        position: placement.coldPos,
+        depth: placement.coldDepth,
+        chars: coldContent.length,
+        sections: isDual ? coldSections.length : 0,
+        titles: isDual ? coldTitles : [],
+        content: coldContent
+      },
       content
     };
-    try { window.WORLD_ENGINE_INJECT_INSPECTOR?.record?.('memory', content, { budget, sections: sections.length }); } catch (_) {}
+    try { window.WORLD_ENGINE_INJECT_INSPECTOR?.record?.('memory', content, { budget, sections: totalSections, mode: placement.mode }); } catch (_) {}
     return content;
   }
 

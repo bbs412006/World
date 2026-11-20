@@ -109,10 +109,11 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 - effect_desc: 效果描述（当前等级下的具体效果）
 
 【增删改规则】
+- 初始化（当前表为空时）：游戏初始化时，根据<背景设定>（用户人设、角色卡设定、世界书）与开局剧情为主角添加全部初始技能/天赋/能力写入 upsert。
 - 新增：主角获得新的技能时写入 upsert。
 - 更新：已有技能升级或效果变化时写入 upsert 更新其 skill_level 与 effect_desc。
 - 删除：仅在技能因剧情被剥夺、遗忘或替换时写入 delete。
-- 无变化输出 { "upsert": [], "delete": [] }。`,
+- 已有数据且本轮无变化输出 { "upsert": [], "delete": [] }。`,
 
     inventory: `【5. 背包物品表 (inventory)｜按 item_name 主键】
 记录主角拥有的所有物品、装备。结构：{ "upsert": [ {...} ], "delete": ["已完全消耗/丢弃/摧毁的物品名"] }。
@@ -124,10 +125,11 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 - category: 类别（如"武器"、"消耗品"、"关键物品"、"杂物"等）
 
 【增删改规则】
+- 初始化（当前表为空时）：游戏初始化时，根据<背景设定>（用户人设、角色卡设定、世界书）与开局剧情添加主角的初始携带物品、武器、装备或关键道具写入 upsert。
 - 新增：主角获得背包中没有的全新物品时写入 upsert。
 - 更新：已有物品数量增减或状态变化（如损坏/修复）时写入 upsert。
 - 删除：物品被完全消耗、交出、丢弃或摧毁（数量归零）时写入 delete。
-- 无变化输出 { "upsert": [], "delete": [] }。`,
+- 已有数据且本轮无变化输出 { "upsert": [], "delete": [] }。`,
 
     quests_events: `【6. 任务与事件表 (quests_events)｜按 quest_name 主键】
 记录所有当前正在进行的任务、约定与待解事件。结构：{ "upsert": [ {...} ], "delete": ["已完成/失败/过期的任务名"] }。
@@ -143,10 +145,11 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 - penalty: 惩罚（任务失败的后果）
 
 【增删改规则】
+- 初始化（当前表为空时）：游戏初始化时，根据<背景设定>与开局剧情提取并添加核心主线任务/目标及已明确触发的支线任务写入 upsert。
 - 新增：主角接取或触发新的主线或支线任务时写入 upsert。
 - 更新：任务取得关键进展或时限变动时写入 upsert 更新 current_progress 等字段。
 - 删除：任务完成、失败或过期失效时写入 delete。
-- 无变化输出 { "upsert": [], "delete": [] }。`,
+- 已有数据且本轮无变化输出 { "upsert": [], "delete": [] }。`,
 
     chronicle: `【7. 纪要表 (chronicle)｜轮次日志，每轮交互结束后必须独立插入一条新记录，禁止删除与修改旧行】
 记录剧情推进的客观编年纪要。
@@ -173,20 +176,31 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 2. 重要对话（key_dialogue）：仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约/约定的原文台词，标明说话人。排除寒暄、重复、情绪感叹。通常 1~3 句，最多 5 句，总长度简洁克制。`
   });
 
+  // 对齐 shujuku 各表原版 initNode（当表为空时自动注入 Init Trigger 引导初始化）
+  const DEFAULT_SHEET_INIT_TRIGGERS = Object.freeze({
+    global_state: '游戏初始化时，根据<背景设定>、开局对话与【待提取对话】初始化主角当前所在三级地点与初始时间（prev_scene_time 留空 ""）。',
+    protagonist_info: '游戏初始化时，根据<User基础设定>、<角色卡设定>与开局对话初始化主角的姓名、性别、年龄、外貌、身份、所在地点、近况与随身财物。',
+    important_characters: '游戏初始化时，记录开局设定或当前对话中已正式登场、对剧情产生直接作用的重要角色。',
+    protagonist_skills: '游戏初始化时，根据<背景设定>（用户人设、角色卡设定、世界书）与开局剧情为主角添加全部初始技能/能力。',
+    inventory: '游戏初始化时，根据<背景设定>（用户人设、角色卡设定、世界书）与开局剧情添加主角的初始携带物品、武器或装备。',
+    quests_events: '游戏初始化时，根据<背景设定>与开局剧情添加当前核心主线任务/目标及已触发的支线任务。',
+    chronicle: '按【纪要分轮清单】客观记录【待提取对话】中实际发生的剧情，不得把静态背景设定写成新事件。'
+  });
+
   // 完整对齐 shujuku 默认填表主提示词（DEFAULT_CHAR_CARD_PROMPT_ACU + 严格 JSON 协议）
   const DEFAULT_MAIN_SYSTEM_PROMPT = `你是【填表AI】，负责根据用户提供的资料对表格数据执行增删改操作。
 
 ## 核心任务
 依据三类资料来源执行表格编辑：
-- <背景设定> / 【世界书背景】：故事及人物设定（仅作称呼与背景辨认，不得把历史设定抄写成新事件）
+- <背景设定>（含<User基础设定>、<角色卡设定>与<世界书背景>）：故事及人物初始设定（空表初始化时须据此提取主角初始属性、初始技能、初始携带物品与开局主线任务；但不得把静态设定编造成新发生的剧情纪要）
 - 【待提取对话】：本轮/本批实际发生的故事正文
-- 【当前数据库表状态】：之前的数据作为填表基础
+- 【当前数据库表状态】：之前的数据作为填表基础（标注「当前为空（请进行初始化）」的表必须执行 Init Trigger 初始化）
 
 ## 内部思考与语气校准（在内部完成，不要把思考过程写入最终 JSON 回复）
-1. 分析当前轮次的剧情变化
-2. 逐表阅读本次所有目标表的 Note 与填表规则
-3. 根据规则确定需要新增、更新或删除的表格和字段
-4. 逐步核对每项操作是否都有【待提取对话】直接支持
+1. 分析当前轮次的剧情变化，并检查哪些目标表当前为空需要初始化
+2. 逐表阅读本次所有目标表的 Note 与填表规则（含空表 Init Trigger）
+3. 根据规则确定需要初始化、新增、更新或删除的表格和字段
+4. 核对每项写入是否有<背景设定>（仅限空表初始化/设定核对）或【待提取对话】支持
 5. 针对纪要表的额外规则：如果本次目标表包含纪要表 (chronicle)，必须严格按【纪要分轮清单】为每一个待填轮次各插入一条独立的总结记录（单轮输出 1 条，N 轮输出含 N 条记录的数组），严禁把多轮 AI 回复合并成 1 条，也不得遗漏或留空。
 6. 日志与纪要语气校准：你在思考纪要时，必须区分“正常恋爱互动”与“暗黑主从文风”。你可以使用正常的交流词汇（如：提议、要求、同意、拒绝、引导、配合、安抚），但【绝对禁止】将情侣间的普通调情与互动过度解读为“权力掌控”、“剥夺反抗”、“精神支配”、“屈服”等单向压迫词汇！
 
@@ -194,9 +208,10 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 1. 必须逐表阅读下方每张表的 Note 约束，严格遵守其中的列定义、正反例与格式规则。
 2. 单表 Note 的约束优先级最高，高于通用填表经验。
 3. 若 Note 要求禁止修改、禁止删除、格式固定或编码递增，必须严格执行。
-4. 事实严谨：所有新增与修改必须由【待提取对话】直接支持，严禁编造未发生情节，严禁把【只读前置对话参考】中的旧事重复入库。
-5. 增量保留：单行表和主键表更新已有记录时，未变化的字段填 "" 即可保留本地原值，只填写新增或变化字段；完全没有变化的表输出 null（单行表）或 { "upsert": [], "delete": [] }（主键表）。
-6. 精准范围：本次仅允许输出指定目标表的顶层字段：[{{TARGET_SHEETS}}]，不要输出未要求的表，也不要增加未声明字段。
+4. 空表初始化优先：当状态表（global_state / protagonist_info / important_characters / protagonist_skills / inventory / quests_events）在【当前数据库表状态】中标明「当前为空（请进行初始化）」时，必须主动结合<背景设定>、开局开场白/前置参考与【待提取对话】，按该表的 Init Trigger 提取主角初始信息、初始技能、初始物品与开局主线任务；不要因为它们出自角色卡设定或开场白而非本轮新获得就留空！
+5. 增量事实严谨：已初始化的状态表仅按最新变化增删改；纪要表 (chronicle) 始终严格只记录【待提取对话】中实际发生的剧情，严禁编造未发生情节，严禁把静态背景设定或【前置对话参考】中的旧事重复写成纪要。
+6. 增量保留：单行表和主键表更新已有记录时，未变化的字段填 "" 即可保留本地原值，只填写新增或变化字段；已有数据且完全没有变化的表输出 null（单行表）或 { "upsert": [], "delete": [] }（主键表）。
+7. 精准范围：本次仅允许输出指定目标表的顶层字段：[{{TARGET_SHEETS}}]，不要输出未要求的表，也不要增加未声明字段。
 
 ## 本次目标表规则（Note 约束，优先级最高）
 {{SHEET_RULES}}{{TONE_PROMPT}}
@@ -329,9 +344,11 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     catch (_) { return {}; }
   }
 
-  function isLegacyMergedDefaultMainPrompt(text) {
+  function isLegacyDefaultMainPrompt(text) {
+    if (!text.includes('你是【填表AI】，负责根据用户提供的资料对表格数据执行增删改操作。')) return false;
     return text.includes('那么本轮就必须插入一条新的总结记录，不得遗漏或留空。')
-      && text.includes('你是【填表AI】，负责根据用户提供的资料对表格数据执行增删改操作。');
+      || (text.includes('- <背景设定> / 【世界书背景】：故事及人物设定（仅作称呼与背景辨认，不得把历史设定抄写成新事件）')
+        && text.includes('4. 事实严谨：所有新增与修改必须由【待提取对话】直接支持'));
   }
 
   function isLegacyMergedDefaultChronicleRule(text) {
@@ -345,18 +362,38 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       && text.includes('3. interaction_options 必须同时遵循下述要求：');
   }
 
+  function isLegacyNoInitRule(sheetKey, text) {
+    if (sheetKey === 'protagonist_skills') {
+      return text.startsWith('【4. 主角技能表 (protagonist_skills)｜按 skill_name 主键】')
+        && !text.includes('初始化（当前表为空时）')
+        && text.includes('- 无变化输出 { "upsert": [], "delete": [] }。');
+    }
+    if (sheetKey === 'inventory') {
+      return text.startsWith('【5. 背包物品表 (inventory)｜按 item_name 主键】')
+        && !text.includes('初始化（当前表为空时）')
+        && text.includes('- 无变化输出 { "upsert": [], "delete": [] }。');
+    }
+    if (sheetKey === 'quests_events') {
+      return text.startsWith('【6. 任务与事件表 (quests_events)｜按 quest_name 主键】')
+        && !text.includes('初始化（当前表为空时）')
+        && text.includes('- 无变化输出 { "upsert": [], "delete": [] }。');
+    }
+    return false;
+  }
+
   function getEffectiveMainSystemPrompt(customOverride) {
     const override = clean(customOverride);
-    if (override && !isLegacyMergedDefaultMainPrompt(override)) return override;
+    if (override && !isLegacyDefaultMainPrompt(override)) return override;
     const saved = clean(readSettingsSafe().tableFillSystemPrompt);
-    if (saved && !isLegacyMergedDefaultMainPrompt(saved)) return saved;
+    if (saved && !isLegacyDefaultMainPrompt(saved)) return saved;
     return DEFAULT_MAIN_SYSTEM_PROMPT;
   }
 
   function getEffectiveSheetRule(sheetKey, customRulesOverride) {
     if (!ALL_TABLES.includes(sheetKey)) return '';
     const isStaleDefault = text => (sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(text))
-      || (sheetKey === 'important_characters' && isLegacyImportantCharsRule(text));
+      || (sheetKey === 'important_characters' && isLegacyImportantCharsRule(text))
+      || isLegacyNoInitRule(sheetKey, text);
     const fromOpt = clean(customRulesOverride?.[sheetKey]);
     if (fromOpt && !isStaleDefault(fromOpt)) return fromOpt;
     const fromSettings = clean(readSettingsSafe().tableFillSheetRules?.[sheetKey]);
@@ -415,7 +452,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     const src = tables && typeof tables === 'object' ? tables : {};
     const opts = options || {};
     const chronicleLimit = Math.max(1, parseInt(opts.referenceChronicleCount, 10) || 5);
-    const displaySheets = Array.from(new Set(['global_state', 'protagonist_info', ...resolveTargetSheets(targetSheets)]));
+    const resolvedTargets = resolveTargetSheets(targetSheets);
+    const targetSet = new Set(resolvedTargets);
+    const displaySheets = Array.from(new Set(['global_state', 'protagonist_info', ...resolvedTargets]));
     const blocks = [];
 
     for (const key of displaySheets) {
@@ -435,7 +474,12 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       const header = `| row_id | ${cols.map(c => c.label).join(' | ')} |`;
       const sep = `| --- | ${cols.map(() => '---').join(' | ')} |`;
       if (!rows.length) {
-        blocks.push(`### ${schema.name} (${key}) — 当前为空\n${header}\n${sep}`);
+        if (targetSet.has(key) && key !== 'chronicle') {
+          const initTrigger = DEFAULT_SHEET_INIT_TRIGGERS[key] || '该表格为空，请根据背景设定与开局剧情进行初始化。';
+          blocks.push(`### ${schema.name} (${key}) — 当前为空（请进行初始化）\n- Init Trigger（初始化触发规则）：${initTrigger}\n${header}\n${sep}`);
+        } else {
+          blocks.push(`### ${schema.name} (${key}) — 当前为空\n${header}\n${sep}`);
+        }
         continue;
       }
       const body = rows.map(row => {
@@ -459,6 +503,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     const targetSheets = resolveTargetSheets(input.targetSheets);
     const tables = input.tables || {};
     const currentStoryTime = clean(input.currentStoryTime);
+    const personaDescription = clean(input.personaDescription);
+    const characterCard = clean(input.characterCard);
+    const openingContext = clean(input.openingContext);
     const worldbook = clean(input.worldbook);
     const outlineFocusHint = clean(input.outlineFocusHint);
     const worldContextHint = clean(input.worldContextHint);
@@ -470,6 +517,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     const minChars = Math.max(50, parseInt(input.minChars, 10) || 500);
     const nextCode = clean(input.nextChronicleCode) || window.MEMORY_ENGINE_DATA?.nextChronicleCode?.(tables.chronicle) || 'AM0001';
     const rangeLabel = startLayer === endLayer ? `楼层 ${endLayer}` : `楼层 ${startLayer} 至 ${endLayer}`;
+    const hasEmptyStatusSheets = targetSheets.some(k => k !== 'chronicle' && (!Array.isArray(tables[k]) || tables[k].length === 0));
 
     const chronGroups = Array.isArray(input.chronicleGroups) && input.chronicleGroups.length ? input.chronicleGroups : null;
 
@@ -499,7 +547,28 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       beforeLayer: input.beforeLayer
     });
     if (mdTables) {
-      sections.push(`【当前数据库表状态（只读基线，仅输出本段新增/变动）】\n${mdTables}`);
+      sections.push(`【当前数据库表状态（基线；标明「当前为空（请进行初始化）」的表请结合背景设定与开局剧情初始化，已有数据的表仅输出新增/变动）】\n${mdTables}`);
+    }
+
+    // 对齐 shujuku 的 <背景设定> 区块（$U 用户人设 + $C 角色卡设定 + $4 世界书背景 + 可选开场白参考）
+    const bgParts = [];
+    if (personaDescription) {
+      bgParts.push(`<User基础设定>\n${personaDescription}\n</User基础设定>`);
+    }
+    if (characterCard) {
+      bgParts.push(`<角色卡设定>\n${characterCard}\n</角色卡设定>`);
+    }
+    if (worldbook) {
+      bgParts.push(`<世界书背景>\n${worldbook}\n</世界书背景>`);
+    }
+    if (openingContext && hasEmptyStatusSheets) {
+      bgParts.push(`<开局开场白参考>\n${openingContext}\n</开局开场白参考>`);
+    }
+    if (bgParts.length) {
+      const bgNote = hasEmptyStatusSheets
+        ? '以下为故事与人物基础设定：请用于称呼辨认，并在上方状态表当前为空时主动提取主角初始信息、初始技能、初始携带物品与开局主线任务；但不得把静态设定写成新的剧情纪要。'
+        : '以下为故事与人物基础设定（仅用于辨认设定与称呼，不得把静态设定抄写成新发生的剧情纪要）。';
+      sections.push(`<背景设定>\n${bgNote}\n\n${bgParts.join('\n\n')}\n</背景设定>`);
     }
 
     if (worldContextHint) {
@@ -508,11 +577,11 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     if (outlineFocusHint) {
       sections.push(`【当前公开剧情焦距（仅作主题对齐，未发生情节不得写入）】\n${outlineFocusHint}`);
     }
-    if (worldbook) {
-      sections.push(`【世界书背景（仅用于辨认设定与称呼，不得直接抄入新事件）】\n${worldbook}`);
-    }
     if (referenceContext) {
-      sections.push(`【只读前置对话参考（仅用于理解前因指代，勿重复填表）】\n${referenceContext}`);
+      const refHeader = hasEmptyStatusSheets
+        ? '【前置对话参考（用于理解前因指代；若上方状态表当前为空需要初始化，可从中提取初始地点、主角、技能、物品与主线任务；纪要表严禁将前置对话重复入库）】'
+        : '【只读前置对话参考（仅用于理解前因指代，勿重复填表）】';
+      sections.push(`${refHeader}\n${referenceContext}`);
     }
 
     sections.push(`【待提取对话】\n${conversation || '（空）'}`);
@@ -563,6 +632,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     ALL_TABLES,
     DEFAULT_MAIN_SYSTEM_PROMPT,
     DEFAULT_SHEET_RULES,
+    DEFAULT_SHEET_INIT_TRIGGERS,
     SYSTEM_PROMPT,
     TASK_PROMPT,
     getEffectiveMainSystemPrompt,

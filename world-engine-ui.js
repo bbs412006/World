@@ -2062,6 +2062,12 @@ window.WORLD_ENGINE_UI = (function() {
     const worldEngineMemoryLimit = Math.max(1, parseInt(settings.worldEngineMemoryLimit) || 5);
     const searchDepth = Math.max(1, parseInt(settings.searchDepth) || 5);
     const memoryInjectMaxChars = Math.max(500, parseInt(settings.memoryInjectMaxChars) || 8000);
+    const injectLayerMode = settings.injectLayerMode === 'single' ? 'single' : 'dual';
+    const hotInjectPosition = [0, 1, 2].includes(Number(settings.hotInjectPosition)) ? Number(settings.hotInjectPosition) : 1;
+    const hotInjectDepth = Number.isFinite(Number(settings.hotInjectDepth)) ? Math.max(0, Math.min(20, parseInt(settings.hotInjectDepth, 10))) : 1;
+    const coldInjectPosition = [0, 1, 2].includes(Number(settings.coldInjectPosition)) ? Number(settings.coldInjectPosition) : 1;
+    const coldInjectDepth = Number.isFinite(Number(settings.coldInjectDepth)) ? Math.max(1, Math.min(9999, parseInt(settings.coldInjectDepth, 10))) : 999;
+    const includeCardContextInFill = settings.includeCardContextInFill !== false;
     const recallArchivedSmallLimit = Math.max(0, parseInt(settings.recallArchivedSmallLimit ?? 3) || 0);
     const sharedCoordinationMode = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || settings.coordinationMode || 'stagger-serial';
     const coordinationMode = sharedCoordinationMode === 'independent' ? 'independent' : 'stagger-serial';
@@ -2172,7 +2178,42 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="checkbox" id="we-memory-inject" ${settings.injectIntoPrompt !== false ? 'checked' : ''}>
           注入核心 7 表长期记忆
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">采用 <b>shujuku 双层省 Token 注入架构</b>：重要角色表输出全员极简索引，并仅对「在场 / 最近 N 层正文提及 / 大纲活跃 / 向量召回」的角色展开完整详情；纪要表直注最新 K 条，更早纪要自动归档为 <code>AMXXXX</code> 概览索引并按关键词与 Embedding/Rerank 语义按需回溯。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">采用 <b>冷热双层注入 + 角色/纪要省 Token 架构</b>：不污染角色卡世界书，同时将稳定档案前置以提升 Prompt Cache 命中率、保持最新对话流不被打断。</div>
+      </div>
+      <div class="we-input-group">
+        <label>注入分层模式</label>
+        <select id="we-memory-inject-layer-mode" style="width:100%;">
+          <option value="dual" ${injectLayerMode === 'dual' ? 'selected' : ''}>冷热双层注入（推荐 · 省缓存、不打断最新对话）</option>
+          <option value="single" ${injectLayerMode === 'single' ? 'selected' : ''}>单层合并注入（旧版兼容 · 全部集中在热层槽位）</option>
+        </select>
+      </div>
+      <div class="we-input-group" style="display:grid;grid-template-columns:1fr 90px;gap:6px;">
+        <div>
+          <label>热层位置（实时状态：时空/主角/任务/在场角色）</label>
+          <select id="we-memory-hot-inject-pos" style="width:100%;">
+            <option value="1" ${hotInjectPosition === 1 ? 'selected' : ''}>聊天内按深度（推荐）</option>
+            <option value="0" ${hotInjectPosition === 0 ? 'selected' : ''}>主提示词内（IN_PROMPT）</option>
+            <option value="2" ${hotInjectPosition === 2 ? 'selected' : ''}>主提示词之前（BEFORE_PROMPT）</option>
+          </select>
+        </div>
+        <div>
+          <label>热层深度</label>
+          <input type="number" id="we-memory-hot-inject-depth" min="0" max="20" step="1" value="${hotInjectDepth}" style="width:100%;" ${hotInjectPosition !== 1 ? 'disabled' : ''}>
+        </div>
+      </div>
+      <div class="we-input-group" style="display:grid;grid-template-columns:1fr 90px;gap:6px;">
+        <div>
+          <label>冷层位置（长期档案：角色索引/技能/物品/纪要/回溯）</label>
+          <select id="we-memory-cold-inject-pos" style="width:100%;" ${injectLayerMode !== 'dual' ? 'disabled' : ''}>
+            <option value="1" ${coldInjectPosition === 1 ? 'selected' : ''}>聊天内高深度（默认顶部 depth=999）</option>
+            <option value="0" ${coldInjectPosition === 0 ? 'selected' : ''}>主提示词内（IN_PROMPT · 极佳缓存）</option>
+            <option value="2" ${coldInjectPosition === 2 ? 'selected' : ''}>主提示词之前（BEFORE_PROMPT）</option>
+          </select>
+        </div>
+        <div>
+          <label>冷层深度</label>
+          <input type="number" id="we-memory-cold-inject-depth" min="1" max="9999" step="1" value="${coldInjectDepth}" style="width:100%;" ${(injectLayerMode !== 'dual' || coldInjectPosition !== 1) ? 'disabled' : ''}>
+        </div>
       </div>
       <div class="we-input-group" style="display:flex;gap:6px;">
         <div style="flex:1;">
@@ -2188,11 +2229,11 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="number" id="we-memory-recall-archived-small" min="0" max="10" step="1" value="${recallArchivedSmallLimit}" style="width:100%;">
         </div>
       </div>
-      <div style="font-size:11px;color:var(--we-text3);margin-bottom:8px;">扫描最近 N 层正文用于：① 自动展开被提及的「离场」重要角色详情；② 触发超出 K 条窗口的早期纪要关键词/语义回溯。</div>
+      <div style="font-size:11px;color:var(--we-text3);margin-bottom:8px;">扫描最近 N 层正文用于：① 自动展开被提及的「离场」重要角色详情（热层）；② 触发超出 K 条窗口的早期纪要关键词/语义回溯（冷层）。</div>
       <div class="we-input-group">
-        <label>记忆注入正文总字数预算</label>
+        <label>记忆注入正文总字数预算（冷+热合计）</label>
         <input type="number" id="we-memory-inject-max-chars" min="500" max="30000" step="100" value="${memoryInjectMaxChars}" style="width:100%;">
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">预算优先级顺序：<b>全局状态 → 主角信息 → 当前任务与事件 → 重要角色详情（在场/提及）与全员索引 → 主角技能与背包物品 → 近期纪要（最新 K 条）→ 记忆回溯（早期唤醒）→ 已发生事件 AM 概览索引</b>。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">预算优先级：<b>[热] 全局状态 → 主角信息 → 当前任务与事件 → 在场/提及角色详情 → [冷] 全员角色索引 → 主角技能与背包物品 → 近期纪要（K 条）→ 记忆回溯 → 已发生事件 AM 概览索引</b>。</div>
       </div>`;
 
     const mechanicsBody = `
@@ -2513,10 +2554,17 @@ window.WORLD_ENGINE_UI = (function() {
     const memoryWorldbookBody = `
       <div class="we-input-group">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-          <input type="checkbox" id="we-memory-worldbook-enabled" ${settings.worldbookEnabled === true ? 'checked' : ''}>
+          <input type="checkbox" id="we-memory-include-card-context" ${includeCardContextInFill ? 'checked' : ''}>
+          填表时读取角色卡设定与用户人设（$C / $U，对齐 shujuku）
+        </label>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">默认开启。填表时附带当前角色卡描述/场景与用户人设（以及空表初始化时的第 0 楼开场白），确保主角初始属性、初始技能、初始携带物品与开局主线任务能准确初始化。</div>
+      </div>
+      <div class="we-input-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="we-memory-worldbook-enabled" ${settings.worldbookEnabled !== false ? 'checked' : ''}>
           启用记忆推演世界书
         </label>
-        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">默认关闭。开启后才会把下方选中的世界书条目作为人物与背景参考；世界书内容不会被直接当作新记忆。</div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">默认开启。若未在下方手动勾选条目，将自动按蓝绿灯读取当前角色绑定的世界书（对齐 shujuku），用于辨认设定并在空表时初始化技能/物品/任务；静态设定不会被写成新纪要。</div>
       </div>`;
 
     const vecStats = window.MEMORY_ENGINE_VECTOR?.getStats?.() || null;
@@ -2637,7 +2685,7 @@ window.WORLD_ENGINE_UI = (function() {
     const panelContent = {
       common: sec('set-memory-api', '记忆引擎 API', apiBody)
         + sec('set-memory-evolve', '核心 7 表填表与追平', modeBody)
-        + sec('set-memory-inject', '双层记忆注入', injectBody)
+        + sec('set-memory-inject', '冷热双层记忆注入', injectBody)
         + sec('set-memory-mechanics', '正文保留与填表参考', mechanicsBody),
       prompts: sec('set-memory-sys-prompt', '底层填表主 System Prompt（shujuku 原版）', mainSystemPromptBody)
         + sec('set-memory-sheet-rules', '核心 7 表各自规则（Note 约束）', sheetRulesBody)
@@ -6395,6 +6443,15 @@ window.WORLD_ENGINE_UI = (function() {
           referenceRawRounds: Math.max(0, parseInt(gv('we-memory-reference-raw-rounds')) || 0),
           referenceSmallSummaryCount: Math.max(0, parseInt(gv('we-memory-reference-small-count')) || 0),
           injectIntoPrompt: document.getElementById('we-memory-inject')?.checked !== false,
+          injectLayerMode: gv('we-memory-inject-layer-mode') === 'single' ? 'single' : 'dual',
+          hotInjectPosition: [0, 1, 2].includes(Number(gv('we-memory-hot-inject-pos'))) ? Number(gv('we-memory-hot-inject-pos')) : 1,
+          hotInjectDepth: (() => {
+            const n = parseInt(gv('we-memory-hot-inject-depth'), 10);
+            return Number.isFinite(n) ? Math.max(0, Math.min(20, n)) : 1;
+          })(),
+          coldInjectPosition: [0, 1, 2].includes(Number(gv('we-memory-cold-inject-pos'))) ? Number(gv('we-memory-cold-inject-pos')) : 1,
+          coldInjectDepth: Math.max(1, Math.min(9999, parseInt(gv('we-memory-cold-inject-depth'), 10) || 999)),
+          includeCardContextInFill: document.getElementById('we-memory-include-card-context')?.checked !== false,
           injectIntoWorldEngine: document.getElementById('we-memory-inject-world-engine')?.checked === true,
           worldEngineMemoryLimit: Math.max(1, parseInt(gv('we-memory-world-engine-limit')) || 5),
           searchDepth: Math.max(1, parseInt(gv('we-memory-search-depth')) || 5),
@@ -6438,6 +6495,22 @@ window.WORLD_ENGINE_UI = (function() {
     if (memoryArchiveClearAllBtn) {
       memoryArchiveClearAllBtn.onclick = () => confirmAndClearAllMemoryTables({ clearCheckpoints: false });
     }
+    const syncLayerPlacementUi = () => {
+      const modeEl = document.getElementById('we-memory-inject-layer-mode');
+      const hotPosEl = document.getElementById('we-memory-hot-inject-pos');
+      const hotDepthEl = document.getElementById('we-memory-hot-inject-depth');
+      const coldPosEl = document.getElementById('we-memory-cold-inject-pos');
+      const coldDepthEl = document.getElementById('we-memory-cold-inject-depth');
+      const isDual = (modeEl?.value || 'dual') === 'dual';
+      if (hotDepthEl && hotPosEl) hotDepthEl.disabled = Number(hotPosEl.value) !== 1;
+      if (coldPosEl) coldPosEl.disabled = !isDual;
+      if (coldDepthEl && coldPosEl) coldDepthEl.disabled = !isDual || Number(coldPosEl.value) !== 1;
+    };
+    ['we-memory-inject-layer-mode', 'we-memory-hot-inject-pos', 'we-memory-cold-inject-pos'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.onchange = syncLayerPlacementUi;
+    });
+    syncLayerPlacementUi();
     const syncRecallFromDom = () => {
       const patch = collectRecallSettingsFromDom();
       if (Object.keys(patch).length) window.MEMORY_ENGINE_SETTINGS?.patchSettings?.(patch);

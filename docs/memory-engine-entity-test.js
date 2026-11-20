@@ -15,10 +15,14 @@ const chat = [
 
 global.window = global;
 global.document = { getElementById: () => null };
+const injectionSlots = {};
 global.SillyTavern = {
   getContext: () => ({
     chat,
-    setExtensionPrompt: (_name, content) => { injection = content; }
+    setExtensionPrompt: (name, content) => {
+      injectionSlots[name] = content;
+      injection = Object.values(injectionSlots).filter(Boolean).join('\n\n');
+    }
   })
 };
 global.WORLD_ENGINE_STORE = {

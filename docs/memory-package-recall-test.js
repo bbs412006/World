@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '..');
 const store = new Map();
 let currentChatId = 'pkg-test-a';
 let injection = '';
+const injectionSlots = {};
 let nextMockMode = 'extract-rich';
 let apiCallCount = 0;
 
@@ -63,7 +64,10 @@ const sandbox = {
       chat,
       name1: '林墨',
       name2: '沈清秋',
-      setExtensionPrompt: (_name, content) => { injection = content; }
+      setExtensionPrompt: (name, content) => {
+        injectionSlots[name] = content;
+        injection = Object.values(injectionSlots).filter(Boolean).join('\n\n');
+      }
     })
   },
   WORLD_ENGINE_STORE: {

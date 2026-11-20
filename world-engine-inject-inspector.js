@@ -19,15 +19,26 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // 与 world-engine.js 的 INJECTION_NAME 对应（我们注册到 ST extension_prompts 用的 key）。
   const INJECTION_NAME = 'world-engine-world';
   const MEMORY_INJECTION_NAME = 'memory-engine-memory';
+  const MEMORY_INJECTION_COLD_NAME = 'memory-engine-memory-cold';
   const OUTLINE_INJECTION_NAME = 'outline-engine-outline';
 
   // 着陆哨兵：buildContext() 输出永远以「【世界信息】」开头（world-engine-inject.js），
   //   该子串无任何 {{...}} 宏，不被 ST substituteParams 改写 → 拿它判「注入是否进了最终 prompt」最稳。
   //   （注：拿完整注入串做 indexOf 会因 {{user}} 等宏被展开而假阴性，故只认这个无宏哨兵。）
   const SENTINEL = '【世界信息】';
-  const MEMORY_SENTINEL = '【记忆信息】';
+  const MEMORY_SENTINEL = '【长期记忆数据库';
+  const MEMORY_SENTINELS = ['【长期记忆数据库', '【记忆信息】'];
   const OUTLINE_SENTINEL = '【剧情指导】';
-  const sentinelOf = scope => scope === 'outline' ? OUTLINE_SENTINEL : scope === 'memory' ? MEMORY_SENTINEL : SENTINEL;
+  const sentinelsOf = scope => scope === 'outline' ? [OUTLINE_SENTINEL] : scope === 'memory' ? MEMORY_SENTINELS : [SENTINEL];
+  const findSentinelIndex = (text, scope) => {
+    const str = String(text || '');
+    let best = -1;
+    for (const s of sentinelsOf(scope)) {
+      const i = str.indexOf(s);
+      if (i >= 0 && (best < 0 || i < best)) best = i;
+    }
+    return best;
+  };
   const MODULE_DEFS = [
     { scope: 'world',   label: '世界信息', short: '世界', sentinel: SENTINEL,         injName: INJECTION_NAME },
     { scope: 'memory',  label: '记忆信息', short: '记忆', sentinel: MEMORY_SENTINEL,  injName: MEMORY_INJECTION_NAME },
@@ -68,9 +79,13 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
     // 独立确认「我们这轮到底注册没注册」——区分「注册了没着陆=真bug」与「我们自己没注册=按设计跳过」。
     try {
       const ep = ctx && ctx.extensionPrompts;
-      const name = outlineScope ? OUTLINE_INJECTION_NAME : memoryScope ? MEMORY_INJECTION_NAME : INJECTION_NAME;
-      const entry = Array.isArray(ep) ? ep.find(item => item.name === name) : ep?.[name];
-      registeredAtSend = !!String(entry?.value || entry?.content || '');
+      const names = outlineScope
+        ? [OUTLINE_INJECTION_NAME]
+        : memoryScope
+          ? [MEMORY_INJECTION_NAME, MEMORY_INJECTION_COLD_NAME]
+          : [INJECTION_NAME];
+      const readEntry = n => (Array.isArray(ep) ? ep.find(item => item.name === n) : ep?.[n]);
+      registeredAtSend = names.some(n => !!String(readEntry(n)?.value || readEntry(n)?.content || ''));
     } catch (e) {}
 
     // 同层重 roll 判据（与 world-engine.js applyInjectionForCurrentRound 同一 fingerprint 口径）。
@@ -90,20 +105,23 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   //   每条都克隆完整 content 供 UI 只读展开（用户需要核对全部 role 的实际内容，不只是我们注入那条）。
   //   仅留最后一份快照、内存有界；diag 导出侧不带 content（隐私：含角色卡/世界书/聊天历史原文）。
   function snapChat(chat, env, scope) {
-    const sentinel = sentinelOf(scope);
     const messages = [];
-    let landed = false, ourContent = '', ourIndex = -1;
+    const matchedContents = [];
+    let landed = false, ourIndex = -1;
     for (let i = 0; i < chat.length; i++) {
       const m = chat[i] || {};
       const content = (m.content != null) ? String(m.content) : '';
-      const isOurs = content.indexOf(sentinel) >= 0;
+      const isOurs = findSentinelIndex(content, scope) >= 0;
       messages.push({ role: m.role || '?', length: content.length, isOurs: isOurs, content: content });
-      if (isOurs && !landed) {
-        landed = true;
-        ourIndex = i;
-        ourContent = content; // 我们自己的世界状态数据，完整保留
+      if (isOurs) {
+        if (!landed) {
+          landed = true;
+          ourIndex = i;
+        }
+        matchedContents.push(content);
       }
     }
+    const ourContent = matchedContents.join('\n\n---\n\n');
     return {
       apiType: 'chat',
       ts: nowTs(),
@@ -123,7 +141,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // —— 文本补全：prompt 已 flatten 成单串，链不可分 role；存长度 + 哨兵命中 + 哨兵附近摘录 ——
   function snapText(prompt, env, scope) {
     const text = String(prompt || '');
-    const idx = text.indexOf(sentinelOf(scope));
+    const idx = findSentinelIndex(text, scope);
     const landed = idx >= 0;
     let excerpt = '';
     if (landed) {
@@ -157,7 +175,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
   // —— 全文汇总与三模块实际顺序列举（供查看上次完整正文提示词） ——
   function findModuleHitsInText(text) {
     return MODULE_DEFS
-      .map(def => ({ scope: def.scope, label: def.label, short: def.short, offset: text.indexOf(def.sentinel) }))
+      .map(def => ({ scope: def.scope, label: def.label, short: def.short, offset: findSentinelIndex(text, def.scope) }))
       .filter(item => item.offset >= 0)
       .sort((a, b) => a.offset - b.offset);
   }
@@ -199,7 +217,7 @@ window.WORLD_ENGINE_INJECT_INSPECTOR = (function() {
     const text = String(prompt || '');
     const modules = {}, order = [];
     for (const def of MODULE_DEFS) {
-      const pos = text.indexOf(def.sentinel);
+      const pos = findSentinelIndex(text, def.scope);
       const info = buildModuleInfo(def, envs[def.scope], pos >= 0, pos >= 0 ? 0 : -1, 'text', pos);
       modules[def.scope] = info;
       if (info.landed) order.push(info);

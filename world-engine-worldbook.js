@@ -240,17 +240,22 @@ window.WORLD_ENGINE_WORLDBOOK = (function() {
   // scanText：本扩展喂给推演的上下文文本（近期对话等）。触发关闭时忽略，维持「全部已选注入」的现状。
   async function buildPromptSection(scanText, scope) {
     const normalizedScope = normalizeScope(scope);
+    const explicitSelection = hasSelection(normalizedScope);
     const stored = readStored(normalizedScope);
     const selectedIds = new Set(stored.ids);
-    if (!selectedIds.size) return '';
+    // 记忆引擎未手工勾选条目时，自动按蓝绿灯读取当前角色绑定的可用世界书（对齐 shujuku，免每次换卡手动勾选）
+    const autoMemoryPool = normalizedScope === 'memory' && !explicitSelection;
+    if (!autoMemoryPool && !selectedIds.size) return '';
 
-    const triggerOn = triggerEnabled(normalizedScope);
+    const triggerOn = triggerEnabled(normalizedScope) || autoMemoryPool;
     const overrides = stored.overrides || {};
     const text = String(scanText || '');
 
     try {
       const entries = await loadCurrentEntries();
-      const pool = entries.filter(entry => selectedIds.has(entry.id) && !entry.disabled);
+      const pool = autoMemoryPool
+        ? entries.filter(entry => !entry.disabled)
+        : entries.filter(entry => selectedIds.has(entry.id) && !entry.disabled);
       if (!pool.length) return '';
 
       let selectedEntries;
@@ -277,7 +282,7 @@ window.WORLD_ENGINE_WORLDBOOK = (function() {
       ).join('\n\n');
 
       const instruction = normalizedScope === 'memory'
-        ? '以下内容仅用于辨认人物、别名与背景。不得把世界书内容直接当作人物新形成的记忆。'
+        ? '以下内容为当前聊天的角色与世界观背景设定，可用于辨认人物与别名，并在状态表（主角、技能、物品、任务等）为空时提取初始设定；不得把静态背景设定直接写成新发生的剧情纪要。'
         : '以下内容是当前聊天的世界观事实与约束。后台推演必须遵守；不得擅自改写其既定设定。';
 
       return `========== 已选世界书条目 ==========
