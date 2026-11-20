@@ -508,7 +508,9 @@ window.MEMORY_ENGINE = (function() {
             errors.push(`纪要表 chronicle[${idx}] 缺少非空 chronicle_text 正文`);
             return;
           }
+          const rawFloor = entry.floor ?? entry.layer ?? entry.endLayer;
           chronicleRows.push({
+            floor: rawFloor !== undefined && rawFloor !== null && rawFloor !== '' && Number.isFinite(Number(rawFloor)) ? Number(rawFloor) : null,
             code_index: clean(entry.code_index ?? entry.codeIndex),
             time_span: clean(entry.time_span ?? entry.timeSpan),
             summary: clean(entry.summary),
@@ -519,6 +521,13 @@ window.MEMORY_ENGINE = (function() {
             impactLevel: entry.impact === 'key' || entry.impactLevel === 'key' ? 'key' : 'normal'
           });
         });
+        const expectedGroups = Array.isArray(options?.expectedChronicleGroups) ? options.expectedChronicleGroups : null;
+        if (expectedGroups && expectedGroups.length > 1 && chronicleRows.length !== expectedGroups.length) {
+          const expectedDesc = expectedGroups
+            .map(g => `${g.startLayer === g.endLayer ? `楼层 ${g.endLayer}` : `楼层 ${g.startLayer}-${g.endLayer}`} → ${g.codeIndex}`)
+            .join('、');
+          errors.push(`纪要表 (chronicle) 条数不匹配：本次包含 ${expectedGroups.length} 个独立纪要轮次（${expectedDesc}），chronicle 必须输出长度为 ${expectedGroups.length} 的 JSON 数组，逐轮各生成 1 条独立纪要（实际返回 ${chronicleRows.length} 条），严禁将多楼层合并成 1 条！`);
+        }
       }
     }
 
@@ -664,11 +673,18 @@ window.MEMORY_ENGINE = (function() {
       if (node.kind !== 'world_link') round++;
     }
 
-    // 保留 chronicle（除非最新的有效 manual_snapshot 明确覆写了 chronicle）
+    // 保留 chronicle（除非最新的有效 manual_snapshot 明确覆写了 chronicle），并对齐 shujuku 按时间顺序连续重排 AMXXXX 编码索引
     const lastValidManual = [...tl.nodes].reverse().find(n => n && n.status === 'valid' && n.kind === 'manual_snapshot' && n.snapshot?.tables);
     const hasLaterChronicle = chronicleBackup.some(row => Number(row?.revision) > 0 && row.sourceRefs?.length);
     if (!lastValidManual || hasLaterChronicle) {
-      tables.chronicle = sortChronicleRows(chronicleBackup);
+      const sortedChron = sortChronicleRows(chronicleBackup);
+      sortedChron.forEach((row, idx) => {
+        if (row && typeof row === 'object') {
+          row.rowId = idx + 1;
+          row.code_index = `AM${String(idx + 1).padStart(4, '0')}`;
+        }
+      });
+      tables.chronicle = sortedChron;
     }
     tables = data().normalizeTables(tables);
     state.tables = tables;
@@ -928,6 +944,42 @@ window.MEMORY_ENGINE = (function() {
 
   // ==================== API 调用 + 带错回灌纠错重试 ====================
 
+  function effectiveChronicleStep(stOverride) {
+    const st = stOverride || settings();
+    const perSheetFreq = Number(st.tableConfigs?.chronicle?.updateFrequency) || 0;
+    return perSheetFreq > 0 ? perSheetFreq : Math.max(1, parseInt(st.smallSummaryEveryX, 10) || 1);
+  }
+
+  function buildChronicleGroupsForBatch(aiLayers, existingChronicleRows, stOverride) {
+    const all = chat();
+    const layers = (Array.isArray(aiLayers) ? aiLayers : []).filter(l => Number.isInteger(l) && l >= 0).sort((a, b) => a - b);
+    if (!layers.length) return [];
+    const step = effectiveChronicleStep(stOverride);
+    const maxCodeNum = (Array.isArray(existingChronicleRows) ? existingChronicleRows : []).reduce((acc, row) => {
+      const m = /^AM(\d+)$/i.exec(clean(row?.code_index || row?.codeIndex));
+      return Math.max(acc, m ? parseInt(m[1], 10) : 0);
+    }, 0);
+    const groups = [];
+    for (let i = 0; i < layers.length; i += step) {
+      const slice = layers.slice(i, i + step);
+      const s = slice[0];
+      const e = slice[slice.length - 1];
+      const dStart = s > 0 && all[s - 1]?.is_user ? s - 1 : s;
+      const refs = timelineApi()?.captureRange?.(dStart, e) || [];
+      const digest = timelineApi()?.digestRefs?.(refs) || `layers:${slice.join(',')}`;
+      const seqNum = maxCodeNum + groups.length + 1;
+      groups.push({
+        startLayer: s,
+        endLayer: e,
+        aiLayers: slice,
+        codeIndex: `AM${String(seqNum).padStart(4, '0')}`,
+        sourceRefs: refs,
+        sourceDigest: digest
+      });
+    }
+    return groups;
+  }
+
   async function callTableFillWithRetry(batch, targetSheets, baseState, options = {}) {
     const st = settings();
     const api = window.WORLD_ENGINE_API;
@@ -950,7 +1002,25 @@ window.MEMORY_ENGINE = (function() {
     const hints = getBridgeHints();
     const worldbook = await loadWorldbookContext(batch.conversation, st);
     const refContext = options.skipReference ? '' : previousRawReference(batch.dialogueStart, st);
-    const nextCode = data().nextChronicleCode(baseState?.tables?.chronicle);
+    const aiSetForPrompt = new Set(batch.aiLayers || []);
+    const rangeMinPrompt = Number.isFinite(Number(options.overwriteStartLayer)) ? Number(options.overwriteStartLayer) : batch.startLayer;
+    const rangeMaxPrompt = Number.isFinite(Number(options.overwriteEndLayer)) ? Number(options.overwriteEndLayer) : batch.endLayer;
+    const survivingPromptChronicle = (baseState?.tables?.chronicle || []).filter(row => {
+      if (!row || row.status === 'failed') return false;
+      if (options.replaceStale && row.status === 'stale') {
+        const rl = survivingAiLayersForRecord(row);
+        if (rl.some(l => aiSetForPrompt.has(l))) return false;
+      }
+      if (options.overwrite && row.source !== 'world_engine') {
+        const rl = row.status === 'stale' ? survivingAiLayersForRecord(row) : aiLayersCoveredByRecord(row);
+        if (rl.length > 0 && rl.some(l => aiSetForPrompt.has(l)) && rl.every(l => l >= rangeMinPrompt && l <= rangeMaxPrompt)) return false;
+      }
+      return true;
+    });
+    const expectedChronicleGroups = targetSheets.includes('chronicle')
+      ? buildChronicleGroupsForBatch(batch.aiLayers, survivingPromptChronicle, st)
+      : [];
+    const nextCode = expectedChronicleGroups[0]?.codeIndex || data().nextChronicleCode(survivingPromptChronicle);
     const baseMessages = promptApi().buildMessages({
       targetSheets,
       tables: baseState?.tables || data().emptyTables(),
@@ -967,6 +1037,7 @@ window.MEMORY_ENGINE = (function() {
       aiCount: batch.aiCount,
       minChars: st.smallSummaryMinChars,
       nextChronicleCode: nextCode,
+      chronicleGroups: expectedChronicleGroups,
       tonePrompt: st.tonePrompt,
       customSystemPrompt: st.tableFillSystemPrompt,
       customSheetRules: st.tableFillSheetRules
@@ -1019,7 +1090,8 @@ window.MEMORY_ENGINE = (function() {
       lastRaw = raw;
       const parsed = parseAndValidateTableResponse(raw, targetSheets, {
         tables: baseState?.tables,
-        minChars: st.smallSummaryMinChars
+        minChars: st.smallSummaryMinChars,
+        expectedChronicleGroups
       });
       lastParsed = parsed;
 
@@ -1086,7 +1158,11 @@ window.MEMORY_ENGINE = (function() {
     const result = await callTableFillWithRetry(batch, targetSheets, baseState, {
       purpose: options.purpose || '结构化填表',
       networkRetries: options.retries,
-      formatRetries: options.formatRetries
+      formatRetries: options.formatRetries,
+      overwrite: options.overwrite === true,
+      replaceStale: options.replaceStale === true,
+      overwriteStartLayer: options.overwriteStartLayer,
+      overwriteEndLayer: options.overwriteEndLayer
     });
 
     if (originChatId !== data().getChatId()) {
@@ -1168,15 +1244,44 @@ window.MEMORY_ENGINE = (function() {
         } catch (_) { return ''; }
       })();
 
-      for (const entry of result.chronicleRows) {
-        if (!overwrite && batch.sourceDigest && existingDigests.has(batch.sourceDigest)) continue;
+      const liveGroups = buildChronicleGroupsForBatch(batch.aiLayers, latest.tables.chronicle, settings());
+      let pairedEntries = [];
+      if (liveGroups.length > 1 && result.chronicleRows.length === liveGroups.length) {
+        const remaining = [...result.chronicleRows];
+        pairedEntries = liveGroups.map(group => {
+          const exactIdx = remaining.findIndex(item => item.floor !== null && (item.floor === group.endLayer || group.aiLayers.includes(item.floor)));
+          if (exactIdx >= 0) {
+            const [picked] = remaining.splice(exactIdx, 1);
+            return { group, entry: picked };
+          }
+          return { group, entry: remaining.shift() };
+        });
+      } else if (liveGroups.length === 1 && result.chronicleRows.length >= 1) {
+        pairedEntries = result.chronicleRows.map(entry => ({ group: liveGroups[0], entry }));
+      } else {
+        pairedEntries = result.chronicleRows.map((entry, idx) => ({
+          group: liveGroups[Math.min(idx, Math.max(0, liveGroups.length - 1))] || {
+            startLayer: batch.startLayer,
+            endLayer: batch.endLayer,
+            sourceRefs: batch.sourceRefs || [],
+            sourceDigest: batch.sourceDigest || ''
+          },
+          entry
+        }));
+      }
+
+      for (const { group, entry } of pairedEntries) {
+        if (!entry) continue;
+        const rowDigest = group.sourceDigest || batch.sourceDigest || '';
+        if (!overwrite && rowDigest && existingDigests.has(rowDigest)) continue;
         const row = data().normalizeTableRow('chronicle', {
           ...entry,
+          code_index: clean(entry.code_index) || group.codeIndex,
           id: nextChronicleId(latest.tables.chronicle),
-          startLayer: batch.startLayer,
-          endLayer: batch.endLayer,
-          sourceRefs: clone(batch.sourceRefs || []),
-          sourceDigest: batch.sourceDigest || '',
+          startLayer: group.startLayer,
+          endLayer: group.endLayer,
+          sourceRefs: clone(group.sourceRefs || batch.sourceRefs || []),
+          sourceDigest: rowDigest,
           originChatId,
           ...(outlineChapter ? { outlineChapterTitle: outlineChapter } : {}),
           status: 'valid',
@@ -1184,6 +1289,7 @@ window.MEMORY_ENGINE = (function() {
         }, (latest.tables.chronicle?.length || 0) + 1, usedCodes);
         if (row) {
           latest.tables.chronicle.push(row);
+          if (rowDigest) existingDigests.add(rowDigest);
           addedChronicle++;
         }
       }
@@ -1533,7 +1639,7 @@ window.MEMORY_ENGINE = (function() {
       selectedSheets: dueSheets,
       includeCurrentFloor: false,
       minLayer: autoBaseline >= 0 ? autoBaseline + 1 : undefined,
-      batchSize: Math.max(1, parseInt(st.smallSummaryEveryX, 10) || 1)
+      batchSize: Math.max(1, parseInt(st.catchUpBatchSize ?? 3, 10) || 3)
     });
     if (plan.alreadyCaughtUp || !plan.waves.length) return;
 

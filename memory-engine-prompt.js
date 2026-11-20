@@ -155,14 +155,17 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 - 删除：任务完成、失败或过期失效时写入 delete。
 - 无变化输出 { "upsert": [], "delete": [] }。`,
 
-    chronicle: `【7. 纪要表 (chronicle)｜轮次日志，每批必填追加 1 条，禁止删除与修改旧行】
-记录剧情推进的客观编年纪要。结构：{ "code_index": "AMXXXX", "time_span": "时间跨度", "summary": "≤30字概览", "chronicle_text": "详细纪要正文", "key_dialogue": "关键原文台词（可留空）", "keywords": ["检索关键词"], "entities": ["涉及实体"], "impact": "key 或 normal" }。
+    chronicle: `【7. 纪要表 (chronicle)｜轮次日志，每轮交互结束后必须独立插入一条新记录，禁止删除与修改旧行】
+记录剧情推进的客观编年纪要。
+- 单轮填表时结构：{ "floor": 楼层号, "code_index": "AMXXXX", "time_span": "时间跨度", "summary": "≤30字概览", "chronicle_text": "详细纪要正文", "key_dialogue": "关键原文台词（可留空）", "keywords": ["检索关键词"], "entities": ["涉及实体"], "impact": "key 或 normal" }。
+- 多轮合并填表时结构：必须按用户提示中的【纪要分轮清单】输出数组 [ { 第1轮纪要 }, { 第2轮纪要 }, ... ]，每个待填纪要轮次各自独立生成 1 条记录，严禁把多个轮次/楼层合并成 1 条记录！
 
 【列定义】
-- code_index: 编码索引（AM0001 起递增，使用用户提示提供的下一可用编号，不得与已有编号重复）
-- time_span: 时间跨度（优先 "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM"，覆盖本段事件的实际时间范围；正文未给出明确时间时可留空或如实标注）
-- summary: 概览（一句话概括本段纪要内容，≤30 字）
-- chronicle_text: 纪要正文（须满足用户提示中的【纪要字数要求】下限）
+- floor: 本条纪要对应的 AI 回复楼层号（纯数字，如 2、4）
+- code_index: 编码索引（AM0001 起按轮递增，严格使用用户提示分配的编号，不得与已有编号重复）
+- time_span: 时间跨度（优先 "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM"，覆盖本轮事件的实际时间范围；正文未给出明确时间时可留空或如实标注）
+- summary: 概览（一句话概括本轮纪要内容，≤30 字）
+- chronicle_text: 纪要正文（须满足用户提示中的【纪要字数要求】单条下限）
 - key_dialogue: 重要对话（可留空 ""）
 - keywords / entities / impact: 3~6 个检索关键词、涉及人物地点物品名、是否重大转折（"key" 或 "normal"）
 
@@ -172,7 +175,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
    - 用词直白生活化，避免正式官腔措辞（如"达成协议""确立计划"）。
    - 结尾必须开放，在事件自然流动中结束，不得归纳状态或做出封闭式收束。
      违例：故事仍在继续 / 新的篇章开启 / 二人关系迈入新阶段 / 未来等待着他们。
-   - 多轮交互整合为一条记录。
+   - 每轮交互（每个纪要单元）独立成条：若本次对话包含多轮 AI 回复（例如楼层 2 与楼层 4），必须按楼层逐条拆分生成多条独立纪要（AM0001、AM0002…），绝不允许将多楼层揉成一条合并纪要。
    - 禁止内容：极端情绪（崩溃、狂喜、绝望等）、夸张、比喻、升华、情绪总结、支配欲、掌控欲、总结性收尾。
 2. 重要对话（key_dialogue）：仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约/约定的原文台词，标明说话人。排除寒暄、重复、情绪感叹。通常 1~3 句，最多 5 句，总长度简洁克制。`
   });
@@ -191,7 +194,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 2. 逐表阅读本次所有目标表的 Note 与填表规则
 3. 根据规则确定需要新增、更新或删除的表格和字段
 4. 逐步核对每项操作是否都有【待提取对话】直接支持
-5. 针对纪要表的额外规则：如果本次目标表包含纪要表 (chronicle)，那么本轮就必须插入一条新的总结记录，不得遗漏或留空。
+5. 针对纪要表的额外规则：如果本次目标表包含纪要表 (chronicle)，必须严格按【纪要分轮清单】为每一个待填轮次各插入一条独立的总结记录（单轮输出 1 条，N 轮输出含 N 条记录的数组），严禁把多轮 AI 回复合并成 1 条，也不得遗漏或留空。
 6. 日志与纪要语气校准：你在思考纪要时，必须区分“正常恋爱互动”与“暗黑主从文风”。你可以使用正常的交流词汇（如：提议、要求、同意、拒绝、引导、配合、安抚），但【绝对禁止】将情侣间的普通调情与互动过度解读为“权力掌控”、“剥夺反抗”、“精神支配”、“屈服”等单向压迫词汇！
 
 ## 关键规则
@@ -275,6 +278,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     "delete": []
   }`,
     chronicle: `  "chronicle": {
+    "floor": 2,
     "code_index": "AM0001",
     "time_span": "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM",
     "summary": "≤30字一句话概览",
@@ -286,6 +290,43 @@ window.MEMORY_ENGINE_PROMPT = (function() {
   }`
   });
 
+  function buildChronicleJsonTemplate(chronicleGroups, fallbackNextCode, fallbackFloor) {
+    const groups = Array.isArray(chronicleGroups) && chronicleGroups.length ? chronicleGroups : null;
+    if (!groups || groups.length <= 1) {
+      const g = groups ? groups[0] : null;
+      const code = clean(g?.codeIndex || fallbackNextCode) || 'AM0001';
+      const fl = Number.isFinite(Number(g?.endLayer ?? fallbackFloor)) ? Number(g?.endLayer ?? fallbackFloor) : 2;
+      return `  "chronicle": {
+    "floor": ${fl},
+    "code_index": "${code}",
+    "time_span": "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM",
+    "summary": "≤30字一句话概览",
+    "chronicle_text": "第三方客观中立的详细纪要正文（结尾保持开放）",
+    "key_dialogue": "关键原文台词或空字符串",
+    "keywords": ["关键词1", "关键词2"],
+    "entities": ["人物或地点名"],
+    "impact": "normal"
+  }`;
+    }
+    const items = groups.map((g, idx) => {
+      const code = clean(g?.codeIndex) || `AM${String(idx + 1).padStart(4, '0')}`;
+      const fl = Number.isFinite(Number(g?.endLayer)) ? Number(g.endLayer) : (idx + 1) * 2;
+      const spanDesc = g.startLayer !== g.endLayer ? `楼层 ${g.startLayer}-${g.endLayer}` : `楼层 ${fl}`;
+      return `    {
+      "floor": ${fl},
+      "code_index": "${code}",
+      "time_span": "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM",
+      "summary": "${spanDesc} 一句话概览（≤30字）",
+      "chronicle_text": "${spanDesc} 第三方客观中立的详细纪要正文（结尾保持开放）",
+      "key_dialogue": "关键原文台词或空字符串",
+      "keywords": ["关键词1", "关键词2"],
+      "entities": ["人物或地点名"],
+      "impact": "normal"
+    }`;
+    }).join(',\n');
+    return `  "chronicle": [\n${items}\n  ]`;
+  }
+
   function resolveTargetSheets(targetSheets) {
     const list = Array.isArray(targetSheets) ? targetSheets.filter(k => ALL_TABLES.includes(k)) : [];
     return list.length ? Array.from(new Set(list)) : [...ALL_TABLES];
@@ -296,19 +337,31 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     catch (_) { return {}; }
   }
 
+  function isLegacyMergedDefaultMainPrompt(text) {
+    return text.includes('那么本轮就必须插入一条新的总结记录，不得遗漏或留空。')
+      && text.includes('你是【填表AI】，负责根据用户提供的资料对表格数据执行增删改操作。');
+  }
+
+  function isLegacyMergedDefaultChronicleRule(text) {
+    return text.startsWith('【7. 纪要表 (chronicle)｜轮次日志，每批必填追加 1 条，禁止删除与修改旧行】')
+      && text.includes('- 多轮交互整合为一条记录。');
+  }
+
   function getEffectiveMainSystemPrompt(customOverride) {
     const override = clean(customOverride);
-    if (override) return override;
+    if (override && !isLegacyMergedDefaultMainPrompt(override)) return override;
     const saved = clean(readSettingsSafe().tableFillSystemPrompt);
-    return saved || DEFAULT_MAIN_SYSTEM_PROMPT;
+    if (saved && !isLegacyMergedDefaultMainPrompt(saved)) return saved;
+    return DEFAULT_MAIN_SYSTEM_PROMPT;
   }
 
   function getEffectiveSheetRule(sheetKey, customRulesOverride) {
     if (!ALL_TABLES.includes(sheetKey)) return '';
     const fromOpt = clean(customRulesOverride?.[sheetKey]);
-    if (fromOpt) return fromOpt;
+    if (fromOpt && !(sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(fromOpt))) return fromOpt;
     const fromSettings = clean(readSettingsSafe().tableFillSheetRules?.[sheetKey]);
-    return fromSettings || DEFAULT_SHEET_RULES[sheetKey] || '';
+    if (fromSettings && !(sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(fromSettings))) return fromSettings;
+    return DEFAULT_SHEET_RULES[sheetKey] || '';
   }
 
   function buildTableFillSystemPrompt(targetSheets, options) {
@@ -318,7 +371,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       .map(key => getEffectiveSheetRule(key, opts.customSheetRules))
       .filter(Boolean)
       .join('\n\n');
-    const jsonTemplate = `{\n${sheets.map(key => SHEET_JSON_TEMPLATES[key]).join(',\n')}\n}`;
+    const jsonTemplate = `{\n${sheets.map(key => key === 'chronicle'
+      ? buildChronicleJsonTemplate(opts.chronicleGroups, opts.nextChronicleCode, opts.endLayer)
+      : SHEET_JSON_TEMPLATES[key]).join(',\n')}\n}`;
     const toneBlock = clean(opts.tonePrompt) ? `\n\n【附加风格与领域补充要求】\n${clean(opts.tonePrompt)}` : '';
     const template = getEffectiveMainSystemPrompt(opts.customSystemPrompt);
 
@@ -386,8 +441,8 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       const body = rows.map(row => {
         const vals = cols.map(c => {
           let v = row[c.key];
-          if (key === 'chronicle' && c.key === 'chronicle_text' && clean(v).length > 180) {
-            v = clean(v).slice(0, 180) + '…';
+          if (key === 'chronicle' && c.key === 'chronicle_text' && clean(v).length > 800) {
+            v = clean(v).slice(0, 800) + '…';
           }
           return cellEsc(v);
         });
@@ -416,12 +471,23 @@ window.MEMORY_ENGINE_PROMPT = (function() {
     const nextCode = clean(input.nextChronicleCode) || window.MEMORY_ENGINE_DATA?.nextChronicleCode?.(tables.chronicle) || 'AM0001';
     const rangeLabel = startLayer === endLayer ? `楼层 ${endLayer}` : `楼层 ${startLayer} 至 ${endLayer}`;
 
+    const chronGroups = Array.isArray(input.chronicleGroups) && input.chronicleGroups.length ? input.chronicleGroups : null;
+
     const sections = [
       `【本次填表范围与目标表】\n楼层范围：${rangeLabel}（共 ${aiCount} 条 AI 回复）\n本次待填表：[${targetSheets.join(', ')}]${targetSheets.includes('chronicle') ? `\n下一可用纪要编码索引：${nextCode}` : ''}`
     ];
 
     if (targetSheets.includes('chronicle')) {
-      sections.push(`【纪要字数要求】\nchronicle.chronicle_text 正文最低不少于 ${minChars * aiCount} 字（单层最低 ${minChars} 字 × ${aiCount} 层），须详实客观展开本段行动、关键台词原意、细节与结果，禁止空泛敷衍或总结性收尾。`);
+      if (chronGroups && chronGroups.length > 1) {
+        const groupLines = chronGroups.map((g, idx) => {
+          const gSpan = g.startLayer === g.endLayer ? `楼层 ${g.endLayer}` : `楼层 ${g.startLayer}-${g.endLayer}`;
+          const gCount = Array.isArray(g.aiLayers) && g.aiLayers.length ? g.aiLayers.length : 1;
+          return `${idx + 1}. 对应 [${gSpan}] → floor: ${g.endLayer}, code_index: "${g.codeIndex}"（本条正文最低不少于 ${minChars * gCount} 字）`;
+        }).join('\n');
+        sections.push(`【纪要分轮清单与字数要求（必须逐轮独立生成 ${chronGroups.length} 条，严禁合并）】\n本次对话包含 ${chronGroups.length} 个独立纪要轮次，chronicle 字段必须输出长度为 ${chronGroups.length} 的 JSON 数组，逐条对应如下：\n${groupLines}\n每条均须详实客观展开对应楼层行动、关键台词原意、细节与结果，禁止把多轮合并成 1 条，禁止总结性收尾。`);
+      } else {
+        sections.push(`【纪要字数要求】\nchronicle.chronicle_text 正文最低不少于 ${minChars * aiCount} 字（单层最低 ${minChars} 字 × ${aiCount} 层），须详实客观展开本段行动、关键台词原意、细节与结果，禁止空泛敷衍或总结性收尾。`);
+      }
     }
 
     if (currentStoryTime) {

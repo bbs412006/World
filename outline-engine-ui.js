@@ -1230,7 +1230,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     return `${subTopbar('设置', '工欲善其事，必先利其器', 'close-settings')}
       ${tabBar}${panels}
       <div class="we-settings-save-actions we-settings-save-sticky">
-        ${button('save-settings', '保存设置')}
+        ${button('save-settings', '保存设置', '', 'primary')}
       </div>`;
   }
 

@@ -230,7 +230,12 @@ function makeChat(rounds) {
       if (sheets.includes('protagonist_skills')) res.protagonist_skills = { upsert: [], delete: [] };
       if (sheets.includes('inventory')) res.inventory = { upsert: [{ item_name: '铜符', quantity: '1' }], delete: [] };
       if (sheets.includes('quests_events')) res.quests_events = { upsert: [], delete: [] };
-      if (sheets.includes('chronicle')) res.chronicle = { summary: '第8-10层合并纪要', chronicle_text: '第8至10层合并纪要正文。' };
+      if (sheets.includes('chronicle')) {
+        res.chronicle = [
+          { floor: 8, summary: '第8层独立纪要', chronicle_text: '第8层客观纪要正文。' },
+          { floor: 10, summary: '第10层独立纪要', chronicle_text: '第10层客观纪要正文。' }
+        ];
+      }
       return JSON.stringify(res);
     });
 
@@ -238,10 +243,59 @@ function makeChat(rounds) {
     assert.strictEqual(cu.completedBatches, 2);
     assert.strictEqual(env.calls.length, 2, '实际仅发起 2 次 API 请求完成 7 表追平');
     const stAfter = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(stAfter.tables.chronicle.length, 4, '原有 3 条纪要未被重复覆盖 + 新增 1 条合并纪要 = 4 条');
+    assert.strictEqual(stAfter.tables.chronicle.length, 5, '原有 3 条纪要未被重复覆盖 + 单批拆分新增第 8 层、第 10 层 2 条独立纪要 = 5 条');
+    assert.deepStrictEqual(
+      plain(stAfter.tables.chronicle.map(r => [r.code_index, r.startLayer, r.endLayer])),
+      [['AM0001', 2, 2], ['AM0002', 4, 4], ['AM0003', 6, 6], ['AM0004', 8, 8], ['AM0005', 10, 10]],
+      '多楼层合批追平时，纪要表必须逐 AI 楼层各自独立生成 1 条 AMXXXX 记录，严禁揉成 8-10 合并纪要'
+    );
     for (const k of env.sandbox.MEMORY_ENGINE_DATA.TABLE_KEYS) {
       assert.strictEqual(stAfter.tableWatermarks[k], 10, `${k} 水位线应追平至第 10 层`);
     }
+
+    // 验证用户实测场景：聊 4 楼（AI 楼层 2 与 4）点击一键追平，即使模型第 1 次偷懒合并为 1 条，纠错重试也必须强制拆成 AM0001(2楼) 和 AM0002(4楼) 两条！
+    const env4 = createEnv(makeChat(2)); // 0:开场白, 1:u1, 2:a1, 3:u2, 4:a2
+    env4.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ catchUpBatchSize: 3, smallSummaryEveryX: 1, tableFillMaxRetries: 2, skipCurrentFloorSummary: false });
+    let tryCount4 = 0;
+    env4.setApiHandler(async prompt => {
+      tryCount4++;
+      if (tryCount4 === 1) {
+        return JSON.stringify({
+          global_state: { current_location: '茶肆', cur_time: '2026-02-01 10:00' },
+          chronicle: { summary: '偷懒合并2-4楼', chronicle_text: '把第2楼和第4楼合并成了一条记录。' }
+        });
+      }
+      assert.ok(prompt.includes('条数不匹配') && prompt.includes('楼层 2 → AM0001') && prompt.includes('楼层 4 → AM0002'), '纠错提示必须明确要求按楼层 2、楼层 4 拆分为 2 条独立纪要');
+      return JSON.stringify({
+        global_state: { current_location: '茶肆', cur_time: '2026-02-01 10:00' },
+        chronicle: [
+          { floor: 2, code_index: 'AM0001', summary: '第2楼初入茶肆', chronicle_text: '第2楼独立纪要正文。' },
+          { floor: 4, code_index: 'AM0002', summary: '第4楼密谈虎符', chronicle_text: '第4楼独立纪要正文。' }
+        ]
+      });
+    });
+    await env4.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(tryCount4, 2, '首轮偷懒合并后应触发纠错重试并在第 2 次拆分为 2 条');
+    const st4 = env4.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.deepStrictEqual(
+      plain(st4.tables.chronicle.map(r => [r.code_index, r.startLayer, r.endLayer, r.summary])),
+      [
+        ['AM0001', 2, 2, '第2楼初入茶肆'],
+        ['AM0002', 4, 4, '第4楼密谈虎符']
+      ],
+      '聊 4 楼一键追平必须精确生成 AM0001(2楼) 与 AM0002(4楼) 两条独立纪要，绝不出现 2-4 楼合并纪要'
+    );
+    // 删掉第 3-4 楼后，AM0002 0ms 精确裁剪，AM0001 保持 valid 无损保留（无需变 stale 重算！）
+    env4.chat.splice(3, 2);
+    env4.sandbox.MEMORY_ENGINE.init();
+    await env4.ctx.eventSource.emitAsync('MESSAGE_DELETED');
+    const st4AfterDel = env4.sandbox.MEMORY_ENGINE_DATA.loadState();
+    assert.deepStrictEqual(
+      plain(st4AfterDel.tables.chronicle.map(r => [r.code_index, r.startLayer, r.endLayer, r.status])),
+      [['AM0001', 2, 2, 'valid']],
+      '按单楼独立落盘后，删除第 4 楼仅精准移除 AM0002，第 2 楼 AM0001 完整保留无需标 stale'
+    );
+    env4.sandbox.MEMORY_ENGINE.abort();
 
     // 单表独立频率测试：将 chronicle 设为每 3 轮、inventory 设为每 1 轮，其余禁用
     const customTableConfigs = {};

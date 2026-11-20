@@ -142,4 +142,31 @@ assert.ok(
   '手动指定范围填表默认不应勾选覆盖重填（保持与自动填表一致的逐层纯增量补漏）'
 );
 
+// 1. 记忆模块首页纵向导航必须统一为两字格式（表格 / 纪要 / 填表），避免在 48px 栏位折行
+assert.ok(
+  homeFn.includes("label: '表格'") &&
+  homeFn.includes("label: '纪要'") &&
+  homeFn.includes("label: '填表'") &&
+  !homeFn.includes("label: '数据库表'") &&
+  !homeFn.includes("label: '纪要表'"),
+  '记忆首页纵向导航标题必须统一采用两字格式（表格 / 纪要 / 填表）'
+);
+
+// 2. 记忆模块所有表格与纪要视图采用零横向滚动条、单屏自适应分页与行内展开详情
+assert.match(ui, /function renderSingletonKvTable\(/, '单行模式表（全局状态/主角信息）应提供 KV 矩阵单屏视图');
+assert.match(ui, /function renderKeyedFitTable\(/, '多行主键表应提供固定列宽单屏自适应与点击行内展开视图');
+assert.match(ui, /we-db-table--fit/, '多行表格应启用 table-layout: fixed 零横向滚动样式');
+assert.match(ui, /we-db-pager/, '表格与纪要视图应提供单屏翻页控件');
+assert.match(ui, /we-chronicle-sheet/, '纪要视图应使用紧凑表格行列表');
+assert.match(css, /\.we-db-table-wrap\s*\{[^}]*overflow-x:\s*hidden/, '表格外框必须禁用横向滚动条');
+assert.match(css, /\.we-db-table--fit\s*\{[^}]*table-layout:\s*fixed/, '自适应表格必须使用 table-layout: fixed');
+
+// 3. 三模块设置页统一样式：无横向滚动选项卡栏、统一主色调保存按钮与重置记忆入口
+const outlineUi = fs.readFileSync(path.join(root, 'outline-engine-ui.js'), 'utf8');
+assert.match(ui, /class="we-btn we-btn-primary" id="we-save-settings"/, '世界设置保存按钮应统一使用 we-btn-primary');
+assert.match(ui, /class="we-btn we-btn-primary" id="we-save-memory-settings"/, '记忆设置保存按钮应统一使用 we-btn-primary');
+assert.match(ui, /id="we-reset-memory"/, '记忆设置底部常驻栏应提供对称的重置记忆按钮');
+assert.match(outlineUi, /button\('save-settings',\s*'保存设置',\s*'',\s*'primary'\)/, '大纲设置保存按钮应统一使用 primary 样式');
+assert.match(css, /\.we-settings-tabs\s*\{[^}]*flex-wrap:\s*wrap/, '三模块设置选项卡栏应自动折行平铺而非横向滚动');
+
 console.log('memory UI layout tests passed');

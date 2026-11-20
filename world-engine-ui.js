@@ -16,6 +16,9 @@ window.WORLD_ENGINE_UI = (function() {
   let _memoryEditingTableRow = null;
   let _memoryEditingSmall = null;
   let _memoryCatchUpIncludeCurrent = null;
+  const _memoryTablePage = {};
+  const _memoryExpandedTableRows = new Set();
+  let _memoryMinutesPage = -1;
   const _memoryCollapsedRecords = new Set();
   const _memorySeenRecords = new Set();
   let _memoryCollapseScope = '';
@@ -897,7 +900,7 @@ window.WORLD_ENGINE_UI = (function() {
     }
   }
 
-  /** 「填表」分页：7 表独立水位线 + 零 Token Wave 追平计划预览 + 独立合并批大小 + 范围填表。 */
+  /** 「填表」分页：7 表独立水位线 + 零 Token Wave 追平计划预览 + 独立合并批大小 + 折叠范围填表（单屏紧凑无滚动）。 */
   function renderMemoryFillPage(state, settings) {
     const coverage = window.MEMORY_ENGINE?.getSummaryCoverageStatus?.(settings) || null;
     const aiStats = getAiChatStats(settings.firstLayerIsAiOpening !== false);
@@ -935,15 +938,15 @@ window.WORLD_ENGINE_UI = (function() {
       ? Math.max(0, totalAi - uncoveredAll)
       : (coverage ? Number(coverage.coveredAiCount) || 0 : 0);
     const delayBadge = coverage?.effectiveDelayFloors > 0
-      ? `<span class="we-memory-kw-tag">当前层不填表（延 ${coverage.effectiveDelayFloors} 层 AI）</span>` : '';
+      ? `<span class="we-memory-kw-tag">延 ${coverage.effectiveDelayFloors} 层</span>` : '';
     const latestAiText = (coverage ? coverage.latestAiLayer : aiStats.latestAiLayer) >= 0
-      ? `第 ${latestAi} 层`
-      : '暂无 AI 层';
+      ? `L${latestAi}`
+      : '无';
     const facts = [
-      ['当前 AI 楼层', latestAiText],
-      ['AI 实际层数', `共 ${totalAi} 层（已填 ${coveredAi}/${totalAi}）`],
-      ['待补填', coverage ? (uncoveredAll > 0 ? `${uncoveredAll} 层` : '已全部覆盖') : '—'],
-      ['待重建', coverage && coverage.staleCount > 0 ? `${coverage.staleCount} 条` : '无']
+      ['最新层', latestAiText],
+      ['已覆盖', `${coveredAi}/${totalAi}`],
+      ['待补填', coverage ? (uncoveredAll > 0 ? `${uncoveredAll} 层` : '已满') : '—'],
+      ['待重建', coverage && coverage.staleCount > 0 ? `${coverage.staleCount} 条` : '0']
     ].map(([k, v]) => `<div class="we-fill-fact"><span>${k}</span><strong>${h(v)}</strong></div>`).join('');
 
     const sheetChips = tableKeys.map(k => {
@@ -953,8 +956,8 @@ window.WORLD_ENGINE_UI = (function() {
       const pending = includeCurrent ? (info.uncoveredCount || 0) : (info.uncoveredAutoCount || 0);
       const wmText = info.watermark !== null && info.watermark !== undefined ? `L${info.watermark}` : '未填';
       const badge = pending > 0
-        ? `<span class="we-sheet-chip-gap">缺${pending}层</span>`
-        : '<span class="we-sheet-chip-ok">最新</span>';
+        ? `<span class="we-sheet-chip-gap">-${pending}</span>`
+        : '<span class="we-sheet-chip-ok">齐</span>';
       return `<label class="we-sheet-chip${checked ? ' is-selected' : ''}" title="${h(schema.name)} · 共 ${info.rowCount || 0} 行 · 水位 ${wmText}">
         <input type="checkbox" class="we-memory-catchup-sheet" value="${h(k)}" ${checked ? 'checked' : ''}>
         <span class="we-sheet-chip-name">${h(schema.shortName || schema.name)}</span>
@@ -965,52 +968,48 @@ window.WORLD_ENGINE_UI = (function() {
 
     const wavePreviewHtml = plan
       ? `<div class="we-wave-preview${plan.alreadyCaughtUp ? ' is-clean' : ''}" id="we-memory-wave-preview">
-          <div class="we-wave-preview-head"><strong><i class="fa-solid fa-wave-square"></i> 零消耗 Wave 追平计划预览</strong></div>
+          <div class="we-wave-preview-head"><strong><i class="fa-solid fa-wave-square"></i> Wave 智能追平计划预览</strong></div>
           <div class="we-wave-preview-summary">${h(plan.summaryText)}</div>
           ${plan.waveLines?.length ? `<ul class="we-wave-preview-list">${plan.waveLines.map(line => `<li>${h(line)}</li>`).join('')}</ul>` : ''}
-          <div class="we-hint" style="margin:4px 0 0;">只补各表尚未覆盖的缺口，已填内容绝不重填；同楼层缺口自动合流进一次请求，中途停止自动保留已完成批次。</div>
+          <div class="we-hint" style="margin:3px 0 0;">只补各表缺口，已填不覆盖；多楼合并请求时，纪要表仍严格按单轮逐层各自生成独立 AM 编号。</div>
         </div>`
       : '';
 
-    return `<div class="we-section">
-        <div class="we-section-title">覆盖进度${delayBadge ? ` ${delayBadge}` : ''}</div>
-        <div class="we-fill-facts">${facts}</div>
-        <div class="we-hint">楼层仅按有效 AI 回复实际楼层号统计（自动剔除用户输入层、系统旁白与工具楼）。</div>
-      </div>
-      <div class="we-section">
-        <div class="we-section-title">单表水位线与追平目标
+    return `<div class="we-section we-section--compact">
+        <div class="we-section-title">水位总览与目标表${delayBadge ? ` ${delayBadge}` : ''}
           <span class="we-sheet-select-ops">
             <button class="we-btn we-btn-xs" id="we-memory-sheets-all" type="button">全选</button>
             <button class="we-btn we-btn-xs" id="we-memory-sheets-none" type="button">清空</button>
           </span>
         </div>
+        <div class="we-fill-facts we-fill-facts--four">${facts}</div>
         <div class="we-sheet-chip-grid">${sheetChips}</div>
       </div>
-      <div class="we-section">
-        <div class="we-section-title">一键智能追平（Wave 波次合流）</div>
+      <div class="we-section we-section--compact">
+        <div class="we-section-title">一键智能追平</div>
         ${wavePreviewHtml}
-        <div class="we-fill-row" style="margin-top:8px;">
-          <label class="we-fill-inline-num" title="一键追平独立的每批合并层数，不改变平时自动填表频率">
-            每批合并 <input type="number" id="we-memory-catchup-batch" min="1" max="20" step="1" value="${h(String(catchUpBatch))}" style="width:54px;"> 层
+        <div class="we-fill-row we-fill-action-strip" style="margin-top:8px;">
+          <label class="we-fill-inline-num" title="一键追平独立的每批合并层数（纪要仍逐层独立成条），不改变平时自动填表频率">
+            每批合并 <input type="number" id="we-memory-catchup-batch" min="1" max="20" step="1" value="${h(String(catchUpBatch))}" style="width:48px;"> 层
           </label>
           <label class="we-fill-check" title="开启“当前层不填表”时，默认追平到延迟区之前；勾选此项可强制追平到当前最新一层">
             <input type="checkbox" id="we-memory-catchup-include-current" ${includeCurrent ? 'checked' : ''}> 含当前层
           </label>
+          <button class="we-btn we-btn-primary" id="we-memory-catchup-now" type="button" style="margin-left:auto;" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-forward-fast"></i> ${plan && !plan.alreadyCaughtUp ? `追平（${plan.totalBatches} 批）` : '一键追平'}</button>
+          ${isBusy ? '<button class="we-btn we-btn-danger" id="we-memory-minutes-stop" type="button"><i class="fa-solid fa-stop"></i> 停止</button>' : '<button class="we-btn" id="we-memory-minutes-stop" type="button" title="停止运行中任务"><i class="fa-solid fa-stop"></i></button>'}
         </div>
-        <div class="we-fill-row" style="margin-top:8px;">
-          <button class="we-btn we-btn-primary" id="we-memory-catchup-now" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-forward-fast"></i> ${plan && !plan.alreadyCaughtUp ? `开始追平（${plan.totalBatches} 批）` : '一键追平到最新'}</button>
-          <button class="we-btn" id="we-memory-minutes-stop" type="button"><i class="fa-solid fa-stop"></i> 停止</button>
-        </div>
-      </div>
-      <div class="we-section">
-        <div class="we-section-title">指定范围填表（作用于上方已勾选表）</div>
-        <div class="we-memory-form-grid we-fill-range-grid">
-          <div class="we-input-group"><label>起始 AI 楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
-          <div class="we-input-group"><label>结束 AI 楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
-          <div class="we-input-group"><label>每批 AI 层数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(catchUpBatch))}"></div>
-        </div>
-        <label class="we-fill-check we-fill-check-block"><input type="checkbox" id="we-memory-range-overwrite"> 覆盖重填范围内已有记录（不勾选时与自动填表一致，纯增量补漏）</label>
-        <div class="we-fill-row"><button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button></div>
+        <details class="we-api-adv-fold we-range-fill-fold">
+          <summary>指定楼层范围填表（高级 · 手动区间或覆盖重填）</summary>
+          <div class="we-api-adv-body">
+            <div class="we-memory-form-grid we-fill-range-grid">
+              <div class="we-input-group"><label>起始 AI 楼层</label><input type="number" id="we-memory-range-start" min="0" step="1" value="${h(String(defaultStart))}"></div>
+              <div class="we-input-group"><label>结束 AI 楼层</label><input type="number" id="we-memory-range-end" min="0" step="1" value="${h(String(defaultEnd))}"></div>
+              <div class="we-input-group"><label>每批 AI 层数</label><input type="number" id="we-memory-range-batch" min="1" max="20" step="1" value="${h(String(catchUpBatch))}"></div>
+            </div>
+            <label class="we-fill-check we-fill-check-block"><input type="checkbox" id="we-memory-range-overwrite"> 覆盖重填范围内已有记录（不勾选时纯增量补漏）</label>
+            <div class="we-fill-row"><button class="we-btn we-btn-primary" id="we-memory-range-fill-start" type="button" ${isBusy ? 'disabled' : ''}><i class="fa-solid fa-table-list"></i> 开始范围填表</button></div>
+          </div>
+        </details>
       </div>
       <div class="we-hint we-fill-status" id="we-memory-home-fill-status">${h(statusMsg)}</div>`;
   }
@@ -1024,9 +1023,9 @@ window.WORLD_ENGINE_UI = (function() {
     const stateRowCount = (counts.global_state || 0) + (counts.protagonist_info || 0) + (counts.important_characters || 0)
       + (counts.protagonist_skills || 0) + (counts.inventory || 0) + (counts.quests_events || 0);
     const rows = [
-      { view: 'tables', label: '数据库表', sub: `6 张核心状态表（共 ${stateRowCount} 行）· 全局 / 主角 / 角色 / 技能 / 物品 / 任务`, poem: '纲举目张' },
-      { view: 'minutes', label: '纪要表', sub: `${counts.chronicle || 0} 条 · AM 编码索引 · 概览 · 纪要 · 重要对话`, poem: '纪事者必提其要' },
-      { view: 'fill', label: '填表', sub: uncoveredAuto > 0 ? `${uncoveredAuto} 层待追平 · Wave 智能合流 · 范围填表` : '单表水位线 · Wave 一键追平 · 范围填表', poem: '温故而知新', alert: uncoveredAuto > 0 }
+      { view: 'tables', label: '表格', sub: `6 张核心状态表（共 ${stateRowCount} 行）· 全局 / 主角 / 角色 / 技能 / 物品 / 任务`, poem: '纲举目张' },
+      { view: 'minutes', label: '纪要', sub: `${counts.chronicle || 0} 条 · AM 编码索引 · 概览 · 纪要 · 重要对话`, poem: '纪事提要' },
+      { view: 'fill', label: '填表', sub: uncoveredAuto > 0 ? `${uncoveredAuto} 层待追平 · Wave 智能合流 · 范围填表` : '单表水位线 · Wave 一键追平 · 范围填表', poem: '温故知新', alert: uncoveredAuto > 0, badge: uncoveredAuto > 0 ? String(uncoveredAuto) : '' }
     ].map(row => ({
       ...row,
       rowClass: 'we-memory-nav-row',
@@ -1040,9 +1039,9 @@ window.WORLD_ENGINE_UI = (function() {
   }
 
   const MEMORY_VIEW_META = {
-    tables: { title: '数据库表', poem: '纲举目张' },
-    minutes: { title: '纪要表', poem: '纪事者必提其要' },
-    fill: { title: '智能填表', poem: '温故而知新' }
+    tables: { title: '状态表格', poem: '纲举目张' },
+    minutes: { title: '事件纪要', poem: '纪事提要' },
+    fill: { title: '智能填表', poem: '温故知新' }
   };
 
   function memoryRecordToggle(key, defaultCollapsed = true) {
@@ -1085,18 +1084,118 @@ window.WORLD_ENGINE_UI = (function() {
         return `<div class="we-input-group"><label>${h(col.label)}${col.required ? ' *' : ''}</label><select data-table-col="${h(col.key)}">${col.choices.map(c => `<option value="${h(c)}"${String(val) === String(c) ? ' selected' : ''}>${h(c)}</option>`).join('')}</select></div>`;
       }
       if (col.multiline) {
-        return `<div class="we-input-group"><label>${h(col.label)}${col.required ? ' *' : ''}</label><textarea rows="3" data-table-col="${h(col.key)}" placeholder="${h(col.placeholder || '')}">${h(val)}</textarea></div>`;
+        return `<div class="we-input-group is-span-2"><label>${h(col.label)}${col.required ? ' *' : ''}</label><textarea rows="2" data-table-col="${h(col.key)}" placeholder="${h(col.placeholder || '')}">${h(val)}</textarea></div>`;
       }
       return `<div class="we-input-group"><label>${h(col.label)}${col.required ? ' *' : ''}</label><input type="text" data-table-col="${h(col.key)}" value="${h(val)}" placeholder="${h(col.placeholder || '')}"></div>`;
     }).join('');
     return `<div class="we-memory-editor we-db-row-editor" data-table-row-editor data-sheet-key="${h(sheetKey)}" data-row-id="${h(String(row?.rowId || ''))}" data-new="${isNew ? 'true' : 'false'}">
-      <div class="we-memory-editor-label">${isNew ? `新增「${h(schema.name)}」记录` : `编辑「${h(schema.name)}」第 #${h(String(row?.rowId || 1))} 行`}</div>
-      ${fieldsHtml}
+      <div class="we-memory-editor-label">${isNew ? `新增「${h(schema.name)}」记录` : `编辑「${h(schema.name)}」#${h(String(row?.rowId || 1))}`}</div>
+      <div class="we-db-editor-grid">${fieldsHtml}</div>
       <div class="we-memory-editor-actions">
         <button class="we-btn we-memory-cancel-edit" type="button">取消</button>
         <button class="we-btn we-btn-primary we-memory-save-table-row" type="button">保存</button>
       </div>
     </div>`;
+  }
+
+  function renderSingletonKvTable(sheetKey, row) {
+    const cell = (label, value, colspan = 1) => {
+      const v = String(value ?? '').trim();
+      return `<td colspan="${colspan}"><div class="we-kv-cell"><span class="we-kv-k">${h(label)}</span><div class="we-kv-v">${v ? h(v) : '<span class="we-db-cell-empty">—</span>'}</div></div></td>`;
+    };
+    if (sheetKey === 'global_state') {
+      return `<div class="we-db-table-wrap we-db-table-wrap--fit">
+        <table class="we-db-table we-db-table--kv">
+          <tbody>
+            <tr>${cell('主要地区', row.current_major_region)}${cell('次要地区', row.current_minor_region)}${cell('当前详细地点', row.current_location)}</tr>
+            <tr>${cell('上轮场景时间', row.prev_scene_time)}${cell('经过的时间', row.elapsed_time)}${cell('当前时间', row.cur_time)}</tr>
+          </tbody>
+        </table>
+      </div>`;
+    }
+    return `<div class="we-db-table-wrap we-db-table-wrap--fit">
+      <table class="we-db-table we-db-table--kv we-db-table--kv4">
+        <tbody>
+          <tr>${cell('姓名', row.name)}${cell('性别', row.gender)}${cell('年龄', row.age)}${cell('所在地点', row.location_name)}</tr>
+          <tr>${cell('身份', row.identity_text, 2)}${cell('近况', row.current_condition, 2)}</tr>
+          <tr>${cell('外貌特征', row.appearance, 2)}${cell('随身财物', row.belongings, 2)}</tr>
+        </tbody>
+      </table>
+    </div>`;
+  }
+
+  function renderKeyedFitTable(sheetKey, schema, rows) {
+    const PAGE_SIZE = 7;
+    const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    let curPage = Math.min(totalPages - 1, Math.max(0, parseInt(_memoryTablePage[sheetKey] ?? 0, 10) || 0));
+    _memoryTablePage[sheetKey] = curPage;
+    const pageRows = rows.slice(curPage * PAGE_SIZE, (curPage + 1) * PAGE_SIZE);
+
+    const headerMap = {
+      important_characters: '<th style="width:24%;">姓名</th><th>一句话介绍</th><th style="width:24%;">状态·地点</th><th style="width:58px;text-align:right;">操作</th>',
+      protagonist_skills: '<th style="width:27%;">技能名称</th><th style="width:22%;">类型·等级</th><th>效果描述</th><th style="width:58px;text-align:right;">操作</th>',
+      inventory: '<th style="width:27%;">物品名称</th><th style="width:22%;">数量·类别</th><th>描述/效果</th><th style="width:58px;text-align:right;">操作</th>',
+      quests_events: '<th style="width:31%;">任务名称</th><th style="width:18%;">类型</th><th>进度·时限</th><th style="width:58px;text-align:right;">操作</th>'
+    };
+    const headerHtml = headerMap[sheetKey] || `<th>主键</th><th>详情</th><th>状态</th><th style="width:58px;text-align:right;">操作</th>`;
+
+    const bodyHtml = pageRows.map(row => {
+      const expandKey = `${sheetKey}:${row.rowId}`;
+      const isExpanded = _memoryExpandedTableRows.has(expandKey);
+      const chevron = `<span class="we-db-expand-ind" aria-hidden="true">${isExpanded ? '▾' : '▸'}</span>`;
+      let summaryCells = '';
+      if (sheetKey === 'important_characters') {
+        const status = String(row.presence_status || '在场').trim();
+        const loc = String(row.location_name || '').trim();
+        summaryCells = `<td class="we-db-ellipsis" title="${h(row.name || '')}">${chevron}<strong>${h(row.name || '—')}</strong></td>
+          <td class="we-db-ellipsis" title="${h(row.brief_intro || '')}">${row.brief_intro ? h(row.brief_intro) : '<span class="we-db-cell-empty">—</span>'}</td>
+          <td class="we-db-ellipsis" title="${h([status, loc].filter(Boolean).join(' · '))}"><span class="we-db-status-pill ${status === '离场' ? 'is-away' : 'is-present'}">${h(status)}</span>${loc ? ` <span class="we-db-subcell">${h(loc)}</span>` : ''}</td>`;
+      } else if (sheetKey === 'protagonist_skills') {
+        const typeLvl = [row.skill_type || '主动', row.skill_level].map(v => String(v || '').trim()).filter(Boolean).join('·');
+        summaryCells = `<td class="we-db-ellipsis" title="${h(row.skill_name || '')}">${chevron}<strong>${h(row.skill_name || '—')}</strong></td>
+          <td class="we-db-ellipsis" title="${h(typeLvl)}"><span class="we-db-status-pill is-present">${h(typeLvl)}</span></td>
+          <td class="we-db-ellipsis" title="${h(row.effect_desc || '')}">${row.effect_desc ? h(row.effect_desc) : '<span class="we-db-cell-empty">—</span>'}</td>`;
+      } else if (sheetKey === 'inventory') {
+        const qtyCat = [`×${row.quantity || '1'}`, row.category].map(v => String(v || '').trim()).filter(Boolean).join(' · ');
+        summaryCells = `<td class="we-db-ellipsis" title="${h(row.item_name || '')}">${chevron}<strong>${h(row.item_name || '—')}</strong></td>
+          <td class="we-db-ellipsis" title="${h(qtyCat)}">${h(qtyCat)}</td>
+          <td class="we-db-ellipsis" title="${h(row.description || '')}">${row.description ? h(row.description) : '<span class="we-db-cell-empty">—</span>'}</td>`;
+      } else if (sheetKey === 'quests_events') {
+        const isMain = String(row.quest_type || '').includes('主线');
+        const progTime = [row.current_progress || '进行中', row.time_limit].map(v => String(v || '').trim()).filter(Boolean).join(' · ');
+        summaryCells = `<td class="we-db-ellipsis" title="${h(row.quest_name || '')}">${chevron}<strong>${h(row.quest_name || '—')}</strong></td>
+          <td class="we-db-ellipsis"><span class="we-db-status-pill ${isMain ? 'is-present' : 'is-away'}">${h(isMain ? '主线' : '支线')}</span></td>
+          <td class="we-db-ellipsis" title="${h(progTime)}">${h(progTime)}</td>`;
+      }
+
+      const deleteBtn = schema.allowDelete
+        ? `<button class="we-icon-btn we-memory-delete-table-row" type="button" data-sheet-key="${h(sheetKey)}" data-row-id="${h(String(row.rowId))}" title="删除"><i class="fa-solid fa-trash"></i></button>`
+        : '';
+
+      const detailItems = (schema.columns || []).map(c => {
+        const v = String(row[c.key] ?? '').trim();
+        return `<div class="we-db-detail-item${c.multiline ? ' is-wide' : ''}"><span class="we-kv-k">${h(c.label)}：</span><span class="we-kv-v">${v ? h(v) : '<span class="we-db-cell-empty">—</span>'}</span></div>`;
+      }).join('');
+
+      return `<tr class="we-db-summary-row${isExpanded ? ' is-expanded' : ''}" data-db-toggle-row="${h(expandKey)}" data-sheet-key="${h(sheetKey)}" data-row-id="${h(String(row.rowId))}" title="点击展开/收起本行完整字段">
+          ${summaryCells}
+          <td class="we-db-row-ops">
+            <button class="we-icon-btn we-memory-edit-table-row" type="button" data-sheet-key="${h(sheetKey)}" data-row-id="${h(String(row.rowId))}" title="编辑"><i class="fa-solid fa-pen"></i></button>
+            ${deleteBtn}
+          </td>
+        </tr>
+        ${isExpanded ? `<tr class="we-db-detail-row"><td colspan="4"><div class="we-db-detail-grid">${detailItems}</div></td></tr>` : ''}`;
+    }).join('');
+
+    const pagerHtml = totalPages > 1
+      ? `<div class="we-db-pager">
+          <button type="button" class="we-btn we-btn-xs" data-db-page-sheet="${h(sheetKey)}" data-db-page="${curPage - 1}" ${curPage <= 0 ? 'disabled' : ''}>◀ 上页</button>
+          <span class="we-db-pager-info">第 ${curPage + 1} / ${totalPages} 页（共 ${rows.length} 行 · 点击行展开详情）</span>
+          <button type="button" class="we-btn we-btn-xs" data-db-page-sheet="${h(sheetKey)}" data-db-page="${curPage + 1}" ${curPage >= totalPages - 1 ? 'disabled' : ''}>下页 ▶</button>
+        </div>`
+      : (rows.length > 0 ? `<div class="we-db-micro-hint">共 ${rows.length} 行 · 点击任意行可展开查看全部字段</div>` : '');
+
+    return `<div class="we-db-table-wrap we-db-table-wrap--fit"><table class="we-db-table we-db-table--fit"><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>${pagerHtml}`;
   }
 
   function renderMemoryTables(state) {
@@ -1106,19 +1205,20 @@ window.WORLD_ENGINE_UI = (function() {
     const tables = state?.tables || dataApi?.emptyTables?.() || {};
     const watermarks = state?.tableWatermarks || {};
     if (!stateSheetKeys.includes(_memoryActiveTable)) _memoryActiveTable = stateSheetKeys[0] || 'important_characters';
+    const chronCount = Array.isArray(tables.chronicle) ? tables.chronicle.length : 0;
 
     const tabsHtml = `<div class="we-db-tabs" role="tablist">${stateSheetKeys.map(k => {
       const schema = schemas[k] || { shortName: k, name: k };
       const cnt = Array.isArray(tables[k]) ? tables[k].length : 0;
       return `<button type="button" class="we-db-tab${_memoryActiveTable === k ? ' is-active' : ''}" data-memory-table-tab="${h(k)}">${h(schema.shortName || schema.name)} <span class="we-db-tab-cnt">${cnt}</span></button>`;
-    }).join('')}</div>`;
+    }).join('')}<button type="button" class="we-db-tab we-db-tab--jump" data-memory-jump-view="minutes" title="切换到纪要表">纪要 <span class="we-db-tab-cnt">${chronCount}</span> ↗</button></div>`;
 
     const activeSchema = schemas[_memoryActiveTable];
     const rows = Array.isArray(tables[_memoryActiveTable]) ? tables[_memoryActiveTable] : [];
     const wm = watermarks[_memoryActiveTable];
-    const wmBadge = wm !== null && wm !== undefined ? `已填至第 ${wm} 层` : '尚未自动填表';
+    const wmBadge = wm !== null && wm !== undefined ? `L${wm}` : '未填';
     const isSingleton = activeSchema?.mode === 'singleton';
-    const addBtnLabel = isSingleton ? (rows.length ? '编辑当前行' : '初始化记录') : `新增${activeSchema?.shortName || '记录'}`;
+    const addBtnLabel = isSingleton ? (rows.length ? '编辑' : '初始化') : `新增`;
 
     const isEditingHere = _memoryEditingTableRow && _memoryEditingTableRow.sheetKey === _memoryActiveTable;
     let editorHtml = '';
@@ -1131,41 +1231,21 @@ window.WORLD_ENGINE_UI = (function() {
 
     let tableHtml = '';
     if (!rows.length) {
-      tableHtml = `<div class="we-empty">「${h(activeSchema?.name || _memoryActiveTable)}」当前为空。可等待自动填表、点击「一键追平」，或点上方按钮手动录入。</div>`;
+      tableHtml = `<div class="we-empty">「${h(activeSchema?.name || _memoryActiveTable)}」当前为空。可等待自动填表、点击「一键追平」，或点右上按钮手动录入。</div>`;
+    } else if (isSingleton) {
+      tableHtml = renderSingletonKvTable(_memoryActiveTable, rows[0]);
     } else {
-      const cols = activeSchema.columns || [];
-      const headerCells = `<th>#</th>${cols.map(c => `<th>${h(c.label)}</th>`).join('')}<th>操作</th>`;
-      const bodyRows = rows.map(row => {
-        const cells = cols.map(c => {
-          const val = String(row[c.key] ?? '').trim();
-          if (_memoryActiveTable === 'important_characters' && c.key === 'presence_status') {
-            return `<td><span class="we-db-status-pill ${val === '离场' ? 'is-away' : 'is-present'}">${h(val || '在场')}</span></td>`;
-          }
-          return `<td class="${c.multiline ? 'is-multiline' : ''}">${val ? h(val) : '<span class="we-db-cell-empty">—</span>'}</td>`;
-        }).join('');
-        const deleteBtn = activeSchema.allowDelete
-          ? `<button class="we-icon-btn we-memory-delete-table-row" type="button" data-sheet-key="${h(_memoryActiveTable)}" data-row-id="${h(String(row.rowId))}" title="删除"><i class="fa-solid fa-trash"></i></button>`
-          : '';
-        return `<tr data-sheet-key="${h(_memoryActiveTable)}" data-row-id="${h(String(row.rowId))}">
-          <td class="we-db-rowid">${h(String(row.rowId))}</td>
-          ${cells}
-          <td class="we-db-row-ops">
-            <button class="we-icon-btn we-memory-edit-table-row" type="button" data-sheet-key="${h(_memoryActiveTable)}" data-row-id="${h(String(row.rowId))}" title="编辑"><i class="fa-solid fa-pen"></i></button>
-            ${deleteBtn}
-          </td>
-        </tr>`;
-      }).join('');
-      tableHtml = `<div class="we-db-table-wrap"><table class="we-db-table"><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+      tableHtml = renderKeyedFitTable(_memoryActiveTable, activeSchema, rows);
     }
 
     return `${tabsHtml}
-      <div class="we-db-sheet-bar">
+      <div class="we-db-sheet-bar we-db-sheet-bar--compact" title="${h(activeSchema?.description || '')}">
         <div class="we-db-sheet-info">
           <strong>${h(activeSchema?.name || _memoryActiveTable)}</strong>
-          <span class="we-memory-kw-tag">${h(wmBadge)}</span>
-          <div class="we-hint" style="margin:2px 0 0;">${h(activeSchema?.description || '')}</div>
+          <span class="we-memory-kw-tag">水位 ${h(wmBadge)}</span>
+          <span class="we-db-sheet-desc">${h(activeSchema?.description || '')}</span>
         </div>
-        <button class="we-btn we-btn-primary" id="we-memory-add-table-row" type="button" data-sheet-key="${h(_memoryActiveTable)}"><i class="fa-solid ${isSingleton && rows.length ? 'fa-pen' : 'fa-plus'}"></i> ${h(addBtnLabel)}</button>
+        <button class="we-btn we-btn-primary we-btn-xs" id="we-memory-add-table-row" type="button" data-sheet-key="${h(_memoryActiveTable)}"><i class="fa-solid ${isSingleton && rows.length ? 'fa-pen' : 'fa-plus'}"></i> ${h(addBtnLabel)}</button>
       </div>
       ${editorHtml}
       ${tableHtml}`;
@@ -1182,26 +1262,41 @@ window.WORLD_ENGINE_UI = (function() {
     const validIds = items.filter(item => item.status !== 'stale' && item.status !== 'failed').map(item => item.id);
     const recentIdSet = new Set(directLimit > 0 ? validIds.slice(-directLimit) : []);
     const nextCode = window.MEMORY_ENGINE_DATA?.nextChronicleCode?.(items) || 'AM0001';
-    const pageActions = `<div class="we-memory-page-actions"><button class="we-btn we-btn-primary" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button></div>`;
+
+    const MINUTES_PAGE_SIZE = 7;
+    const totalPages = Math.max(1, Math.ceil(items.length / MINUTES_PAGE_SIZE));
+    const activePage = (_memoryMinutesPage < 0 || _memoryMinutesPage >= totalPages) ? (totalPages - 1) : _memoryMinutesPage;
+
+    const topBar = `<div class="we-db-sheet-bar we-db-sheet-bar--compact">
+      <div class="we-db-sheet-info">
+        <strong>纪要表</strong>
+        <span class="we-memory-kw-tag">共 ${items.length} 条</span>
+        <span class="we-db-sheet-desc">${items.length > 1 ? `单屏分页展示，默认展开最新一条` : '每轮交互独立一条 AMXXXX 记录'}</span>
+      </div>
+      <div style="display:flex;gap:5px;align-items:center;">
+        <button type="button" class="we-btn we-btn-xs" data-memory-jump-view="tables" title="切换到 6 张状态表格">状态表 ↗</button>
+        <button class="we-btn we-btn-primary we-btn-xs" id="we-memory-add-small" type="button"><i class="fa-solid fa-plus"></i> 新增纪要</button>
+      </div>
+    </div>`;
 
     const editor = (item, isNew) => `<div class="we-memory-editor">
-      <div class="we-memory-form-grid">
+      <div class="we-db-editor-grid">
         <div class="we-input-group"><label>编码索引</label><input class="we-memory-small-code" type="text" value="${h(item.code_index || item.codeIndex || nextCode)}" placeholder="AM0001"></div>
         <div class="we-input-group"><label>时间跨度</label><input class="we-memory-small-timespan" type="text" value="${h(item.time_span || item.timeSpan || '')}" placeholder="YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM"></div>
-      </div>
-      <div class="we-memory-form-grid">
         <div class="we-input-group"><label>起始 AI 楼层</label><input class="we-memory-small-start" type="number" min="0" value="${h(String(item.startLayer ?? 0))}"></div>
-        <div class="we-input-group"><label>结束 AI 楼层（单层填相同楼数）</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div>
+        <div class="we-input-group"><label>结束 AI 楼层</label><input class="we-memory-small-end" type="number" min="0" value="${h(String(item.endLayer ?? 0))}"></div>
+        <div class="we-input-group is-span-2"><label>概览（≤30字，用于历史索引）</label><input class="we-memory-small-summary" type="text" value="${h(item.summary || '')}" placeholder="一句话概括本轮核心事件"></div>
+        <div class="we-input-group is-span-2"><label>纪要正文（目标 ≥${minChars} 字）</label><textarea class="we-memory-small-content" rows="4">${h(item.chronicle_text || item.content || '')}</textarea></div>
+        <div class="we-input-group is-span-2"><label>重要对话（可选）</label><textarea class="we-memory-small-dialogue" rows="2" placeholder="角色名：「原台词」">${h(item.key_dialogue || item.keyDialogue || '')}</textarea></div>
+        <div class="we-input-group"><label>检索关键词（/ 分隔）</label><input class="we-memory-small-keywords" type="text" value="${h((item.keywords || []).join(' / '))}" placeholder="青铜虎符 / 青石渡"></div>
+        <div class="we-input-group" style="display:flex;align-items:flex-end;"><label class="we-settings-check"><input class="we-memory-small-key" type="checkbox" ${item.impactLevel === 'key' ? 'checked' : ''}> 关键转折事件</label></div>
       </div>
-      <div class="we-input-group"><label>概览（≤30字，用于历史索引）</label><input class="we-memory-small-summary" type="text" value="${h(item.summary || '')}" placeholder="一句话概括本段核心事件"></div>
-      <div class="we-input-group"><label>纪要正文</label><textarea class="we-memory-small-content" rows="6">${h(item.chronicle_text || item.content || '')}</textarea><div class="we-hint">API 单层纪要最低目标 ${minChars} 字（可在记忆设置中调整）；最新 ${directLimit} 条有效纪要直接注入，更早纪要自动进入「已发生的事件概览」索引与关键词/向量召回池。</div></div>
-      <div class="we-input-group"><label>重要对话（可选，推动转折/承诺的原文台词）</label><textarea class="we-memory-small-dialogue" rows="2" placeholder="角色名：「原台词」">${h(item.key_dialogue || item.keyDialogue || '')}</textarea></div>
-      <div class="we-input-group"><label>检索关键词（用 / 分隔）</label><input class="we-memory-small-keywords" type="text" value="${h((item.keywords || []).join(' / '))}" placeholder="例如：青铜虎符 / 青石渡"></div>
-      <div class="we-input-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input class="we-memory-small-key" type="checkbox" ${item.impactLevel === 'key' ? 'checked' : ''}> 标记为关键转折事件（优先召回与大纲参考）</label></div>
       <div class="we-memory-editor-actions"><button class="we-btn we-memory-cancel-edit" type="button">取消</button><button class="we-btn we-btn-primary we-memory-save-small" data-new="${isNew ? 'true' : 'false'}" type="button">保存</button></div>
     </div>`;
+
     const draft = _memoryEditingSmall === '__new__'
       ? `<div class="we-memory-record we-memory-record-new" data-small-id="__new__">${editor({ code_index: nextCode, time_span: '', summary: '', startLayer: state?.tableWatermarks?.chronicle ?? 0, endLayer: state?.tableWatermarks?.chronicle ?? 0, chronicle_text: '', key_dialogue: '', keywords: [], impactLevel: 'normal' }, true)}</div>` : '';
+
     const cards = items.map((item, index) => {
       const collapseKey = `small:${item.id}`;
       const defaultCollapsed = index !== items.length - 1;
@@ -1213,26 +1308,37 @@ window.WORLD_ENGINE_UI = (function() {
         ? `<div class="we-memory-kw-list">${item.keywords.map(k => `<span class="we-memory-kw-tag">#${h(k)}</span>`).join('')}</div>` : '';
       const dialogueHtml = dialogue
         ? `<div class="we-memory-dialogue-box"><strong>重要对话：</strong>${h(dialogue)}</div>` : '';
-      const badges = [
-        `<span class="we-memory-type-badge">${h(code)}</span>`,
-        item.source === 'world_engine' ? '<span class="we-memory-kw-tag">世界同步</span>' : '',
-        item.impactLevel === 'key' ? '<span class="we-memory-type-badge">关键转折</span>' : '',
-        item.status === 'stale' ? '<span class="we-memory-kw-tag">待重建</span>' : '',
-        item.outlineChapterTitle ? `<span class="we-memory-kw-tag">${h(item.outlineChapterTitle)}</span>` : ''
-      ].filter(Boolean).join('');
-      const stateLabel = item.status === 'stale'
-        ? '已失效（待回退重填）'
-        : (recentIdSet.has(item.id) ? '直接注入中' : '历史索引/召回池');
-      const titleSummary = item.summary ? ` · ${item.summary}` : '';
-      return `<div class="${memoryRecordClass(collapseKey, '', defaultCollapsed)}" data-small-id="${h(item.id)}">
-      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">${badges}楼层 ${h(formatUiLayerSpan(item.startLayer, item.endLayer))}${h(titleSummary)}</div><div class="we-memory-record-meta">${stateLabel}${timeSpan ? ` · ${h(timeSpan)}` : ''}</div></div>
+      const stateBadge = item.status === 'stale'
+        ? '<span class="we-db-status-pill is-away">待修</span>'
+        : (recentIdSet.has(item.id) ? '<span class="we-db-status-pill is-present">直注</span>' : '<span class="we-db-status-pill is-away">归档</span>');
+      const keyTag = item.impactLevel === 'key' ? '<span class="we-memory-type-badge">关键</span>' : '';
+      const summaryLine = item.summary || String(bodyText || '').replace(/\s+/g, ' ').slice(0, 32) || '（无概览）';
+      return `<div class="${memoryRecordClass(collapseKey, 'we-chronicle-row-card', defaultCollapsed)}" data-small-id="${h(item.id)}">
+      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0">
+        <div class="we-chronicle-row-grid">
+          <span class="we-chronicle-col-code">${h(code)}</span>
+          <span class="we-chronicle-col-floor">L${h(formatUiLayerSpan(item.startLayer, item.endLayer))}</span>
+          <span class="we-chronicle-col-sum" title="${h(summaryLine + (timeSpan ? ' · ' + timeSpan : ''))}">${keyTag}${h(summaryLine)}${timeSpan ? ` <em class="we-chronicle-time">${h(timeSpan)}</em>` : ''}</span>
+          <span class="we-chronicle-col-state">${stateBadge}</span>
+        </div>
         <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-edit-small" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-small" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
       </div>
-      ${memoryRecordBody(collapseKey, _memoryEditingSmall === item.id ? editor(item, false) : `<div class="we-memory-summary-text">${h(bodyText || '（内容为空）')}</div>${dialogueHtml}${keywordsHtml}`, defaultCollapsed)}
+      ${memoryRecordBody(collapseKey, _memoryEditingSmall === item.id ? editor(item, false) : `<div class="we-memory-summary-text we-chronicle-body-clamp">${h(bodyText || '（内容为空）')}</div>${dialogueHtml}${keywordsHtml}`, defaultCollapsed)}
     </div>`;
-    }).join('');
-    const countHint = items.length > 1 ? `<div class="we-hint">共 ${items.length} 条纪要，默认展开最新一条。</div>` : '';
-    return `${pageActions}${countHint}${draft}${cards || '<div class="we-empty">尚未生成纪要，可在记忆首页点击“一键追平”，或进入“填表”分页查看追平计划。</div>'}`;
+    });
+
+    const pageCards = cards.slice(activePage * MINUTES_PAGE_SIZE, (activePage + 1) * MINUTES_PAGE_SIZE).join('');
+    const tableHead = items.length
+      ? `<div class="we-chronicle-table-head"><span>编码</span><span>楼层</span><span>概览 / 时间</span><span>状态</span><span style="text-align:right;">操作</span></div>`
+      : '';
+    const pagerHtml = totalPages > 1
+      ? `<div class="we-db-pager">
+          <button type="button" class="we-btn we-btn-xs" data-minutes-page="${activePage - 1}" ${activePage <= 0 ? 'disabled' : ''}>◀ 上页</button>
+          <span class="we-db-pager-info">第 ${activePage + 1} / ${totalPages} 页（共 ${items.length} 条 · 默认展开最新一条）</span>
+          <button type="button" class="we-btn we-btn-xs" data-minutes-page="${activePage + 1}" ${activePage >= totalPages - 1 ? 'disabled' : ''}>下页 ▶</button>
+        </div>`
+      : '';
+    return `${topBar}${draft}${items.length ? `<div class="we-chronicle-sheet">${tableHead}${pageCards}</div>${pagerHtml}` : '<div class="we-empty">尚未生成纪要，可在记忆首页点击“一键追平”，或进入“填表”分页查看追平计划。</div>'}`;
   }
 
   function renderMemorySubView(view) {
@@ -1328,11 +1434,51 @@ window.WORLD_ENGINE_UI = (function() {
       };
     });
 
-    // 7 表数据库标签页切换与行内增删改
+    // 7 表数据库标签页切换、跨子页跳转、分页与行内展开/增删改
+    document.querySelectorAll('[data-memory-jump-view]').forEach(btn => {
+      btn.onclick = () => {
+        const target = btn.dataset.memoryJumpView;
+        if (!target) return;
+        clearMemoryEditing();
+        _memoryView = target;
+        refresh();
+      };
+    });
     document.querySelectorAll('[data-memory-table-tab]').forEach(btn => {
       btn.onclick = () => {
         clearMemoryEditing();
         _memoryActiveTable = btn.dataset.memoryTableTab || 'important_characters';
+        refresh();
+      };
+    });
+    document.querySelectorAll('.we-db-summary-row[data-db-toggle-row]').forEach(rowEl => {
+      rowEl.onclick = event => {
+        if (event.target.closest('button, a, input, select, textarea')) return;
+        const key = rowEl.dataset.dbToggleRow;
+        if (!key) return;
+        if (_memoryExpandedTableRows.has(key)) {
+          _memoryExpandedTableRows.delete(key);
+        } else {
+          const prefix = (rowEl.dataset.sheetKey || '') + ':';
+          for (const existing of Array.from(_memoryExpandedTableRows)) {
+            if (existing.startsWith(prefix)) _memoryExpandedTableRows.delete(existing);
+          }
+          _memoryExpandedTableRows.add(key);
+        }
+        refresh();
+      };
+    });
+    document.querySelectorAll('[data-db-page-sheet]').forEach(btn => {
+      btn.onclick = () => {
+        const sheetKey = btn.dataset.dbPageSheet;
+        if (!sheetKey) return;
+        _memoryTablePage[sheetKey] = Math.max(0, parseInt(btn.dataset.dbPage, 10) || 0);
+        refresh();
+      };
+    });
+    document.querySelectorAll('[data-minutes-page]').forEach(btn => {
+      btn.onclick = () => {
+        _memoryMinutesPage = Math.max(0, parseInt(btn.dataset.minutesPage, 10) || 0);
         refresh();
       };
     });
@@ -1406,7 +1552,10 @@ window.WORLD_ENGINE_UI = (function() {
           if (isNew) {
             const nextId = rows.reduce((m, r) => Math.max(m, Number(r.rowId) || 0), 0) + 1;
             const created = window.MEMORY_ENGINE_DATA.normalizeTableRow(sheetKey, draft, nextId);
-            if (created) rows.push(created);
+            if (created) {
+              rows.push(created);
+              _memoryTablePage[sheetKey] = 999999;
+            }
           } else {
             const idx = rows.findIndex(r => Number(r.rowId) === rowId);
             if (idx >= 0) {
@@ -1575,6 +1724,7 @@ window.WORLD_ENGINE_UI = (function() {
         const items = state?.tables?.chronicle || [];
         if (button.dataset.new === 'true') {
           items.push({ id: nextMemoryUiId(items, 'small'), code_index, time_span, summary, chronicle_text, key_dialogue, startLayer, endLayer, keywords, impactLevel });
+          _memoryMinutesPage = -1;
           if (saveEditedMemoryState(state, '纪要已新增')) { clearMemoryEditing(); refresh(); }
           return;
         }
@@ -1589,10 +1739,9 @@ window.WORLD_ENGINE_UI = (function() {
   const MEMORY_SETTINGS_TABS = [
     { key: 'common', label: '常用' },
     { key: 'prompts', label: '提示词' },
-    { key: 'recall', label: '记忆检索' },
+    { key: 'recall', label: '检索' },
     { key: 'link', label: '联动' },
     { key: 'advanced', label: '高级' },
-    { key: 'mechanics', label: '本地机制' },
     { key: 'archive', label: '存档' },
     { key: 'worldbook', label: '世界书' },
     { key: 'debug', label: '调试' },
@@ -1634,25 +1783,33 @@ window.WORLD_ENGINE_UI = (function() {
   function renderMemoryCheckpointSection() {
     const data = window.MEMORY_ENGINE_DATA;
     const checkpoint = data?.loadCheckpoint?.() || null;
-    const count = Array.isArray(checkpoint?.personal_memory) ? checkpoint.personal_memory.length : 0;
-    const entityCount = ['organization', 'object', 'ability', 'location']
-      .reduce((sum, type) => sum + (Array.isArray(checkpoint?.entity_memory?.[type]) ? checkpoint.entity_memory[type].length : 0), 0);
-    const smallSummaryCount = Array.isArray(checkpoint?.event_memory?.small_summaries)
-      ? checkpoint.event_memory.small_summaries.length : 0;
+    const counts = checkpoint ? (data?.tableRowCounts?.(checkpoint) || null) : null;
+    const roleCount = counts
+      ? (Number(counts.important_characters) || 0) + (Number(counts.protagonist_info) || 0)
+      : (Array.isArray(checkpoint?.personal_memory) ? checkpoint.personal_memory.length : 0);
+    const assetCount = counts
+      ? (Number(counts.protagonist_skills) || 0) + (Number(counts.inventory) || 0) + (Number(counts.quests_events) || 0)
+      : ['organization', 'object', 'ability', 'location']
+          .reduce((sum, type) => sum + (Array.isArray(checkpoint?.entity_memory?.[type]) ? checkpoint.entity_memory[type].length : 0), 0);
+    const chronicleRows = Array.isArray(checkpoint?.tables?.chronicle) && checkpoint.tables.chronicle.length
+      ? checkpoint.tables.chronicle
+      : (Array.isArray(checkpoint?.event_memory?.small_summaries) ? checkpoint.event_memory.small_summaries : []);
+    const smallSummaryCount = chronicleRows.length;
     const smallSummaryContent = smallSummaryCount
-      ? '<div class="we-chatcache-list">' + checkpoint.event_memory.small_summaries.map(item =>
-          '<div class="we-prompt-seg-card"><div class="we-prompt-seg-head"><span class="we-prompt-seg-label">楼层 '
-          + h(item.startLayer) + '-' + h(item.endLayer) + '</span></div><div class="we-prompt-seg-body" style="display:block;"><pre class="we-prompt-seg-pre">'
-          + h(item.content) + '</pre></div></div>'
+      ? '<div class="we-chatcache-list">' + chronicleRows.map(item =>
+          '<div class="we-prompt-seg-card"><div class="we-prompt-seg-head"><span class="we-prompt-seg-label">'
+          + h(item.code_index ? item.code_index + ' · ' : '') + '楼层 '
+          + h(formatUiLayerSpan(item.startLayer, item.endLayer)) + '</span></div><div class="we-prompt-seg-body" style="display:block;"><pre class="we-prompt-seg-pre">'
+          + h(item.chronicle_text || item.content || '') + '</pre></div></div>'
         ).join('') + '</div>'
       : '<div class="we-empty">暂无纪要</div>';
     const content = checkpoint
-      ? '<div class="we-hint">包含 ' + count + ' 个人物、' + entityCount + ' 个世界实体和 ' + smallSummaryCount + ' 条纪要</div>'
+      ? '<div class="we-hint">包含 ' + roleCount + ' 项角色档案、' + assetCount + ' 项技能/物品/任务和 ' + smallSummaryCount + ' 条纪要</div>'
         + '<div class="we-section" style="margin-top:10px;"><div class="we-section-title">' + sectionHeader('纪要 · ' + smallSummaryCount + ' 条', 'memory-checkpoint-small-summaries') + '</div>' + sectionBody('memory-checkpoint-small-summaries', smallSummaryContent) + '</div>'
         + '<div class="we-section" style="margin-top:10px;"><div class="we-section-title">' + sectionHeader('完整 JSON', 'memory-checkpoint-json') + '</div>' + sectionBody('memory-checkpoint-json', '<pre class="we-prompt-seg-pre">' + h(JSON.stringify(checkpoint, null, 2)) + '</pre>') + '</div>'
       : '<div class="we-empty">暂无存档点</div>';
     return '<div class="we-section" style="margin-top:16px;"><div class="we-section-title">'
-      + sectionHeader(checkpoint ? '存档点 - ' + count + ' 人物 / ' + entityCount + ' 实体' : '存档点', 'memory-checkpoint-section')
+      + sectionHeader(checkpoint ? '存档点 - ' + roleCount + ' 角色 / ' + assetCount + ' 资产 / ' + smallSummaryCount + ' 纪要' : '存档点', 'memory-checkpoint-section')
       + '</div>' + sectionBody('memory-checkpoint-section', content) + '</div>';
   }
 
@@ -1662,11 +1819,24 @@ window.WORLD_ENGINE_UI = (function() {
     return list.map(item => {
       let time = '';
       try { time = new Date(item.createdAt).toLocaleString(); } catch (error) {}
-      const count = Number(item.characters) || 0;
-      const entityCount = Number(item.entities) || 0;
+      let roleCount = Number(item.characters) || 0;
+      let assetCount = Number(item.entities) || 0;
+      let chronCount = null;
+      try {
+        if (item.data?.state) {
+          const parsed = JSON.parse(item.data.state);
+          const c = window.MEMORY_ENGINE_DATA?.tableRowCounts?.(parsed);
+          if (c) {
+            roleCount = (c.important_characters || 0) + (c.protagonist_info || 0);
+            assetCount = (c.protagonist_skills || 0) + (c.inventory || 0) + (c.quests_events || 0);
+            chronCount = c.chronicle || 0;
+          }
+        }
+      } catch (_) {}
+      const chronMeta = chronCount !== null ? ` · ${chronCount} 条纪要` : '';
       return '<div class="we-snapshot-row" data-memory-snap-id="' + u(item.id) + '">'
         + '<div class="we-snapshot-main"><div class="we-snapshot-name"><span class="we-snapshot-badge' + (item.auto ? ' is-auto' : '') + '">' + (item.auto ? '自动' : '手动') + '</span>' + h(item.name) + '</div>'
-        + '<div class="we-snapshot-meta">第 ' + (item.round || 0) + ' 轮 · ' + count + ' 个人物 · ' + entityCount + ' 个实体' + (time ? ' · ' + h(time) : '') + '</div></div>'
+        + '<div class="we-snapshot-meta">第 ' + (item.round || 0) + ' 轮 · ' + roleCount + ' 角色 · ' + assetCount + ' 资产' + chronMeta + (time ? ' · ' + h(time) : '') + '</div></div>'
         + '<div class="we-snapshot-actions">'
         + '<button class="we-icon-btn" data-memory-snap-action="restore" title="恢复"><i class="fa-solid fa-rotate-left"></i></button>'
         + '<button class="we-icon-btn" data-memory-snap-action="rename" title="重命名"><i class="fa-solid fa-pen"></i></button>'
@@ -1911,7 +2081,7 @@ window.WORLD_ENGINE_UI = (function() {
           <input type="number" id="we-memory-fill-max-retries" min="0" max="5" step="1" value="${tableFillMaxRetries}" style="width:100%;">
         </div>
       </div>
-      <div style="font-size:11px;color:var(--we-text3);margin-bottom:8px;">追平默认每 3 层合并填表，与平时自动填表解耦；若 AI 输出畸形 JSON 或漏填主键，自动把报错回灌给模型定向修正重试。</div>
+      <div style="font-size:11px;color:var(--we-text3);margin-bottom:8px;">追平默认每 3 层合并请求，但纪要表仍严格按单轮逐层独立生成（如 2、4 楼分别产出 AM0001、AM0002，绝不合并）；若 AI 输出畸形 JSON 或漏填条数，自动把报错回灌给模型定向修正重试。</div>
       <div class="we-input-group">
         <label>核心 7 表自动填表开关与独立频率（0 = 跟随全局间隔）</label>
         <div class="we-table-cfg-list">
@@ -2400,14 +2570,14 @@ window.WORLD_ENGINE_UI = (function() {
     const panelContent = {
       common: sec('set-memory-api', '记忆引擎 API', apiBody)
         + sec('set-memory-evolve', '核心 7 表填表与追平', modeBody)
-        + sec('set-memory-inject', '双层记忆注入', injectBody),
+        + sec('set-memory-inject', '双层记忆注入', injectBody)
+        + sec('set-memory-mechanics', '正文保留与填表参考', mechanicsBody),
       prompts: sec('set-memory-sys-prompt', '底层填表主 System Prompt（shujuku 原版）', mainSystemPromptBody)
         + sec('set-memory-sheet-rules', '核心 7 表各自规则（Note 约束）', sheetRulesBody)
         + sec('set-memory-tone', '附加风格补充提示词', toneBody),
       recall: sec('set-memory-embedding', 'Embedding 向量模型配置', embeddingBody)
         + sec('set-memory-rerank', 'Rerank 重排模型与检索范围', rerankBody)
         + sec('set-memory-vector-ops', '向量索引维护与独立文件', recallMaintainBody),
-      mechanics: sec('set-memory-mechanics', '正文保留与填表参考', mechanicsBody),
       link: sec('set-memory-bridge', '三模块协同调度', memoryBridgeBody)
         + sec('set-memory-link', '与世界引擎联动', linkBody)
         + sec('set-memory-outline-link', '与剧情大纲联动', memoryOutlineLinkBody),
@@ -2442,7 +2612,8 @@ window.WORLD_ENGINE_UI = (function() {
     return renderSubTopbar('id="we-memory-settings-back"', '设置', '工欲善其事，必先利其器')
       + tabBar + panels
       + '<div class="we-settings-save-actions we-settings-save-sticky">'
-      + '<button class="we-btn" id="we-save-memory-settings">保存设置</button>'
+      + '<button class="we-btn we-btn-primary" id="we-save-memory-settings">保存设置</button>'
+      + '<button class="we-btn we-btn-danger" id="we-reset-memory" type="button">重置记忆</button>'
       + '</div>';
   }
 
@@ -3050,7 +3221,7 @@ window.WORLD_ENGINE_UI = (function() {
     { key: 'common',    label: '常用' },
     { key: 'link',      label: '联动' },
     { key: 'advanced',  label: '高级' },
-    { key: 'mechanics', label: '本地机制' },
+    { key: 'mechanics', label: '机制' },
     { key: 'archive',   label: '存档' },
     { key: 'worldbook', label: '世界书' },
     { key: 'debug',     label: '调试' },
@@ -3117,7 +3288,7 @@ window.WORLD_ENGINE_UI = (function() {
       + panels
       // 保存/重置：底部常驻（sticky），任何选项卡都能一键保存全部设置
       + '<div class="we-settings-save-actions we-settings-save-sticky">'
-      + '<button class="we-btn" id="we-save-settings">保存设置</button>'
+      + '<button class="we-btn we-btn-primary" id="we-save-settings">保存设置</button>'
       + '<button class="we-btn we-btn-danger" id="we-reset-world">重置世界</button>'
       + '</div>';
   }
@@ -6192,6 +6363,26 @@ window.WORLD_ENGINE_UI = (function() {
     const memoryData = window.MEMORY_ENGINE_DATA;
     const memoryVector = window.MEMORY_ENGINE_VECTOR;
     const memoryCache = window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory');
+    const memoryResetBtn = document.getElementById('we-reset-memory');
+    if (memoryResetBtn) {
+      memoryResetBtn.onclick = () => {
+        if (window.MEMORY_ENGINE?.isRunning?.()) {
+          showToast('后台记忆任务运行中，暂不能重置记忆', true);
+          return;
+        }
+        if (!memoryData) { showToast('记忆数据模块未加载', true); return; }
+        if (!confirm('确认重置当前聊天的全部核心 7 表记忆数据与水位线？（不会删除聊天记录；重置前会自动尝试留存一份快照备份）')) return;
+        try { memoryCache?.createSnapshot?.('重置前自动备份 ' + new Date().toLocaleString()); } catch (_) {}
+        memoryData.clearCheckpoint?.();
+        memoryData.clearLinkCheckpoint?.();
+        memoryData.saveState(memoryData.defaultState());
+        try { memoryVector?.clearVectorCache?.(memoryData.getChatId?.()); } catch (_) {}
+        window.MEMORY_ENGINE?.applyInjection?.();
+        try { window.OUTLINE_ENGINE?.applyInjection?.(); } catch (_) {}
+        showToast('当前聊天的记忆数据已重置');
+        refresh();
+      };
+    }
     const syncRecallFromDom = () => {
       const patch = collectRecallSettingsFromDom();
       if (Object.keys(patch).length) window.MEMORY_ENGINE_SETTINGS?.patchSettings?.(patch);
@@ -6365,7 +6556,8 @@ window.WORLD_ENGINE_UI = (function() {
       if (!memoryData?.exportMemoryPackage) { showToast('记忆包功能未就绪', true); return; }
       const pkg = memoryData.exportMemoryPackage();
       setupDownload(JSON.stringify(pkg, null, 2), 'memory-summary-package-' + Date.now() + '.json');
-      showToast(`已导出总结记忆包（${pkg.counts?.minutes || 0} 纪要 · ${pkg.counts?.facts || 0} 持续事实）`);
+      const pc = pkg.counts || {};
+      showToast(`已导出总结记忆包（角色 ${pc.important_characters ?? pc.people ?? 0} · 任务 ${pc.quests_events ?? pc.facts ?? 0} · 纪要 ${pc.chronicle ?? pc.minutes ?? 0}）`);
     };
     const memoryImportPkg = document.getElementById('we-memory-import-package');
     const memoryImportPkgFile = document.getElementById('we-memory-import-package-file');
@@ -6381,7 +6573,10 @@ window.WORLD_ENGINE_UI = (function() {
         try {
           const parsed = JSON.parse(await file.text());
           const counts = parsed?.counts || {};
-          const summaryMsg = `确认将此总结记忆包导入当前聊天？（含 ${counts.people ?? '?'} 人物、${counts.facts ?? '?'} 持续事实、${counts.minutes ?? '?'} 纪要）\n将覆盖当前总结资料并以当前末楼建立新基线，原撤销档案将清空，聊天记录不会被删除。`;
+          const pRoles = counts.important_characters ?? counts.people ?? '?';
+          const pQuests = counts.quests_events ?? counts.facts ?? '?';
+          const pChron = counts.chronicle ?? counts.minutes ?? '?';
+          const summaryMsg = `确认将此总结记忆包导入当前聊天？（含 ${pRoles} 重要角色、${pQuests} 任务与事件、${pChron} 条纪要）\n将覆盖当前核心 7 表并以当前末楼建立新基线，原撤销档案将清空，聊天记录不会被删除。`;
           if (!confirm(summaryMsg)) return;
           const imported = memoryData.importMemoryPackage(parsed, {
             expectedChatId: selectedChatId,
