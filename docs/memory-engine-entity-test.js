@@ -96,8 +96,7 @@ async function run() {
         location_name: '黑礁湾',
         presence_status: '在场',
         relation_text: '沈鹤亭:同门',
-        past_experience: '随沈鹤亭赴黑礁湾迎敌。',
-        interaction_options: '询问断潮剑修复之法'
+        past_experience: '随沈鹤亭赴黑礁湾迎敌。'
       }],
       delete: []
     },

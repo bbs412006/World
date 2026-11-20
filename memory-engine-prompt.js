@@ -76,7 +76,6 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 - presence_status: 在场状态（仅限 "在场" 或 "离场"）
 - relation_text: 人际关系
 - past_experience: 过往经历
-- interaction_options: 交互选项
 
 【强制约束】
 1. brief_intro 仅允许客观事实类内容，严禁出现任何性格标签概述（如"开朗""冷漠""温柔"等）；客观内容范畴包括：角色核心身份、与剧情强相关的客观行为、与关键人物的客观关联、非性格类核心特征。
@@ -85,13 +84,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 2. outfit_text 仅写外在可见的服饰、饰品、妆容、持握物等可视元素，禁止写固有的长相特征、气质、气场等非视觉内容。
    √ 深灰立领风衣配黑皮手套 / 左手无名指戴着一枚银色蛇纹戒
    × 散发出高贵的气场、看起来像个军人
-3. interaction_options 必须同时遵循下述要求：
-   (1) 不使用第一人称"我"
-   (2) 动作发起方为主角，接收方为角色
-   (3) 必须是具体、有代入感的实际行动，避免干瘪的单词
-   √ 向他打听失踪案线索 / 假装偶遇并搭话套取信息 / 故意打翻水杯制造冲突
-   × 交谈 / 打听
-4. 【relation_text 格式规则】（强制）：
+3. 【relation_text 格式规则】（强制）：
    - 格式必须是：角色名:关系描述（必须显式写出"角色名:"前缀，禁止省略角色名直接写关系内容）。
    - 同一角色有多个关系标签/描述时，用英文逗号 , 分隔；不同角色之间用英文分号 ; 分隔；关系描述去除人称，使用简短陈述。
    - 至少包含与主角的关系。
@@ -102,9 +95,9 @@ window.MEMORY_ENGINE_PROMPT = (function() {
    × 主角:认识;室友兼闺蜜                ← 第二段缺少角色名
    × 主角:旧识,艾莉丝:室友               ← 不同角色错用逗号
    × 主角:曾帮其修过自行车;旧识          ← 同一角色多标签错用分号
-5. past_experience 增量整合角色背景与本段关键事件，控制在 300 字以内，超过时精炼压缩。
-6. 删除约束：默认禁止删除。已出场但暂时无剧情、暂时离场、关系或身份变化的角色，必须保留在本表，只更新 presence_status、relation_text、past_experience、interaction_options 等字段；仅当角色明确永久离开当前剧情且后续不再需要追踪时，才允许放入 delete。
-7. 更新已有角色时，未变化字段留空 "" 即可自动保留原值；无变化输出 { "upsert": [], "delete": [] }。`,
+4. past_experience 增量整合角色背景与本段关键事件，控制在 300 字以内，超过时精炼压缩。
+5. 删除约束：默认禁止删除。已出场但暂时无剧情、暂时离场、关系或身份变化的角色，必须保留在本表，只更新 presence_status、relation_text、past_experience 等字段；仅当角色明确永久离开当前剧情且后续不再需要追踪时，才允许放入 delete。
+6. 更新已有角色时，未变化字段留空 "" 即可自动保留原值；无变化输出 { "upsert": [], "delete": [] }。`,
 
     protagonist_skills: `【4. 主角技能表 (protagonist_skills)｜按 skill_name 主键】
 记录主角获得的所有技能项目。结构：{ "upsert": [ {...} ], "delete": ["被剥夺或替换的技能名"] }。
@@ -253,8 +246,7 @@ window.MEMORY_ENGINE_PROMPT = (function() {
         "location_name": "所在地点",
         "presence_status": "在场或离场",
         "relation_text": "主角:关系1,关系2;另一角色:关系",
-        "past_experience": "过往经历",
-        "interaction_options": "第三人称具体交互行动"
+        "past_experience": "过往经历"
       }
     ],
     "delete": []
@@ -347,6 +339,12 @@ window.MEMORY_ENGINE_PROMPT = (function() {
       && text.includes('- 多轮交互整合为一条记录。');
   }
 
+  function isLegacyImportantCharsRule(text) {
+    return text.startsWith('【3. 重要角色表 (important_characters)｜按 name 主键，默认禁止删除】')
+      && text.includes('- interaction_options: 交互选项')
+      && text.includes('3. interaction_options 必须同时遵循下述要求：');
+  }
+
   function getEffectiveMainSystemPrompt(customOverride) {
     const override = clean(customOverride);
     if (override && !isLegacyMergedDefaultMainPrompt(override)) return override;
@@ -357,10 +355,12 @@ window.MEMORY_ENGINE_PROMPT = (function() {
 
   function getEffectiveSheetRule(sheetKey, customRulesOverride) {
     if (!ALL_TABLES.includes(sheetKey)) return '';
+    const isStaleDefault = text => (sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(text))
+      || (sheetKey === 'important_characters' && isLegacyImportantCharsRule(text));
     const fromOpt = clean(customRulesOverride?.[sheetKey]);
-    if (fromOpt && !(sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(fromOpt))) return fromOpt;
+    if (fromOpt && !isStaleDefault(fromOpt)) return fromOpt;
     const fromSettings = clean(readSettingsSafe().tableFillSheetRules?.[sheetKey]);
-    if (fromSettings && !(sheetKey === 'chronicle' && isLegacyMergedDefaultChronicleRule(fromSettings))) return fromSettings;
+    if (fromSettings && !isStaleDefault(fromSettings)) return fromSettings;
     return DEFAULT_SHEET_RULES[sheetKey] || '';
   }
 

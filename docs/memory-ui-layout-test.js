@@ -169,4 +169,13 @@ assert.match(ui, /id="we-reset-memory"/, '记忆设置底部常驻栏应提供�
 assert.match(outlineUi, /button\('save-settings',\s*'保存设置',\s*'',\s*'primary'\)/, '大纲设置保存按钮应统一使用 primary 样式');
 assert.match(css, /\.we-settings-tabs\s*\{[^}]*flex-wrap:\s*wrap/, '三模块设置选项卡栏应自动折行平铺而非横向滚动');
 
+// 4. 清空所有表数据入口（表格分页底部 + 设置存档区）以及去除选项表/角色交互选项
+assert.ok(
+  ui.includes('id="we-memory-clear-all-tables"') &&
+  ui.includes('id="we-memory-archive-clear-all"') &&
+  ui.includes('confirmAndClearAllMemoryTables'),
+  '应在「状态表格」底部与「设置 → 存档」提供清空所有表数据入口并统一确认与自动备份逻辑'
+);
+assert.ok(!dataJs.includes('interaction_options') && !dataJs.includes('选项表'), '记忆核心 7 表不应包含选项表与角色表交互选项字段');
+
 console.log('memory UI layout tests passed');

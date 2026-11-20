@@ -4919,6 +4919,24 @@
   color: var(--we-text3);
   text-align: center;
 }
+.we-db-footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--we-hairline);
+}
+.we-db-footer-meta {
+  font-size: 11px;
+  color: var(--we-text3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 
 /* 行内编辑器双列紧凑布局 */
 .we-db-row-editor {

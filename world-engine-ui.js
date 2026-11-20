@@ -1238,6 +1238,12 @@ window.WORLD_ENGINE_UI = (function() {
       tableHtml = renderKeyedFitTable(_memoryActiveTable, activeSchema, rows);
     }
 
+    const counts = dataApi?.tableRowCounts?.(state) || { totalRows: 0, chronicle: 0 };
+    const totalAllRows = Number(counts.totalRows) || 0;
+    const hasWatermarks = Object.values(watermarks || {}).some(v => v !== null && v !== undefined);
+    const hasNodes = Array.isArray(state?.timeline?.nodes) && state.timeline.nodes.length > 0;
+    const canClearAll = totalAllRows > 0 || hasWatermarks || hasNodes;
+
     return `${tabsHtml}
       <div class="we-db-sheet-bar we-db-sheet-bar--compact" title="${h(activeSchema?.description || '')}">
         <div class="we-db-sheet-info">
@@ -1248,7 +1254,11 @@ window.WORLD_ENGINE_UI = (function() {
         <button class="we-btn we-btn-primary we-btn-xs" id="we-memory-add-table-row" type="button" data-sheet-key="${h(_memoryActiveTable)}"><i class="fa-solid ${isSingleton && rows.length ? 'fa-pen' : 'fa-plus'}"></i> ${h(addBtnLabel)}</button>
       </div>
       ${editorHtml}
-      ${tableHtml}`;
+      ${tableHtml}
+      <div class="we-db-footer-bar">
+        <span class="we-db-footer-meta">7 表共 ${totalAllRows} 行（含纪要 ${chronCount} 条）</span>
+        <button type="button" class="we-btn we-btn-xs we-btn-danger" id="we-memory-clear-all-tables" ${canClearAll ? '' : 'disabled'} title="清空当前聊天全部 7 张表的数据与水位线（自动留存备份，不删除聊天记录）"><i class="fa-solid fa-trash"></i> 清空所有表数据</button>
+      </div>`;
   }
 
   function renderMemoryMinutes(state) {
@@ -1381,6 +1391,50 @@ window.WORLD_ENGINE_UI = (function() {
     return true;
   }
 
+  function confirmAndClearAllMemoryTables(options = {}) {
+    if (window.MEMORY_ENGINE?.isRunning?.()) {
+      showToast('后台记忆任务运行中，请先停止后再清空表数据', true);
+      return false;
+    }
+    const dataApi = window.MEMORY_ENGINE_DATA;
+    const state = dataApi?.loadState?.();
+    const counts = dataApi?.tableRowCounts?.(state) || { totalRows: 0, chronicle: 0 };
+    const totalRows = Number(counts.totalRows) || 0;
+    const label = options.clearCheckpoints ? '重置当前聊天的全部记忆数据' : '清空当前聊天的所有表数据';
+    const msg = `确认${label}？\n将清空核心 7 表共 ${totalRows} 行数据（含 ${counts.chronicle || 0} 条纪要）、各表水位线与本地向量索引，并恢复已隐藏的聊天正文；不会删除任何聊天记录。\n清空前系统会自动在「设置 → 存档」中留存一份快照备份。`;
+    if (!confirm(msg)) return false;
+    try {
+      clearMemoryEditing();
+      _memoryExpandedTableRows.clear();
+      _memoryTablePage = {};
+      _memoryMinutesPage = -1;
+      if (typeof window.MEMORY_ENGINE?.clearAllTableData === 'function') {
+        const res = window.MEMORY_ENGINE.clearAllTableData({
+          clearCheckpoints: options.clearCheckpoints === true,
+          backup: true
+        });
+        showToast(`已清空全部 7 张表数据（共移除 ${res?.removedRows || 0} 行，已自动备份）`);
+      } else if (dataApi) {
+        try { window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('清空前自动备份 ' + new Date().toLocaleString()); } catch (_) {}
+        if (options.clearCheckpoints) {
+          dataApi.clearCheckpoint?.();
+          dataApi.clearLinkCheckpoint?.();
+        } else if (state) {
+          dataApi.saveCheckpoint?.(state);
+        }
+        dataApi.saveState(dataApi.defaultState());
+        try { window.MEMORY_ENGINE_VECTOR?.clearVectorCache?.(dataApi.getChatId?.()); } catch (_) {}
+        window.MEMORY_ENGINE?.applyInjection?.();
+        showToast('已清空全部 7 张表数据');
+      }
+      refresh();
+      return true;
+    } catch (error) {
+      showToast(`清空表数据失败：${error?.message || error}`, true);
+      return false;
+    }
+  }
+
   function bindMemoryView() {
     const back = document.getElementById('we-memory-btn-back');
     if (back) back.onclick = () => { clearMemoryEditing(); _memoryView = 'home'; _memorySelectedNavView = null; refresh(); };
@@ -1482,6 +1536,10 @@ window.WORLD_ENGINE_UI = (function() {
         refresh();
       };
     });
+    const clearAllTablesBtn = document.getElementById('we-memory-clear-all-tables');
+    if (clearAllTablesBtn) {
+      clearAllTablesBtn.onclick = () => confirmAndClearAllMemoryTables({ clearCheckpoints: false });
+    }
     const addTableRowBtn = document.getElementById('we-memory-add-table-row');
     if (addTableRowBtn) {
       addTableRowBtn.onclick = () => {
@@ -2366,7 +2424,14 @@ window.WORLD_ENGINE_UI = (function() {
         <button class="we-btn" id="we-memory-import-data">导入 JSON</button>
         <input type="file" id="we-memory-import-data-file" accept=".json,application/json" style="display:none;">
       </div>
-      <div style="font-size:11px;color:var(--we-text3);margin-top:5px;">完整导出同时包含 <b>state（最新 7 表状态、各表水位线与时间链）</b>和 <b>checkpoint（重新推演前的旧存档点）</b>。</div>`;
+      <div style="font-size:11px;color:var(--we-text3);margin-top:5px;">完整导出同时包含 <b>state（最新 7 表状态、各表水位线与时间链）</b>和 <b>checkpoint（重新推演前的旧存档点）</b>。</div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--we-border,#3a3a3a);">
+        <div style="font-size:12px;font-weight:600;color:var(--we-danger,#e06c75);margin-bottom:6px;">清空所有表数据（仅当前聊天）</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="we-btn we-btn-danger" id="we-memory-archive-clear-all" type="button"><i class="fa-solid fa-trash"></i> 删除所有表数据</button>
+        </div>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:4px;">一键清空核心 7 表全部行数据、水位线与本地向量索引，并恢复已隐藏的聊天正文；清空前自动留存一份快照备份，不删除聊天记录。</div>
+      </div>`;
 
     const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '2.0.0';
     const memoryAboutBody = `
@@ -6365,23 +6430,11 @@ window.WORLD_ENGINE_UI = (function() {
     const memoryCache = window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory');
     const memoryResetBtn = document.getElementById('we-reset-memory');
     if (memoryResetBtn) {
-      memoryResetBtn.onclick = () => {
-        if (window.MEMORY_ENGINE?.isRunning?.()) {
-          showToast('后台记忆任务运行中，暂不能重置记忆', true);
-          return;
-        }
-        if (!memoryData) { showToast('记忆数据模块未加载', true); return; }
-        if (!confirm('确认重置当前聊天的全部核心 7 表记忆数据与水位线？（不会删除聊天记录；重置前会自动尝试留存一份快照备份）')) return;
-        try { memoryCache?.createSnapshot?.('重置前自动备份 ' + new Date().toLocaleString()); } catch (_) {}
-        memoryData.clearCheckpoint?.();
-        memoryData.clearLinkCheckpoint?.();
-        memoryData.saveState(memoryData.defaultState());
-        try { memoryVector?.clearVectorCache?.(memoryData.getChatId?.()); } catch (_) {}
-        window.MEMORY_ENGINE?.applyInjection?.();
-        try { window.OUTLINE_ENGINE?.applyInjection?.(); } catch (_) {}
-        showToast('当前聊天的记忆数据已重置');
-        refresh();
-      };
+      memoryResetBtn.onclick = () => confirmAndClearAllMemoryTables({ clearCheckpoints: true });
+    }
+    const memoryArchiveClearAllBtn = document.getElementById('we-memory-archive-clear-all');
+    if (memoryArchiveClearAllBtn) {
+      memoryArchiveClearAllBtn.onclick = () => confirmAndClearAllMemoryTables({ clearCheckpoints: false });
     }
     const syncRecallFromDom = () => {
       const patch = collectRecallSettingsFromDom();

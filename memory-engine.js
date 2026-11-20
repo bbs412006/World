@@ -2064,6 +2064,51 @@ window.MEMORY_ENGINE = (function() {
     return saved;
   }
 
+  function clearAllTableData(options = {}) {
+    if (running || backfillRunning || reconciling) {
+      throw new Error('后台记忆任务运行中，请先停止后再清空表数据');
+    }
+    const prev = data().loadState();
+    const prevCounts = data().tableRowCounts(prev);
+    const hadData = prevCounts.totalRows > 0
+      || (prev.timeline?.nodes || []).length > 0
+      || Object.values(prev.tableWatermarks || {}).some(v => v !== null && v !== undefined);
+    bumpAutoFillEpoch();
+    clearTimeout(autoTimer);
+    cancelMutationRefresh();
+    lastEventKey = '';
+    lastError = '';
+    if (options.backup !== false && hadData) {
+      try {
+        window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.(
+          clean(options.backupName) || `清空全部表数据前自动备份 ${new Date().toLocaleString()}`
+        );
+      } catch (_) {}
+    }
+    if (options.clearCheckpoints === true) {
+      data().clearCheckpoint?.();
+      data().clearLinkCheckpoint?.();
+    } else if (hadData) {
+      data().saveCheckpoint(prev);
+    }
+    const fresh = data().defaultState();
+    fresh.autoBaselineLayer = null;
+    const saved = data().saveState(fresh);
+    try { window.MEMORY_ENGINE_VECTOR?.clearVectorCache?.(data().getChatId?.()); } catch (_) {}
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+    setBackfillStatus(0, 0, '');
+    setSummaryBackfillStatus(0, 0, '');
+    applyInjection();
+    try { window.OUTLINE_ENGINE?.applyInjection?.(); } catch (_) {}
+    refreshMemoryPanel();
+    return {
+      cleared: true,
+      hadData,
+      removedRows: prevCounts.totalRows,
+      state: saved
+    };
+  }
+
   // ==================== 注入构建（对齐 shujuku 双层省 Token 注入） ====================
 
   function tokenizeSearchText(text) {
@@ -2265,8 +2310,7 @@ window.MEMORY_ENGINE = (function() {
             ch.appearance ? `外貌：${ch.appearance}` : '',
             ch.outfit_text ? `穿着：${ch.outfit_text}` : '',
             ch.relation_text ? `关系：${ch.relation_text}` : '',
-            ch.past_experience ? `经历：${ch.past_experience}` : '',
-            ch.interaction_options ? `可交互：${ch.interaction_options}` : ''
+            ch.past_experience ? `经历：${ch.past_experience}` : ''
           ].filter(Boolean).join('｜');
           return body ? `${head}\n  ${body}` : head;
         });
@@ -2844,6 +2888,7 @@ window.MEMORY_ENGINE = (function() {
     prepareHistoryForGeneration,
     replayTimeline,
     commitManualState,
+    clearAllTableData,
     invalidateWorldCommits,
     syncVerifiedOutlineKnowledge,
     getSnapshotSummaryForBridge,

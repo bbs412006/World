@@ -469,6 +469,58 @@ function makeChat(rounds) {
     console.log('✓ 8. shujuku 原版底层 System Prompt 与可编辑自定义提示词/单表规则生效通过');
   }
 
+  // 9. 确认已去除选项表与角色表「交互选项」字段，且 clearAllTableData 可完整清空全部 7 表、水位线、注入与隐藏楼层并保留备份
+  {
+    const env = createEnv(makeChat(2));
+    const dataApi = env.sandbox.MEMORY_ENGINE_DATA;
+    const promptApi = env.sandbox.MEMORY_ENGINE_PROMPT;
+    assert.ok(!dataApi.TABLE_KEYS.includes('options'), '核心 7 表不得包含选项表');
+    assert.ok(
+      !dataApi.TABLE_SCHEMAS.important_characters.columns.some(c => c.key === 'interaction_options'),
+      '重要角色表 schema 不得再包含交互选项字段'
+    );
+    const charPrompt = promptApi.buildTableFillSystemPrompt(['important_characters']);
+    assert.ok(!charPrompt.includes('interaction_options') && !charPrompt.includes('交互选项'), '角色表默认填表提示词与 JSON 模板不得再包含交互选项');
+
+    const normalizedRow = dataApi.normalizeTableRow('important_characters', {
+      name: '顾清欢',
+      brief_intro: '江南药师',
+      interaction_options: '向她买药'
+    }, 1);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(normalizedRow, 'interaction_options'), false, '规范化旧数据时应自动剥离 interaction_options');
+
+    env.setApiHandler(async () => JSON.stringify({
+      global_state: { current_location: '青石镇', cur_time: '2026-09-01 10:00' },
+      protagonist_info: { name: '林墨', identity_text: '散修' },
+      important_characters: { upsert: [{ name: '顾清欢', brief_intro: '江南药师', presence_status: '在场' }], delete: [] },
+      protagonist_skills: { upsert: [{ skill_name: '青莲剑诀', skill_type: '主动', effect_desc: '三段剑气' }], delete: [] },
+      inventory: { upsert: [{ item_name: '止血丹', quantity: '2', category: '丹药' }], delete: [] },
+      quests_events: { upsert: [{ quest_name: '查明疫源', quest_type: '主线任务', current_progress: '刚接取' }], delete: [] },
+      chronicle: [
+        { floor: 2, code_index: 'AM0001', summary: '初抵青石镇', chronicle_text: '林墨抵达青石镇，结识药师顾清欢。' },
+        { floor: 4, code_index: 'AM0002', summary: '探查疫病线索', chronicle_text: '林墨与顾清欢查明镇外水源异样。' }
+      ]
+    }));
+    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(dataApi.tableRowCounts(dataApi.loadState()).totalRows, 8, '清空前 7 表合计应有 8 行数据');
+    assert.ok(env.getInjection().includes('顾清欢') && !env.getInjection().includes('可交互：'), '注入内容应包含角色且不含可交互选项');
+
+    const cleared = env.sandbox.MEMORY_ENGINE.clearAllTableData();
+    assert.strictEqual(cleared.cleared, true);
+    assert.strictEqual(cleared.removedRows, 8, '应准确汇报清空的总行数');
+    const afterState = dataApi.loadState();
+    assert.strictEqual(dataApi.tableRowCounts(afterState).totalRows, 0, '清空后全部 7 表必须为 0 行');
+    assert.strictEqual(afterState.timeline.nodes.length, 0, '清空后时间链节点必须归零');
+    for (const k of dataApi.TABLE_KEYS) {
+      assert.strictEqual(afterState.tableWatermarks[k], null, `清空后 ${k} 水位线必须归零`);
+    }
+    assert.strictEqual(afterState.autoBaselineLayer, null, '清空后不得锁死 autoBaselineLayer，确保可立即从头一键追平');
+    assert.strictEqual(env.getInjection(), '', '清空后必须立即清除注入提示词');
+    const backupCp = dataApi.loadCheckpoint();
+    assert.ok(backupCp && dataApi.tableRowCounts(backupCp).totalRows === 8, '清空前应自动留存 checkpoint 便于随时核对或恢复');
+    console.log('✓ 9. 无选项表/无角色交互选项 + 一键清空所有表数据（含自动备份与重置水位）通过');
+  }
+
   console.log('\n🎉 核心 7 表 + Wave 智能追平 + 纠错重试 + 同步删楼回退 + shujuku 可编辑提示词专项测试全部通过！');
 })().catch(err => {
   console.error('❌ 专项测试失败:', err);

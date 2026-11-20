@@ -73,8 +73,7 @@ window.MEMORY_ENGINE_DATA = (function() {
         { key: 'location_name', label: '所在地点', required: false, placeholder: '当前所在地点名' },
         { key: 'presence_status', label: '在场状态', required: true, defaultValue: '在场', choices: ['在场', '离场'] },
         { key: 'relation_text', label: '人际关系', required: false, multiline: true, placeholder: '角色名:关系1,关系2;另一角色:关系' },
-        { key: 'past_experience', label: '过往经历', required: false, multiline: true, placeholder: '增量整合关键经历，≤300字' },
-        { key: 'interaction_options', label: '交互选项', required: false, multiline: true, placeholder: '第三人称具体可行交互行动' }
+        { key: 'past_experience', label: '过往经历', required: false, multiline: true, placeholder: '增量整合关键经历，≤300字' }
       ])
     }),
     protagonist_skills: Object.freeze({
@@ -284,8 +283,7 @@ window.MEMORY_ENGINE_DATA = (function() {
         location_name: clean(raw.location_name),
         presence_status: presence,
         relation_text: clean(raw.relation_text),
-        past_experience: clean(raw.past_experience),
-        interaction_options: clean(raw.interaction_options)
+        past_experience: clean(raw.past_experience)
       };
     }
 
@@ -539,8 +537,7 @@ window.MEMORY_ENGINE_DATA = (function() {
         appearance: clean(basic.appearance),
         presence_status: '在场',
         relation_text: rel,
-        past_experience: pastExp,
-        interaction_options: clean(arc?.currentStance)
+        past_experience: pastExp
       }, charRowId++);
       if (row) tables.important_characters.push(row);
     }
