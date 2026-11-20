@@ -8,6 +8,7 @@ let injection = '';
 let apiResponse = '';
 let apiCalls = 0;
 const chat = [
+  { is_user: false, name: '角色', mes: '序章开场白。' },
   { is_user: true, name: '玩家', mes: '嘉宁三十年正月十五，沈鹤亭在黑礁湾代表听潮阁取出断潮剑。' },
   { is_user: false, name: '角色', mes: '断潮剑在交战中折损，沈鹤亭确信它还能修复，并在此觉醒听潮能力。' }
 ];
@@ -36,119 +37,177 @@ for (const file of ['memory-engine-settings.js', 'memory-engine-data.js', 'memor
   'memory-engine-small-summary-prompt.js', 'memory-engine.js']) {
   vm.runInThisContext(fs.readFileSync(path.join(root, file), 'utf8'), { filename: file });
 }
-WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({ apiAutoRetries: 3, injectIntoWorldEngine: true }));
+WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({ apiAutoRetries: 0, tableFillMaxRetries: 1, injectIntoWorldEngine: true }));
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 async function run() {
+  // 1. 旧版 v1/v2 存档自动无损迁移到核心 7 表
   storage.set('memory_engine_state_entity-test', JSON.stringify({
-    personal_memory: [], knowledge_index: {},
-    world_memory: { organization: [], item: [{ id: 'item_000001', name: '旧物', description: '旧结构。', history: [] }], ability: [], location: [] },
-    round: 0, chatLayer: null
+    personal_memory: [{ id: 'char_000001', names: ['旧角色'], profile: { basicInfo: { identity: '隐士' }, experiences: '隐居深山。' }, memory: {} }],
+    knowledge_index: {},
+    world_memory: {
+      organization: [],
+      item: [{ id: 'item_000001', name: '旧物', description: '旧结构传家宝。', history: [] }],
+      ability: [{ id: 'ab_000001', name: '听潮术', description: '闻潮辩位。', history: [] }],
+      location: []
+    },
+    ongoing_facts: [{ id: 'fact_1', category: '主线', subject: '旧任务', fact: '寻回古剑', status: 'active' }],
+    round: 1, chatLayer: 2
   }));
   const migrated = MEMORY_ENGINE_DATA.loadState();
-  assert(migrated.entity_memory.object[0].name === '旧物' && !migrated.world_memory, '开发期旧实体结构应迁移到 entity_memory.object');
+  assert(migrated.schemaVersion === 3, '旧存档应自动升级到 schemaVersion=3');
+  assert(migrated.tables.important_characters[0].name === '旧角色', '旧 personal_memory 应迁入 important_characters');
+  assert(migrated.tables.inventory[0].item_name === '旧物', '旧 world_memory.item 应迁入 inventory');
+  assert(migrated.tables.protagonist_skills[0].skill_name === '听潮术', '旧 world_memory.ability 应迁入 protagonist_skills');
+  assert(migrated.tables.quests_events[0].detail_desc === '寻回古剑', '旧 ongoing_facts 应迁入 quests_events');
 
-  storage.set('memory_engine_state_entity-test', JSON.stringify({
-    personal_memory: [], knowledge_index: {}, round: 0, chatLayer: null
-  }));
+  // 2. 清空后执行核心 7 表结构化填表（含全局/主角/角色/技能/背包/任务/纪要）
+  storage.set('memory_engine_state_entity-test', JSON.stringify(MEMORY_ENGINE_DATA.defaultState()));
   apiResponse = JSON.stringify({
-    personal_memory: [{
-      name: ['沈鹤亭'], known_by: [], memory: '沈鹤亭确信断潮剑还能修复。', time: '嘉宁三十年正月十五'
-    }],
-    entity_updates: [
-      { type: 'organization', name: '听潮阁', description: '活动于沿海地区的情报组织。', event: '', time: '' },
-      { type: 'object', name: '断潮剑', aliases: ['断潮', '海纹旧剑'], description: '一柄剑格刻有海浪纹的旧剑，目前剑身折损。', event: '断潮剑在黑礁湾交战中折损。', time: '嘉宁三十年正月十五' },
-      { type: 'ability', name: '听潮', description: '能够从潮声中分辨远处动静的感知能力。', event: '沈鹤亭在黑礁湾觉醒听潮。', time: '嘉宁三十年正月十五' },
-      { type: 'location', name: '黑礁湾', description: '遍布黑色礁石的海湾。', event: '沈鹤亭在此取出断潮剑。', time: '刚才' }
-    ],
-    small_summary: '沈鹤亭在黑礁湾经历交战，断潮剑折损，并觉醒听潮能力。'
+    global_state: {
+      current_location: '黑礁湾',
+      current_minor_region: '东海岸',
+      current_major_region: '沧州',
+      prev_scene_time: '',
+      elapsed_time: '30分',
+      cur_time: '嘉宁三十年正月十五 21:00'
+    },
+    protagonist_info: {
+      name: '沈鹤亭',
+      gender: '男',
+      age: '26',
+      appearance: '黑衣短发',
+      identity_text: '听潮阁门人',
+      current_condition: '激战后略显疲惫',
+      location_name: '黑礁湾',
+      belongings: '断潮剑'
+    },
+    important_characters: {
+      upsert: [{
+        name: '苏明月',
+        gender: '女',
+        age: '24',
+        brief_intro: '听潮阁执事',
+        appearance: '青衫佩玉',
+        outfit_text: '月白劲装',
+        location_name: '黑礁湾',
+        presence_status: '在场',
+        relation_text: '沈鹤亭:同门',
+        past_experience: '随沈鹤亭赴黑礁湾迎敌。',
+        interaction_options: '询问断潮剑修复之法'
+      }],
+      delete: []
+    },
+    protagonist_skills: {
+      upsert: [{ skill_name: '听潮', skill_type: '被动', skill_level: '初阶', effect_desc: '能够从潮声中分辨远处动静' }],
+      delete: []
+    },
+    inventory: {
+      upsert: [{ item_name: '断潮剑', quantity: '1', description: '剑格刻有海浪纹的旧剑，目前剑身折损', category: '武器' }],
+      delete: []
+    },
+    quests_events: {
+      upsert: [{ quest_name: '修复断潮剑', quest_type: '主线任务', issuer: '沈鹤亭', detail_desc: '寻找玄铁修复折损剑身', current_progress: '准备启程' }],
+      delete: []
+    },
+    chronicle: {
+      code_index: 'AM0001',
+      time_span: '嘉宁三十年正月十五 20:30 ~ 21:00',
+      summary: '黑礁湾激战断潮剑折损并觉醒听潮',
+      chronicle_text: '沈鹤亭在黑礁湾经历交战，断潮剑折损，并觉醒听潮能力。',
+      key_dialogue: '沈鹤亭：“此剑未绝，必能重铸。”',
+      keywords: ['黑礁湾', '断潮剑', '听潮'],
+      entities: ['沈鹤亭', '苏明月', '断潮剑'],
+      impact: 'key'
+    }
   });
 
   const first = await MEMORY_ENGINE.manualExtract();
-  assert(first.addedPersonal === 1, '应写入一条人物记忆');
+  assert(first.added >= 7, '7 张核心表变更应全部计入 added');
   let state = MEMORY_ENGINE_DATA.loadState();
-  assert(state.entity_memory.object[0].id === 'obj_000001', '物件 ID 应由本地生成');
-  assert(JSON.stringify(state.entity_memory.object[0].aliases) === JSON.stringify(['断潮', '海纹旧剑']), '实体别名应完整保存');
-  assert(state.entity_index['object:断潮'] === 'obj_000001', '实体别名应写入名称索引');
-  assert(state.entity_memory.organization[0].id === 'org_000001', '组织 ID 应由本地生成');
-  assert(state.entity_memory.ability[0].id === 'ability_000001', '能力 ID 应由本地生成');
-  assert(state.entity_memory.location[0].id === 'location_000001', '地点 ID 应由本地生成');
-  assert(state.entity_memory.location[0].history[0].time === '', '无法换算的相对时间应清空');
-  assert(state.entity_memory.organization[0].history.length === 0, '空 event 不得写入本地历史');
-  assert(injection.includes('【物件：断潮剑】'), '命中名称后应注入物件记忆');
-  assert(injection.includes('【地点：黑礁湾】'), '命中名称后应注入地点记忆');
-  assert(injection.includes('【组织：听潮阁】'), '命中名称后应注入组织记忆');
-  assert(injection.includes('【能力：听潮】'), '命中名称后应注入能力记忆');
-  assert(MEMORY_ENGINE.buildWorldEngineContext({ current: '断潮' }).includes('【物件：断潮剑】'), '世界状态命中实体别名时应注入该实体');
+  assert(state.tables.global_state.length === 1 && state.tables.global_state[0].current_location === '黑礁湾', '全局状态表应写入唯一行');
+  assert(state.tables.protagonist_info.length === 1 && state.tables.protagonist_info[0].name === '沈鹤亭', '主角信息表应写入唯一行');
+  assert(state.tables.important_characters[0].name === '苏明月', '重要角色表应写入');
+  assert(state.tables.protagonist_skills[0].skill_name === '听潮', '主角技能表应写入');
+  assert(state.tables.inventory[0].item_name === '断潮剑', '背包物品表应写入');
+  assert(state.tables.quests_events[0].quest_name === '修复断潮剑', '任务与事件表应写入');
+  assert(state.tables.chronicle[0].code_index === 'AM0001', '纪要表应生成 AM0001');
+  assert(injection.includes('<全局状态>') && injection.includes('黑礁湾'), '应注入全局状态');
+  assert(injection.includes('<主角技能>') && injection.includes('听潮'), '应注入主角技能');
+  assert(injection.includes('<背包物品>') && injection.includes('断潮剑'), '应注入背包物品');
+  assert(MEMORY_ENGINE.buildWorldEngineContext().includes('修复断潮剑'), '世界引擎上下文应包含进行中任务');
 
+  // 3. 增量合并：按主键原地更新（空字段保留原值）与删除（delete）
   chat.push(
     { is_user: true, name: '玩家', mes: '嘉宁三十年正月十六，沈鹤亭使用玄铁修复断潮剑。' },
-    { is_user: false, name: '角色', mes: '断潮剑修复完成；同日听潮阁宣告解散。' }
+    { is_user: false, name: '角色', mes: '断潮剑修复完成，任务完结。' }
   );
   apiResponse = JSON.stringify({
-    personal_memory: [],
-    entity_updates: [
-      { type: 'object', name: '断潮剑', description: '一柄剑格刻有海浪纹的旧剑，剑身已用玄铁修复。', event: '断潮剑在黑礁湾交战中折损。', time: '嘉宁三十年正月十五' },
-      { type: 'object', name: '断潮', aliases: ['潮剑'], description: '一柄剑格刻有海浪纹的旧剑，剑身已用玄铁修复。', event: '断潮剑以玄铁修复。', time: '嘉宁三十年正月十六' },
-      { type: 'organization', name: '听潮阁', description: '', event: '听潮阁宣告解散。', time: '嘉宁三十年正月十六' }
-    ],
-    small_summary: '断潮剑以玄铁修复，听潮阁随后宣告解散。'
+    global_state: { elapsed_time: '1天', cur_time: '嘉宁三十年正月十六 10:00' },
+    protagonist_info: null,
+    important_characters: {
+      upsert: [{ name: '苏明月', presence_status: '离场', location_name: '听潮阁' }],
+      delete: []
+    },
+    protagonist_skills: { upsert: [], delete: [] },
+    inventory: {
+      upsert: [{ item_name: '断潮剑', quantity: '', description: '剑身已用玄铁修复完好', category: '' }],
+      delete: []
+    },
+    quests_events: { upsert: [], delete: ['修复断潮剑'] },
+    chronicle: {
+      code_index: 'AM0002',
+      summary: '玄铁重铸断潮剑',
+      chronicle_text: '断潮剑以玄铁修复完好，苏明月先行返回听潮阁。'
+    }
   });
   await MEMORY_ENGINE.manualExtract();
   state = MEMORY_ENGINE_DATA.loadState();
-  assert(state.entity_memory.object.length === 1, '同类型同名实体应归并');
-  assert(state.entity_memory.object[0].aliases.includes('潮剑'), 'API 使用实体别名时应归并并追加新别名');
-  assert(state.entity_memory.object[0].history.length === 2, '重复事件应去重，新事件应追加到本地历史');
-  assert(state.entity_memory.object[0].description.includes('已用玄铁修复'), 'API 返回的当前描述应直接覆盖本地描述');
-  assert(state.entity_memory.organization[0].description === '活动于沿海地区的情报组织。', 'API 返回空描述时应保留本地原描述');
-  assert(state.entity_memory.organization[0].history[0].event === '听潮阁宣告解散。', '空描述不得阻止 event 写入本地历史');
+  assert(state.tables.global_state[0].current_location === '黑礁湾', '单行表未变字段应保留原值');
+  assert(state.tables.global_state[0].cur_time === '嘉宁三十年正月十六 10:00', '单行表变动字段应更新');
+  assert(state.tables.important_characters[0].brief_intro === '听潮阁执事', '角色空字段应保留原值');
+  assert(state.tables.important_characters[0].presence_status === '离场', '角色状态应更新为离场');
+  assert(state.tables.inventory.length === 1 && state.tables.inventory[0].category === '武器' && state.tables.inventory[0].description.includes('玄铁修复'), '同主键物品应原地合并并保留未变列');
+  assert(state.tables.quests_events.length === 0, 'delete 列表应删除已完结任务');
+  assert(state.tables.chronicle.length === 2 && state.tables.chronicle[1].code_index === 'AM0002', '纪要编号应递增为 AM0002');
 
+  // 4. 超长文本完整保留不重试 + 黑名单过滤
   chat.push(
-    { is_user: true, name: '玩家', mes: '翌日继续记录断潮剑的漫长事件。' },
+    { is_user: true, name: '玩家', mes: '翌日继续记录长事件。' },
     { is_user: false, name: '角色', mes: '这是一段需要完整保留的长事件。' }
   );
+  WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({
+    apiAutoRetries: 0, tableFillMaxRetries: 2, nameBlacklist: '屏蔽角色\n屏蔽物品'
+  }));
+  const longDesc = '事'.repeat(240);
   apiResponse = JSON.stringify({
-    personal_memory: [],
-    entity_updates: [{ type: 'object', name: '断潮剑', description: '', event: '事'.repeat(51), time: '' }],
-    small_summary: '断潮剑产生了一条超过 Prompt 建议字数的完整事件记录。'
-  });
-  const callsBeforeOverlong = apiCalls;
-  await MEMORY_ENGINE.manualExtract();
-  assert(apiCalls === callsBeforeOverlong + 1, '内容超出 Prompt 建议字数仍属成功，不得触发重试');
-  state = MEMORY_ENGINE_DATA.loadState();
-  assert(state.entity_memory.object[0].history.some(item => item.event === '事'.repeat(51)),
-    '超过 Prompt 建议字数的 event 仍应完整写入本地状态');
-
-  const legacy = MEMORY_ENGINE._test.parseResponse(
-    JSON.stringify([{ name: ['旧版人物'], known_by: [], memory: '旧版人物记得这次测试。', time: '' }]),
-    { memory: true }
-  );
-  assert(legacy.personal.some(item => item.name.includes('旧版人物')), '应兼容旧版人物数组响应');
-
-  const beforeEdit = {
-    personal_memory: [
-      { id: 'char_000001', names: ['知情人'], memory: {} },
-      { id: 'char_000002', names: ['记忆主人'], memory: { '某日': ['记忆主人记得一件事。'] } }
-    ],
-    knowledge_index: {
-      '知情人': [{ ownerId: 'char_000002', time: '某日', memory: '记忆主人记得一件事。' }],
-      '记忆主人': [{ ownerId: 'char_000002', time: '某日', memory: '记忆主人记得一件事。' }]
+    important_characters: {
+      upsert: [
+        { name: '屏蔽角色', brief_intro: '不应入库' },
+        { name: '陆游侠', brief_intro: '过路刀客', presence_status: '在场' }
+      ],
+      delete: []
     },
-    entity_memory: { organization: [{ id: 'org_000001', name: '旧组织', description: '', history: [] }], object: [], ability: [], location: [] },
-    entity_index: { 'organization:旧组织': 'org_000001' },
-    event_memory: { small_summaries: [], big_summary: null, small_summary_layer: null, big_summary_cursor: 0 },
-    round: 0, chatLayer: null
-  };
-  const afterEdit = JSON.parse(JSON.stringify(beforeEdit));
-  afterEdit.personal_memory[0].names = ['新知情人'];
-  afterEdit.entity_memory.organization[0].name = '新组织';
-  MEMORY_ENGINE.repairStateIndexes(afterEdit, beforeEdit);
-  assert(afterEdit.knowledge_index['新知情人']?.some(record => record.ownerId === 'char_000002'), '人物改名后应保留其知晓的他人记忆');
-  assert(!afterEdit.knowledge_index['知情人'], '人物改名后不应残留旧别名索引');
-  assert(afterEdit.entity_index['organization:新组织'] === 'org_000001', '实体改名后应重建名称索引并保留稳定 ID');
+    inventory: {
+      upsert: [
+        { item_name: '屏蔽物品', quantity: '1', description: '不应入库' },
+        { item_name: '断潮剑', description: longDesc }
+      ],
+      delete: []
+    },
+    chronicle: { chronicle_text: '超长纪要记录：' + longDesc }
+  });
+  const callsBefore = apiCalls;
+  await MEMORY_ENGINE.manualExtract();
+  assert(apiCalls === callsBefore + 1, '合法超长文本不得触发额外重试');
+  state = MEMORY_ENGINE_DATA.loadState();
+  assert(!state.tables.important_characters.some(c => c.name === '屏蔽角色'), '黑名单角色应被忽略');
+  assert(state.tables.important_characters.some(c => c.name === '陆游侠'), '非黑名单角色应照常入库');
+  assert(!state.tables.inventory.some(i => i.item_name === '屏蔽物品'), '黑名单物品应被忽略');
+  assert(state.tables.inventory.find(i => i.item_name === '断潮剑').description === longDesc, '超长描述应完整保留');
 
   console.log('memory-engine entity tests passed');
 }

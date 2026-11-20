@@ -637,34 +637,11 @@
               if (storyDay != null) { state.time = Number(storyDay); core.saveState(state); }
               core.updateCurrentHistorySnapshot?.(state);
             }
-            // 世界 API 已经完成：先落库、更新注入并刷新世界界面，再开始记忆联动。
-            // isEvolving 继续作为内部互斥锁保持 true，防止联动期间再次启动世界推演；
-            // UI 运行态则在这里结束，让两个引擎的动画严格按先后阶段显示。
+            // 世界 API 已经完成：落库、更新注入并刷新世界界面（弱联动模式：世界引擎不再向记忆 7 表写记录）
             if (isNewRound || opts.forceApplyInjection) applyInjection();
             setStatus('世界推演完成');
             if (ui) { ui.setEvolvingUI(false); ui.refresh(true); }
             worldUiPhaseFinished = true;
-            if (settings.memoryLinkEnabled === true) {
-              try {
-                const linkMode = window.STORY_ENGINE_BRIDGE?.getWorldLinkMode?.()
-                  || window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true)?.worldLinkMode
-                  || 'lightweight';
-                const useLightweight = opts.mode !== 'redo' && linkMode !== 'llm';
-                await window.MEMORY_ENGINE?.ingestWorldEvolution?.({
-                  layer: core.getChatLayer(),
-                  worldRound: state.round,
-                  worldDigest: state.worldDigest,
-                  worldUpdate: window.STORY_ENGINE_PROJECTION?.active?.()
-                    ? window.STORY_ENGINE_PROJECTION.forMemory(state.lastEvolveResult || state) : state.lastEvolveResult,
-                  worldCommitId: evolution.getLastWorldCommitId?.() || '',
-                  replace: !isNewRound,
-                  ...(useLightweight ? { lightweight: true } : {})
-                });
-              } catch (linkError) {
-                console.error('[世界引擎] 世界→记忆联动失败（世界推演结果已保留）', linkError);
-                setStatus('世界推演完成，但记忆联动失败：' + (linkError?.message || linkError), true);
-              }
-            }
             console.log('[世界引擎] ✅ 推演完成，当前第', state.round, '轮');
           } else {
             console.warn('[世界引擎] ⚠️ 推演失败或已中止');
@@ -709,38 +686,8 @@
       }
 
       async function manualMemoryLink() {
-        const requestedChatId = core.getChatId();
-        await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
-        if (core.getChatId() !== requestedChatId) return false;
-        if (isEvolving) { setStatus('世界引擎或联动任务正在运行...'); return false; }
-        if (window.MEMORY_ENGINE?.isRunning?.()) { setStatus('记忆引擎已有任务正在运行...'); return false; }
-        const state = core.loadState();
-        const digest = String(state?.worldDigest || '').trim();
-        if (!digest) { setStatus('当前没有可联动的世界摘要', true); return false; }
-        isEvolving = true;
-        try {
-          setStatus('正在手动联动记忆引擎...');
-          const result = await window.MEMORY_ENGINE?.ingestWorldEvolution?.({
-            layer: core.getChatLayer(),
-            worldRound: state.round,
-            worldDigest: digest,
-            worldUpdate: window.STORY_ENGINE_PROJECTION?.active?.()
-              ? window.STORY_ENGINE_PROJECTION.forMemory(state.lastEvolveResult || state) : state.lastEvolveResult || state,
-            worldCommitId: window.STORY_ENGINE_HISTORY?.getStatus?.().currentCommitId || '',
-            replace: true,
-            force: true
-          });
-          if (!result || result.skipped) throw new Error('记忆引擎未执行联动');
-          setStatus('手动联动完成，世界摘要已新增为纪要');
-          if (ui?.refresh) ui.refresh(true);
-          return true;
-        } catch (error) {
-          console.error('[世界引擎] 手动联动记忆引擎失败', error);
-          setStatus('手动联动失败：' + (error?.message || error), true);
-          return false;
-        } finally {
-          isEvolving = false;
-        }
+        setStatus('当前为弱联动只读模式，世界引擎不再向记忆表写入记录');
+        return false;
       }
 
       async function rebuildLinkedHistory(options = {}) {

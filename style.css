@@ -4654,3 +4654,243 @@
 /* 头部高度在三模块间保持一致，切换标签时不跳动 */
 .we-header-top { min-height: 30px; align-items: center; }
 .we-header-mood { min-height: 22px; }
+
+/* ===== 核心 7 表数据库视图与 Wave 追平计划预览样式 ===== */
+.we-db-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.we-db-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--we-border);
+  background: var(--we-surface, var(--we-card));
+  color: var(--we-text2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.we-db-tab.is-active {
+  border-color: var(--we-accent);
+  background: color-mix(in srgb, var(--we-accent) 16%, var(--we-card));
+  color: var(--we-text);
+  font-weight: 600;
+}
+.we-db-tab-cnt {
+  font-size: 11px;
+  opacity: 0.78;
+}
+.we-db-sheet-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--we-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--we-accent) 5%, var(--we-card));
+}
+.we-db-sheet-info {
+  flex: 1;
+  min-width: 0;
+}
+.we-db-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--we-border);
+  border-radius: 8px;
+  background: var(--we-card);
+}
+.we-db-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.we-db-table th,
+.we-db-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--we-border) 65%, transparent);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.we-db-table td.is-multiline {
+  white-space: normal;
+  min-width: 150px;
+  max-width: 260px;
+  word-break: break-word;
+}
+.we-db-table th {
+  font-weight: 600;
+  color: var(--we-text2);
+  background: color-mix(in srgb, var(--we-accent) 7%, var(--we-card));
+  position: sticky;
+  top: 0;
+}
+.we-db-rowid {
+  color: var(--we-text3);
+  font-variant-numeric: tabular-nums;
+}
+.we-db-cell-empty {
+  color: var(--we-text3);
+  opacity: 0.6;
+}
+.we-db-row-ops {
+  white-space: nowrap;
+}
+.we-db-status-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.we-db-status-pill.is-present {
+  background: color-mix(in srgb, var(--we-accent) 18%, transparent);
+  color: var(--we-accent);
+}
+.we-db-status-pill.is-away {
+  background: color-mix(in srgb, var(--we-text3) 18%, transparent);
+  color: var(--we-text3);
+}
+.we-sheet-select-ops {
+  float: right;
+  display: inline-flex;
+  gap: 4px;
+}
+.we-btn-xs {
+  padding: 2px 7px !important;
+  font-size: 11px !important;
+}
+.we-sheet-chip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 6px;
+}
+.we-sheet-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid var(--we-border);
+  border-radius: 7px;
+  background: var(--we-card);
+  font-size: 12px;
+  cursor: pointer;
+}
+.we-sheet-chip.is-selected {
+  border-color: color-mix(in srgb, var(--we-accent) 65%, var(--we-border));
+  background: color-mix(in srgb, var(--we-accent) 8%, var(--we-card));
+}
+.we-sheet-chip-name {
+  font-weight: 600;
+  color: var(--we-text);
+}
+.we-sheet-chip-meta {
+  font-size: 11px;
+  color: var(--we-text3);
+  margin-left: auto;
+}
+.we-sheet-chip-gap {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--we-gold, #d4a04a) 20%, transparent);
+  color: var(--we-gold, #d4a04a);
+}
+.we-sheet-chip-ok {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--we-accent) 16%, transparent);
+  color: var(--we-accent);
+}
+.we-wave-preview {
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--we-accent) 45%, var(--we-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--we-accent) 6%, var(--we-card));
+  font-size: 12px;
+}
+.we-wave-preview.is-clean {
+  border-color: var(--we-border);
+  background: var(--we-card);
+}
+.we-wave-preview-head {
+  margin-bottom: 4px;
+  color: var(--we-accent);
+}
+.we-wave-preview-summary {
+  color: var(--we-text);
+  margin-bottom: 4px;
+}
+.we-wave-preview-list {
+  margin: 4px 0 4px 16px;
+  padding: 0;
+  color: var(--we-text2);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.we-fill-inline-num {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--we-text2);
+}
+.we-memory-dialogue-box {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-left: 2px solid var(--we-accent);
+  background: color-mix(in srgb, var(--we-accent) 6%, transparent);
+  font-size: 12px;
+  color: var(--we-text2);
+  white-space: pre-wrap;
+}
+.we-table-cfg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+.we-table-cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--we-border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* ── 可编辑底层填表提示词（shujuku 原版） ───────────────────────── */
+.we-prompt-codearea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--we-bg3, rgba(0, 0, 0, 0.22));
+  border: 1px solid var(--we-border, rgba(255, 255, 255, 0.14));
+  color: var(--we-text1, #e8eaed);
+}
+.we-prompt-badge {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(120, 144, 156, 0.18);
+  color: var(--we-text2, #b8c0cc);
+  border: 1px solid rgba(120, 144, 156, 0.35);
+}
+.we-prompt-badge.is-custom {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.45);
+}

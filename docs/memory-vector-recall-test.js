@@ -143,35 +143,41 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
 });
 
 (async () => {
-  // 预置 2 条超出直注窗口进入历史召回池的早期纪要 + 1 个未在当前正文直接点名的实体，且故意让字面关键词与当前对话零重合
+  // 预置 2 条超出直注窗口进入历史召回池的早期纪要 + 1 件背包物品，且故意让字面关键词与当前对话零重合
   const state = sandbox.MEMORY_ENGINE_DATA.defaultState();
-  state.event_memory.small_summaries = [
+  state.tables.chronicle = [
     {
       id: 'small_000001',
-      startLayer: 1,
+      rowId: 1,
+      code_index: 'AM0001',
+      startLayer: 2,
       endLayer: 2,
-      content: '先帝遗诏指定以乌金玄铁令开启南郊秘库。',
+      summary: '乌金玄铁令开启南郊秘库',
+      chronicle_text: '先帝遗诏指定以乌金玄铁令开启南郊秘库。',
       keywords: ['乌金', '秘库'],
       status: 'valid',
       revision: 1
     },
     {
       id: 'small_000002',
-      startLayer: 3,
+      rowId: 2,
+      code_index: 'AM0002',
+      startLayer: 4,
       endLayer: 4,
-      content: '船老大送来一份旧海图与远洋补给清单。',
+      summary: '船老大送来旧海图',
+      chronicle_text: '船老大送来一份旧海图与远洋补给清单。',
       keywords: ['海图'],
       status: 'valid',
       revision: 1
     }
   ];
-  state.entity_memory.object = [
+  state.tables.inventory = [
     {
-      id: 'obj_000001',
-      name: '乌金玄铁令',
-      aliases: ['秘库令'],
-      description: '重约二斤的玄铁信物，乃皇室秘库唯一匙钥。',
-      history: [{ time: '', event: '由太傅密藏多年。' }]
+      rowId: 1,
+      item_name: '乌金玄铁令',
+      quantity: '1',
+      category: '关键物品',
+      description: '重约二斤的玄铁信物，乃皇室秘库唯一匙钥。'
     }
   ];
   sandbox.MEMORY_ENGINE_DATA.saveState(state);
@@ -180,7 +186,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
 
   // 1. 维护向量索引，并检验第二次调用因哈希匹配完全跳过重复计费
   const m1 = await vec.maintainVectors();
-  assert.strictEqual(m1.updated, 3, '首次应算齐 2 条纪要 + 1 条实体共 3 项向量');
+  assert.strictEqual(m1.updated, 3, '首次应算齐 2 条纪要 + 1 件物品共 3 项向量');
   const callsAfterFirst = embeddingRequests;
   const m2 = await vec.maintainVectors();
   assert.strictEqual(m2.updated, 0);
@@ -192,12 +198,12 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
   assert.strictEqual(recallRes.method, 'embedding+rerank');
   assert.ok(rerankRequests === 1, '启用 Rerank 时应自动复用 Embedding URL/Key 调用 /rerank');
   assert.ok(recallRes.smallScores.small_000001 > 0.9, '秘库纪要应在 Rerank 中拿到高分');
-  assert.ok(recallRes.entityScores['object:obj_000001'] > 0.9, '实体应在 Rerank 中拿到高分');
+  assert.ok(recallRes.entityScores['object:1'] > 0.9, '背包物品应在 Rerank 中拿到高分');
   assert.strictEqual(recallRes.smallScores.small_000002, undefined, '低于 rerankThreshold 的海图伪相关结果应被过滤');
-  assert.ok(injection.includes('【语义与关键词召回历史细节】'), '注入正文应出现语义召回的历史折叠细节');
+  assert.ok(injection.includes('<记忆回溯>'), '注入正文应出现语义召回的记忆回溯区块');
   assert.ok(injection.includes('乌金玄铁令开启南郊秘库'), '命中的旧纪要正文应成功注入');
-  assert.ok(!injection.includes('旧海图'), '被 Rerank 排除的伪相关纪要不应注入');
-  assert.ok(injection.includes('【物件：乌金玄铁令】'), '即便是对话未直呼其名的实体也应凭借语义高分破盲区唤醒');
+  assert.ok(!injection.includes('船老大送来一份旧海图与远洋补给清单'), '被 Rerank 排除的伪相关纪要正文不应进入记忆回溯');
+  assert.ok(injection.includes('乌金玄铁令'), '命中的背包物品应成功注入');
 
   // 3. Rerank API 故障降级：平滑退回仅 Embedding 余弦排序，绝不报错崩断
   failRerank = true;
@@ -237,8 +243,8 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
   // 词法保底：当精准关键词高重叠但 Rerank 略低于严格阈值时，不应被误杀，且 Embedding/Rerank 独立超时生效
   currentChatId = 'vec-chat-guard';
   const guardState = sandbox.MEMORY_ENGINE_DATA.defaultState();
-  guardState.ongoing_facts = [
-    { id: 'fact_000001', category: '秘方', subject: '金疮散', fact: '药草 甘草 秘方配伍', keywords: ['药草', '甘草', '金疮散'], status: 'active', importance: 4 }
+  guardState.tables.quests_events = [
+    { rowId: 1, quest_name: '金疮散秘方', quest_type: '支线任务', issuer: '药铺', detail_desc: '药草 甘草 秘方配伍', current_progress: '进行中' }
   ];
   sandbox.MEMORY_ENGINE_DATA.saveState(guardState);
   sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({
@@ -251,7 +257,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings({
   const guardRecall = await vec.recallForQuery('药草 甘草 金疮散', { autoMaintain: false, state: guardState });
   assert.strictEqual(guardRecall.diagnostics.lexicalGuardCount, 1, '强词法重叠命中应触发词法保底机制避免被高 Rerank 阈值误杀');
   assert.strictEqual(guardRecall.hits[0].lexicalGuardKept, true);
-  assert.ok(guardRecall.factScores.fact_000001 > 0, '触发词法保底的持续事实应保留在最终召回分数中');
+  assert.ok(guardRecall.factScores['1'] > 0, '触发词法保底的任务条目应保留在最终召回分数中');
   const logsAfterGuard = sandbox.WORLD_ENGINE_API.getRequestLogs();
   const lastRerankLog = logsAfterGuard.find(l => String(l.target || '').endsWith('/rerank'));
   const lastEmbLog = logsAfterGuard.find(l => String(l.target || '').endsWith('/embeddings'));

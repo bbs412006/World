@@ -233,22 +233,33 @@ window.MEMORY_ENGINE_VECTOR = (function() {
   function collectVectorizableItems(state, stOverride) {
     const st = stOverride || settings();
     const targetState = state || window.MEMORY_ENGINE_DATA?.loadState?.() || {};
+    const tables = targetState.tables && typeof targetState.tables === 'object' ? targetState.tables : {};
     const model = clean(st.embeddingModel);
     const items = [];
 
     if (st.vectorIncludeArchivedSmall !== false) {
-      for (const s of targetState.event_memory?.small_summaries || []) {
-        if (!s || s.status === 'stale' || s.status === 'failed' || !clean(s.content)) continue;
+      const chronicleRows = Array.isArray(tables.chronicle) && tables.chronicle.length
+        ? tables.chronicle
+        : (targetState.event_memory?.small_summaries || []);
+      for (const s of chronicleRows) {
+        const body = clean(s?.chronicle_text || s?.content);
+        if (!s || s.status === 'stale' || s.status === 'failed' || !body) continue;
+        const code = clean(s.code_index || s.codeIndex);
         const text = [
+          code ? `编号：${code}` : '',
+          clean(s.time_span || s.timeSpan) ? `时间：${clean(s.time_span || s.timeSpan)}` : '',
+          clean(s.summary) ? `概览：${clean(s.summary)}` : '',
           (s.keywords || []).length ? `关键词：${s.keywords.join('、')}` : '',
           (s.entityNames || []).length ? `涉及：${s.entityNames.join('、')}` : '',
-          s.content
+          body,
+          clean(s.key_dialogue || s.keyDialogue) ? `重要对话：${clean(s.key_dialogue || s.keyDialogue)}` : ''
         ].filter(Boolean).join('；').slice(0, 1200);
+        const span = Number(s.startLayer) === Number(s.endLayer) ? `${s.endLayer}` : `${s.startLayer}-${s.endLayer}`;
         items.push({
           key: `small:${s.id}`,
           kind: 'small',
           refId: s.id,
-          label: `纪要[楼层 ${Number(s.startLayer) === Number(s.endLayer) ? s.endLayer : `${s.startLayer}-${s.endLayer}`}]`,
+          label: `纪要[${code ? `${code}·` : ''}楼层 ${span}]`,
           text,
           textHash: hashText(`${model}||small||${text}`)
         });
@@ -256,75 +267,85 @@ window.MEMORY_ENGINE_VECTOR = (function() {
     }
 
     if (st.vectorIncludeFacts !== false) {
-      for (const f of targetState.ongoing_facts || []) {
-        if (!f || f.status !== 'active' || !clean(f.fact)) continue;
-        const text = `[${f.category || '状态'} · ${f.subject || '全局'}] ${f.fact}${(f.keywords || []).length ? ` (${f.keywords.join('、')})` : ''}`.slice(0, 320);
+      const quests = Array.isArray(tables.quests_events) ? tables.quests_events : [];
+      for (const q of quests) {
+        if (!clean(q?.quest_name)) continue;
+        const text = `[${q.quest_type || '任务'}] ${q.quest_name}${q.issuer ? `（发布：${q.issuer}）` : ''}：${clean(q.detail_desc)}${q.current_progress ? `｜进度：${q.current_progress}` : ''}`.slice(0, 360);
         items.push({
-          key: `fact:${f.id}`,
+          key: `quest:${q.rowId || q.quest_name}`,
           kind: 'fact',
-          refId: f.id,
-          label: `事实[${f.subject || '全局'}]`,
+          refId: String(q.rowId || q.quest_name),
+          label: `任务[${q.quest_name}]`,
           text,
-          textHash: hashText(`${model}||fact||${text}`)
+          textHash: hashText(`${model}||quest||${text}`)
         });
+      }
+      // 兼容旧存档尚未迁移时的 ongoing_facts
+      if (!quests.length && Array.isArray(targetState.ongoing_facts)) {
+        for (const f of targetState.ongoing_facts) {
+          if (!f || f.status !== 'active' || !clean(f.fact)) continue;
+          const text = `[${f.category || '状态'} · ${f.subject || '全局'}] ${f.fact}${(f.keywords || []).length ? ` (${f.keywords.join('、')})` : ''}`.slice(0, 320);
+          items.push({
+            key: `fact:${f.id}`,
+            kind: 'fact',
+            refId: f.id,
+            label: `事实[${f.subject || '全局'}]`,
+            text,
+            textHash: hashText(`${model}||fact||${text}`)
+          });
+        }
       }
     }
 
     if (st.vectorIncludePersonalAndEntity !== false) {
-      const arcs = Array.isArray(targetState.character_arcs) ? targetState.character_arcs : [];
-      for (const p of targetState.personal_memory || []) {
-        const names = unique(p?.names);
-        if (!names.length) continue;
-        const arc = arcs.find(a => a.characterId === p.id || (a.names || []).some(n => names.includes(n)));
-        const basic = p?.profile?.basicInfo || {};
-        const basicText = [
-          clean(basic.identity) ? `身份:${clean(basic.identity)}` : '',
-          clean(basic.appearance) ? `外貌:${clean(basic.appearance)}` : '',
-          clean(basic.personality) ? `性格:${clean(basic.personality)}` : '',
-          clean(basic.abilities) ? `能力:${clean(basic.abilities)}` : '',
-          clean(basic.relations) ? `关系:${clean(basic.relations)}` : ''
-        ].filter(Boolean).join('｜');
-        const expText = clean(p?.profile?.experiences);
-        const recentMemories = Object.values(p.memory || {}).flat().slice(-5);
-        if (!arc && !basicText && !expText && !recentMemories.length) continue;
+      const chars = Array.isArray(tables.important_characters) ? tables.important_characters : [];
+      for (const c of chars) {
+        if (!clean(c?.name)) continue;
         const text = [
-          `人物：${names.join('/')}`,
-          basicText ? `基本信息：${basicText}` : '',
-          expText ? `迄今经历：${expText}` : '',
-          arc?.relationship ? `关系：${arc.relationship}` : '',
-          arc?.currentStance ? `立场：${arc.currentStance}` : '',
-          recentMemories.join('；')
+          `角色：${c.name}`,
+          clean(c.brief_intro) ? `简介：${c.brief_intro}` : '',
+          clean(c.appearance) ? `外貌：${c.appearance}` : '',
+          clean(c.outfit_text) ? `穿着：${c.outfit_text}` : '',
+          clean(c.location_name) ? `地点：${c.location_name}` : '',
+          clean(c.relation_text) ? `关系：${c.relation_text}` : '',
+          clean(c.past_experience) ? `经历：${c.past_experience}` : ''
         ].filter(Boolean).join(' | ').slice(0, 600);
         items.push({
-          key: `person:${p.id}`,
+          key: `char:${c.rowId || c.name}`,
           kind: 'person',
-          refId: p.id,
-          label: `人物[${names[0]}]`,
+          refId: String(c.rowId || c.name),
+          label: `角色[${c.name}]`,
           text,
-          textHash: hashText(`${model}||person||${text}`)
+          textHash: hashText(`${model}||char||${text}`)
         });
       }
 
-      for (const type of ['organization', 'object', 'ability', 'location']) {
-        for (const e of targetState.entity_memory?.[type] || []) {
-          if (!clean(e?.name)) continue;
-          const aliases = unique(e.aliases);
-          const recentHist = (Array.isArray(e.history) ? e.history : []).slice(-4).map(h => h.event);
-          const text = [
-            `${e.name}${aliases.length ? `(${aliases.join('/')})` : ''}`,
-            clean(e.description),
-            recentHist.join('；')
-          ].filter(Boolean).join(' | ').slice(0, 360);
-          items.push({
-            key: `entity:${type}:${e.id}`,
-            kind: 'entity',
-            entityType: type,
-            refId: e.id,
-            label: `实体[${e.name}]`,
-            text,
-            textHash: hashText(`${model}||entity||${text}`)
-          });
-        }
+      for (const s of Array.isArray(tables.protagonist_skills) ? tables.protagonist_skills : []) {
+        if (!clean(s?.skill_name)) continue;
+        const text = `技能：${s.skill_name} [${s.skill_type || '主动'}${s.skill_level ? `·${s.skill_level}` : ''}] ${clean(s.effect_desc)}`.slice(0, 360);
+        items.push({
+          key: `skill:${s.rowId || s.skill_name}`,
+          kind: 'entity',
+          entityType: 'ability',
+          refId: String(s.rowId || s.skill_name),
+          label: `技能[${s.skill_name}]`,
+          text,
+          textHash: hashText(`${model}||skill||${text}`)
+        });
+      }
+
+      for (const item of Array.isArray(tables.inventory) ? tables.inventory : []) {
+        if (!clean(item?.item_name)) continue;
+        const text = `物品：${item.item_name} ×${item.quantity || '1'}${item.category ? ` [${item.category}]` : ''} ${clean(item.description)}`.slice(0, 360);
+        items.push({
+          key: `item:${item.rowId || item.item_name}`,
+          kind: 'entity',
+          entityType: 'object',
+          refId: String(item.rowId || item.item_name),
+          label: `物品[${item.item_name}]`,
+          text,
+          textHash: hashText(`${model}||item||${text}`)
+        });
       }
     }
     return items;

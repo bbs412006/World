@@ -403,6 +403,11 @@ window.OUTLINE_ENGINE_UI = (function() {
     } catch (_) {}
     try {
       const memory = window.MEMORY_ENGINE_DATA?.loadState?.() || {};
+      const tables = memory.tables || {};
+      for (const ch of tables.important_characters || []) if (ch?.name) result.push({ source: 'memory', originChatId, type: 'character', id: `char_${ch.rowId || ch.name}`, nameSnapshot: ch.name });
+      for (const item of tables.inventory || []) if (item?.item_name) result.push({ source: 'memory', originChatId, type: 'object', id: `item_${item.rowId || item.item_name}`, nameSnapshot: item.item_name });
+      for (const sk of tables.protagonist_skills || []) if (sk?.skill_name) result.push({ source: 'memory', originChatId, type: 'ability', id: `skill_${sk.rowId || sk.skill_name}`, nameSnapshot: sk.skill_name });
+      for (const q of tables.quests_events || []) if (q?.quest_name) result.push({ source: 'memory', originChatId, type: 'quest', id: `quest_${q.rowId || q.quest_name}`, nameSnapshot: q.quest_name });
       for (const item of memory.personal_memory || []) if (item.id) result.push({ source: 'memory', originChatId, type: 'character', id: item.id, nameSnapshot: item.names?.[0] || item.id });
       for (const [type, list] of Object.entries(memory.entity_memory || {})) if (Array.isArray(list)) for (const item of list) if (item.id) result.push({ source: 'memory', originChatId, type, id: item.id, nameSnapshot: item.name || item.id });
     } catch (_) {}
@@ -1145,8 +1150,8 @@ window.OUTLINE_ENGINE_UI = (function() {
       ${settingInput('后台每轮最多安排节点', 'worldLimit', value.worldLimit ?? 3, { type: 'number', min: 1, step: 1, hint: '限制每次交给世界引擎推演的剧情节点条数，避免挤占世界推演提示词空间。' })}
       ${settingCheck('在大纲核对与线索判定中使用世界公开状态', 'useWorldReference', value.useWorldReference !== false, '允许大纲后台核对参考世界公开摘要与大势，且线索条件可读取世界故事天数与事件账本（关闭后大纲完全脱离世界状态独立判定）。')}`;
     const memoryLinkBody = `
-      ${settingCheck('向记忆引擎同步已核实线索与公开焦距', 'injectIntoMemoryEngine', value.injectIntoMemoryEngine !== false, '开启后，经正文逐字原文证据核实的新增线索接触（contacts）与揭露真相（reveals）会自动安全写入对应人物记忆，并向记忆提取提供公开章节焦点；未揭露私密事实始终隔离。')}
-      ${settingCheck('在大纲核对与整理中参考记忆纪要与持续事实', 'useMemoryReference', value.useMemoryReference !== false, '开启后，整理与核对会参考记忆引擎中的人物别名、活跃持续事实、关键与近期纪要及人物弧光作为只读背景（不会作为正文原文完成证据）。')}`;
+      ${settingCheck('向记忆引擎提供公开章节焦距（只读）', 'injectIntoMemoryEngine', value.injectIntoMemoryEngine !== false, '开启后，记忆填表与注入时会参考大纲当前公开章节与活跃角色作只读焦距对齐，不再向记忆 7 表自动写入任何记录；未揭露私密事实始终隔离。')}
+      ${settingCheck('在大纲核对与整理中参考记忆 7 表背景（只读）', 'useMemoryReference', value.useMemoryReference !== false, '开启后，整理与核对会单向只读参考记忆引擎中的任务与事件、重要角色履历及近期纪要作为背景（不会作为正文原文完成证据，也不会反向修改记忆表）。')}`;
 
     const retryBody = settingInput('API 异常自动重试次数（X）', 'apiAutoRetries', value.apiAutoRetries ?? 0, { type: 'number', min: 0, step: 1, hint: '仅连接、HTTP、超时、空返回或 JSON 无法修补等故障才重试；正常解析为空变更不算错误。' });
     const proposalBody = settingCheck('允许 AI 提出结构调整建议', 'allowProposals', value.allowProposals !== false, '核对正文后若发现故事走向明显偏离预设计划，允许 AI 在建议区生成微调草案；所有建议需作者审阅确认后才会写入正式大纲。');

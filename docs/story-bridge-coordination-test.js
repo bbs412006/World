@@ -134,12 +134,20 @@ for (const file of [
 }
 
 (async () => {
-  // 先初始化一点记忆资产（含别名）
+  // 先初始化一点 v3 核心 7 表记忆资产
   let memState = sandbox.MEMORY_ENGINE_DATA.defaultState();
-  memState.personal_memory.push({ id: 'char_000001', names: ['苏婉', '婉儿'], memory: {} });
-  memState.ongoing_facts.push({ id: 'fact_000001', category: '持有', subject: '林墨', fact: '随身携带半块焦黑木牌', status: 'active' });
-  memState.character_arcs.push({ id: 'arc_000001', characterId: 'char_000001', names: ['苏婉', '婉儿'], currentStance: '谨慎试探', relationship: '初识线索人', progressPct: 25 });
-  memState.event_memory.small_summaries.push({ id: 'small_000001', startLayer: 1, endLayer: 2, content: '林墨拣到焦黑木牌，苏婉认出此物。', status: 'valid', revision: 1 });
+  memState.tables.important_characters.push({
+    rowId: 1, name: '婉儿', brief_intro: '初识线索人', presence_status: '在场',
+    relation_text: '林墨:初识线索人', past_experience: '谨慎试探，关注渡口旧案'
+  });
+  memState.tables.quests_events.push({
+    rowId: 1, quest_name: '焦黑木牌调查', quest_type: '支线任务', issuer: '林墨',
+    detail_desc: '随身携带半块焦黑木牌，追查来历', current_progress: '进行中'
+  });
+  memState.tables.chronicle.push({
+    id: 'small_000001', rowId: 1, code_index: 'AM0001', startLayer: 2, endLayer: 2,
+    summary: '拣到焦黑木牌', chronicle_text: '林墨拣到焦黑木牌，婉儿认出此物。', status: 'valid', revision: 1
+  });
   sandbox.MEMORY_ENGINE_DATA.saveState(memState);
 
   const bridge = sandbox.STORY_ENGINE_BRIDGE;
@@ -151,29 +159,22 @@ for (const file of [
   assert.ok(!memHints.outlineFocusHint.includes('刺杀太傅幕后交易'), '绝不能泄露 private 节点');
   assert.ok(!memHints.worldContextHint.includes('皇室暗杀绝密指令'), '绝不能泄露世界 blackbox 暗箱内容');
 
-  // 2. 别名归并 & 大纲认知参考增强
+  // 2. 角色映射 & 大纲认知参考增强
   const aliases = Array.from(bridge.resolveCharacterAliases('婉儿'));
-  assert.ok(aliases.includes('苏婉') && aliases.includes('婉儿'), '别名应正确归并');
+  assert.ok(aliases.includes('婉儿'), '角色名应正确解析');
   const outlineRef = bridge.buildOutlineReferenceContext(sandbox.OUTLINE_ENGINE_DATA.loadState());
-  assert.ok(outlineRef.includes('随身携带半块焦黑木牌'), '大纲参考上下文应自动携带持续事实');
-  assert.ok(outlineRef.includes('林墨拣到焦黑木牌'), '大纲参考上下文应带近期小纪要而非只看大总述');
+  assert.ok(outlineRef.includes('随身携带半块焦黑木牌'), '大纲参考上下文应自动携带当前任务/持续事实');
+  assert.ok(outlineRef.includes('林墨拣到焦黑木牌'), '大纲参考上下文应带近期纪要');
   assert.ok(!outlineRef.includes('皇室暗杀绝密指令'), '大纲参考不得泄露世界 blackbox');
 
-  // 3. 大纲 verified contacts / reveals 精准回流记忆（严防泄露未揭露私密事实）
+  // 3. 弱联动保护：大纲提交不得向记忆 7 表自动写入任何记录（仅保留只读参考，严防污染记忆表或泄露私密事实）
   const afterOutline = sandbox.OUTLINE_ENGINE_DATA.loadState();
   const beforeOutline = { ...afterOutline, contacts: [], knowledge: [] };
+  const beforeMemSnapshot = JSON.stringify(sandbox.MEMORY_ENGINE_DATA.loadState().tables);
   const syncRes = bridge.notifyOutlineCommitted(afterOutline, beforeOutline, { refs: refs(1, 2) });
-  assert.ok(syncRes.changed >= 2, 'verified 接触与揭露应同步进人物记忆');
-  const afterMem = sandbox.MEMORY_ENGINE_DATA.loadState();
-  const suWan = afterMem.personal_memory.find(p => p.names.includes('苏婉'));
-  const memJoined = JSON.stringify(suWan.memory);
-  assert.ok(memJoined.includes('焦黑木牌刻着旧印') && memJoined.includes('太傅遗失的密令残片'), '已核实接触与揭露应入库至苏婉主观记忆');
-  assert.ok(!memJoined.includes('真正的幕后黑手是国师'), '未揭露的私密事实绝不允许混入记忆');
-  // 回放测试：把 outline_verified 节点标 stale 后 replayTimeline 应能撤回
-  afterMem.timeline.nodes.filter(n => n.kind === 'outline_verified').forEach(n => { n.status = 'stale'; });
-  const replayed = sandbox.MEMORY_ENGINE.replayTimeline(afterMem);
-  const suWanAfterRollback = replayed.personal_memory.find(p => p.names.includes('苏婉'));
-  assert.ok(!JSON.stringify(suWanAfterRollback.memory).includes('太傅遗失的密令残片'), 'timeline 撤回后 outline_verified 记忆应随之回滚');
+  assert.strictEqual(syncRes.changed, 0, '弱联动模式下大纲提交不得向记忆表写入任何记录');
+  assert.strictEqual(syncRes.readonly, true);
+  assert.strictEqual(JSON.stringify(sandbox.MEMORY_ENGINE_DATA.loadState().tables), beforeMemSnapshot, '大纲核对后记忆 7 表必须保持 100% 纯净不被改动');
 
   // 4. 独立运行降级检查（关闭世界和大纲时，不触发协同排队）
   worldSettings.engineEnabled = false;

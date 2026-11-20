@@ -95,17 +95,19 @@ for (const filename of [
 function seedState() {
   const state = sandbox.MEMORY_ENGINE_DATA.defaultState();
   const oldSmallRefs = refs(1, 2), targetRefs = refs(5, 6);
-  state.event_memory.small_summaries = [
+  state.tables.chronicle = [
     {
-      id: 'small_000001', startLayer: 1, endLayer: 2, content: '更早纪要内容',
+      id: 'small_000001', rowId: 1, code_index: 'AM0001', startLayer: 2, endLayer: 2,
+      summary: '更早纪要内容', chronicle_text: '更早纪要内容',
       sourceRefs: oldSmallRefs, sourceDigest: digestRefs(oldSmallRefs), originChatId: 'reextract-test', status: 'valid', revision: 1
     },
     {
-      id: 'small_000002', startLayer: 5, endLayer: 6, content: '旧目标纪要',
+      id: 'small_000002', rowId: 2, code_index: 'AM0002', startLayer: 6, endLayer: 6,
+      summary: '旧目标纪要', chronicle_text: '旧目标纪要',
       sourceRefs: targetRefs, sourceDigest: digestRefs(targetRefs), originChatId: 'reextract-test', status: 'valid', revision: 1
     }
   ];
-  state.event_memory.small_summary_layer = 6;
+  state.tableWatermarks.chronicle = 6;
   state.timeline = {
     originChatId: 'reextract-test',
     root: {

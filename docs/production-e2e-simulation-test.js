@@ -197,211 +197,209 @@ function makeOpeningChat(rounds = 0) {
 
 async function runAll() {
   // ═══════════════════════════════════════════════════════════════════════════
-  // 场景 1：真实大模型脏输出压力测试（<think> 块 + 未转义字面换行 + // 注释 + 尾随逗号 + 双代码块拆分）
+  // 场景 1：真实大模型脏输出压力测试（<think> 块 + 未转义字面换行 + // 注释 + 尾随逗号）
   // ═══════════════════════════════════════════════════════════════════════════
   {
     const env = createProductionSandbox(makeOpeningChat(1));
     await env.sandbox.WORLD_ENGINE_CHATCACHE.init();
-    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ smallSummaryEveryX: 1, smallSummaryMinChars: 500 });
+    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ catchUpBatchSize: 1, smallSummaryEveryX: 1, smallSummaryMinChars: 500 });
 
     // 故意在 500+ 字字符串内部放入真实未转义换行符、尾随逗号、单行注释、<think> 花括号干扰
     const messyRaw = `<think>让我先思考人物：{沈清秋, 林墨}，准备输出 JSON</think>
 \`\`\`json
 {
-  // 人物统一档案更新
-  "character_profile_updates": [
-    {
-      "name": ["沈清秋", "清秋"],
-      "basic_info": {
-        "identity": "北境暗桩总管",
+  // 全局与主角状态更新
+  "global_state": {
+    "current_location": "青石渡",
+    "current_minor_region": "江南渡口",
+    "current_major_region": "大周南境",
+    "cur_time": "第1日 22:00",
+  },
+  "protagonist_info": {
+    "name": "林墨",
+    "identity_text": "江湖密探",
+    "current_condition": "深夜潜行略带寒意",
+    "location_name": "青石渡",
+  },
+  "important_characters": {
+    "upsert": [
+      {
+        "name": "沈清秋",
+        "brief_intro": "北境暗桩总管",
         "appearance": "青衫玉簪，眉目清冷",
-        "personality": "外冷内韧，极重然诺",
-        "abilities": "惊鸿剑法、暗桩密语",
-        "relations": "与林墨初次结盟",
-      },
-      "experiences": "早年执掌北境暗桩情报网。
+        "outfit_text": "青衫长袍，腰悬佩剑",
+        "location_name": "青石渡",
+        "presence_status": "在场",
+        "relation_text": "林墨:初次结盟",
+        "past_experience": "早年执掌北境暗桩情报网。
 今日在青石渡秘密会见林墨，将关乎十二处暗桩生死的青铜虎符托付于他，并定下半月之约。",
-    },
-  ],
-  "personal_memory": [
-    {
-      "name": ["沈清秋"],
-      "known_by": ["林墨"],
-      "memory": "沈清秋暗中怀疑内鬼就在南城分舵。",
-      "time": "第1日",
-    },
-  ],
-  "entity_updates": [
-    {
-      "type": "object",
-      "name": "青铜虎符",
-      "aliases": ["北境虎符"],
-      "description": "调动北境十二暗桩的唯一铁证信物",
-      "event": "由沈清秋秘密移交林墨保管",
-      "time": "第1日",
-    },
-  ],
-  "ongoing_fact_updates": [
-    {
-      "action": "upsert",
-      "id": "",
-      "category": "契约",
-      "subject": "青铜虎符",
-      "fact": "半月内不可示人，否则北境暗桩全毁",
-      "keywords": ["青铜虎符", "半月之约"],
-    },
-  ],
-  "character_arc_updates": [
-    {
-      "name": "沈清秋",
-      "current_stance": "审慎托付",
-      "arc_summary": "在绝境中将关键信物托付林墨",
-      "relationship": "密约同盟",
-      "progress_pct": 35,
-    },
-  ],
-  "small_summary": "${'青石渡风雪之夜，沈清秋携青铜虎符密会林墨，详述北境暗桩危局并定下半月保密之约。\n双方就南城分舵异动交换情报，敲定次日分头核查漕运账册的行动方案。'.repeat(8)}",
-  "small_summary_keywords": ["青铜虎符", "青石渡", "漕运账册",],
+      },
+    ],
+    "delete": [],
+  },
+  "inventory": {
+    "upsert": [
+      {
+        "item_name": "青铜虎符",
+        "quantity": "1",
+        "category": "关键物品",
+        "description": "调动北境十二暗桩的唯一铁证信物",
+      },
+    ],
+    "delete": [],
+  },
+  "quests_events": {
+    "upsert": [
+      {
+        "quest_name": "半月虎符密约",
+        "quest_type": "主线任务",
+        "issuer": "沈清秋",
+        "detail_desc": "半月内不可示人，否则北境暗桩全毁",
+        "current_progress": "进行中",
+      },
+    ],
+    "delete": [],
+  },
+  "chronicle": {
+    "code_index": "AM0001",
+    "summary": "青石渡密会托付青铜虎符",
+    "chronicle_text": "${'青石渡风雪之夜，沈清秋携青铜虎符密会林墨，详述北境暗桩危局并定下半月保密之约。\n双方就南城分舵异动交换情报，敲定次日分头核查漕运账册的行动方案。'.repeat(8)}",
+    "key_dialogue": "沈清秋：“半月内绝不可示人。”",
+    "keywords": ["青铜虎符", "青石渡", "漕运账册",],
+    "entities": ["林墨", "沈清秋", "青铜虎符",],
+    "impact": "key",
+  },
 }
 \`\`\``;
 
     env.setApiHandler(async () => messyRaw);
-    const cu = await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    const cu = await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
     assert.strictEqual(cu.completedBatches, 1);
     const st = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(st.personal_memory.length, 2, '沈清秋与知情人林墨均应建档');
-    const shen = st.personal_memory.find(p => p.names.includes('沈清秋'));
-    assert.strictEqual(shen.profile.basicInfo.identity, '北境暗桩总管');
-    assert.ok(shen.profile.experiences.includes('青铜虎符托付于他'), '含字面换行的长经历应被无损修复解析');
-    assert.strictEqual(st.entity_memory.object.length, 1);
-    assert.strictEqual(st.ongoing_facts.length, 1);
-    assert.strictEqual(st.character_arcs.length, 1);
-    assert.strictEqual(st.event_memory.small_summaries.length, 1);
-    assert.ok(st.event_memory.small_summaries[0].content.length >= 500, '含未转义换行的 500+ 字纪要应完整落表');
-    console.log('✓ 场景 1 通过：真实脏 JSON（<think> + 字符串未转义换行 + 注释 + 尾随逗号）全要素无损落表');
+    assert.strictEqual(st.tables.global_state[0].current_location, '青石渡');
+    assert.strictEqual(st.tables.protagonist_info[0].name, '林墨');
+    const shen = st.tables.important_characters.find(p => p.name === '沈清秋');
+    assert.strictEqual(shen.brief_intro, '北境暗桩总管');
+    assert.ok(shen.past_experience.includes('青铜虎符托付于他'), '含字面换行的长经历应被无损修复解析');
+    assert.strictEqual(st.tables.inventory.length, 1);
+    assert.strictEqual(st.tables.quests_events.length, 1);
+    assert.strictEqual(st.tables.chronicle.length, 1);
+    assert.ok(st.tables.chronicle[0].chronicle_text.length >= 500, '含未转义换行的 500+ 字纪要应完整落表');
+    console.log('✓ 场景 1 通过：真实脏 JSON（<think> + 字符串未转义换行 + 注释 + 尾随逗号）核心 7 表无损落表');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 场景 2：20 轮长对话人物防膨胀压力测试（统一五项基本信息 + 详实迄今经历整合 + 碎记忆上限裁剪）
+  // 场景 2：20 轮长对话重要角色表防膨胀压力测试（按主键原地精炼合并，绝不重复建行）
   // ═══════════════════════════════════════════════════════════════════════════
   {
     const env = createProductionSandbox(makeOpeningChat(20));
-    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ smallSummaryEveryX: 1, smallSummaryMinChars: 500 });
+    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ catchUpBatchSize: 1, smallSummaryEveryX: 1, smallSummaryMinChars: 500 });
 
     let roundCounter = 0;
     env.setApiHandler(async () => {
       roundCounter++;
       const isMajorTurn = roundCounter % 4 === 0 || roundCounter === 1;
       return JSON.stringify({
-        character_profile_updates: isMajorTurn ? [{
-          name: ['沈清秋'],
-          basic_info: {
-            identity: roundCounter >= 12 ? '北境暗桩总管（已公开亮明身份）' : '北境暗桩总管',
+        important_characters: isMajorTurn ? {
+          upsert: [{
+            name: '沈清秋',
+            brief_intro: roundCounter >= 12 ? '北境暗桩总管（已亮明身份）' : '北境暗桩总管',
             appearance: roundCounter === 1 ? '青衫玉簪' : '',
-            personality: roundCounter === 1 ? '冷静果决' : '',
-            abilities: roundCounter === 8 ? '惊鸿剑法大成、暗桩调度' : '',
-            relations: `第${roundCounter}轮同盟深化`
-          },
-          experiences: `截至第${roundCounter}轮的关键经历整合：历经青石渡托付虎符、南城查账破局与茶楼突围（已忽略日常寒暄琐事）。`
-        }] : [],
-        // 故意每轮塞 3 条碎记忆（共 60 条），验证本地自动防膨胀上限 30 条
-        personal_memory: [1, 2, 3].map(k => ({
-          name: ['沈清秋'],
-          known_by: [],
-          memory: `第${roundCounter}轮认知片段_${k}`,
-          time: `第${roundCounter}日`
-        })),
-        entity_updates: [],
-        ongoing_fact_updates: [],
-        character_arc_updates: [],
-        small_summary: `第${roundCounter}轮阶段纪要详实记录。`.repeat(45)
+            outfit_text: roundCounter === 8 ? '玄色斗篷' : '',
+            presence_status: '在场',
+            relation_text: `林墨:第${roundCounter}轮同盟深化`,
+            past_experience: `截至第${roundCounter}轮的关键经历整合：历经青石渡托付虎符、南城查账破局与茶楼突围。`
+          }],
+          delete: []
+        } : { upsert: [], delete: [] },
+        chronicle: {
+          summary: `第${roundCounter}轮推进`,
+          chronicle_text: `第${roundCounter}轮阶段纪要详实记录。`.repeat(45)
+        }
       });
     });
 
-    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
     const st = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    const shen = st.personal_memory.find(p => p.names.includes('沈清秋'));
-    assert.strictEqual(st.personal_memory.length, 1, '20 轮后同一人物绝不重复建卡');
-    assert.strictEqual(shen.profile.basicInfo.appearance, '青衫玉簪', '第 1 轮写入且后续返回空串的外貌字段应完好保留');
-    assert.strictEqual(shen.profile.basicInfo.abilities, '惊鸿剑法大成、暗桩调度', '第 8 轮增量补充的能力字段应保留');
-    assert.strictEqual(shen.profile.basicInfo.identity, '北境暗桩总管（已公开亮明身份）');
-    assert.strictEqual(shen.profile.basicInfo.relations, '第20轮同盟深化');
-    assert.ok(shen.profile.experiences.startsWith('截至第20轮的关键经历整合'), '迄今经历为整合更新而非无限拼接');
-    const totalStoredFragments = Object.values(shen.memory).reduce((s, arr) => s + arr.length, 0);
-    assert.strictEqual(totalStoredFragments, 30, `60 条碎记忆应被防膨胀上限稳定控制在 30 条，实际=${totalStoredFragments}`);
-    console.log('✓ 场景 2 通过：20 轮长对话人物统一档案原地精炼更新，碎记忆严格受控不膨胀');
+    const shen = st.tables.important_characters.find(p => p.name === '沈清秋');
+    assert.strictEqual(st.tables.important_characters.length, 1, '20 轮后同一角色绝不重复建行');
+    assert.strictEqual(shen.appearance, '青衫玉簪', '第 1 轮写入且后续返回空串的外貌字段应完好保留');
+    assert.strictEqual(shen.outfit_text, '玄色斗篷', '第 8 轮增量补充的穿着字段应保留');
+    assert.strictEqual(shen.brief_intro, '北境暗桩总管（已亮明身份）');
+    assert.strictEqual(shen.relation_text, '林墨:第20轮同盟深化');
+    assert.ok(shen.past_experience.startsWith('截至第20轮的关键经历整合'), '过往经历为原地精炼更新而非无限拼接');
+    assert.strictEqual(st.tables.chronicle.length, 20, '20 轮纪要全部连续编号落表');
+    assert.strictEqual(st.tables.chronicle[19].code_index, 'AM0020');
+    console.log('✓ 场景 2 通过：20 轮长对话重要角色表原地精炼更新不膨胀，纪要连续编号 AM0001~AM0020');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 场景 3：所有「只落纪要不落其他表」生产陷阱联合回归（非空快照 + 旧空壳节点 + 短对话兜底重试 + 范围填表）
+  // 场景 3：生产陷阱联合回归（手动快照 + 跨表缺口 Wave 智能合流 + 带错回灌纠错重试 + 范围填表）
   // ═══════════════════════════════════════════════════════════════════════════
   {
     const env = createProductionSandbox(makeOpeningChat(4)); // 0..8 (AI: 2, 4, 6, 8)
-    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ smallSummaryEveryX: 1, smallSummaryMinChars: 500 });
+    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ catchUpBatchSize: 1, smallSummaryEveryX: 1, smallSummaryMinChars: 500, tableFillMaxRetries: 2 });
 
-    // 预埋陷阱 A：第 1-2 层存在旧版遗留的“空壳节点”（memoryExtracted: false 或空内容）+ 已有纪要
+    // 预埋陷阱 A：第 2 层仅填了 chronicle（缺少其余 6 张表），模拟分表水位参差不齐
     const s0 = env.sandbox.MEMORY_ENGINE_DATA.loadState();
     const refs12 = env.sandbox.MEMORY_ENGINE_TIMELINE.captureRange(1, 2);
-    s0.timeline.nodes.push({
-      id: 'memory_000001', kind: 'memory', startLayer: 1, endLayer: 2, sourceRefs: refs12,
-      sourceDigest: env.sandbox.MEMORY_ENGINE_TIMELINE.digestRefs(refs12),
-      personal: [], profileUpdates: [], entities: { organization: [], object: [], ability: [], location: [] },
-      factUpdates: [], arcUpdates: [], memoryExtracted: false, status: 'valid'
-    });
-    s0.event_memory.small_summaries.push({
-      id: 'small_000001', startLayer: 1, endLayer: 2, content: '旧1-2纪要。'.repeat(60),
+    s0.tables.chronicle.push({
+      id: 'small_000001', rowId: 1, code_index: 'AM0001', startLayer: 2, endLayer: 2,
+      summary: '旧2层纪要', chronicle_text: '旧1-2纪要。'.repeat(60),
       sourceRefs: refs12, sourceDigest: env.sandbox.MEMORY_ENGINE_TIMELINE.digestRefs(refs12), status: 'valid'
     });
-    // 预埋陷阱 B：用户在第 8 层手动加过 1 条设定事实（产生 endLayer=8 的非空 manual_snapshot！）
+    // 预埋陷阱 B：用户在第 8 层手动加过 1 条设定任务（产生非空 manual_snapshot）
     const sEdited = plain(s0);
-    sEdited.ongoing_facts = [{
-      id: 'fact_000001', category: '设定', subject: '全局', fact: '手动全局铁律', keywords: [], status: 'active', startLayer: 0, updatedLayer: 8
+    sEdited.tables.quests_events = [{
+      rowId: 1, quest_name: '手动全局铁律', quest_type: '主线任务', issuer: '作者', detail_desc: '手动全局铁律', current_progress: '生效中'
     }];
-    env.sandbox.MEMORY_ENGINE.commitManualState(sEdited, s0);
-    env.sandbox.MEMORY_ENGINE_DATA.saveState(sEdited);
+    env.sandbox.MEMORY_ENGINE.commitManualState(sEdited);
 
-    // 预埋陷阱 C：第 3-4 层的联合请求中模型“偷懒”只写了 small_summary，漏写了人物/实体/事实，触发独立补提！
-    let fallbackTriggeredFor34 = false;
+    // 预埋陷阱 C：第 4 层首次响应漏写 chronicle（触发带错回灌纠错重试！）
+    let retryCorrectionSeen = false;
+    let firstFailDone = false;
     env.setApiHandler(async prompt => {
-      if ((prompt.includes('【总结范围】\n楼层 4\n') || prompt.includes('楼层 3 至 4')) && prompt.includes('"small_summary": ""')) {
-        return JSON.stringify({ small_summary: '第3-4层模型偷懒只返回了纪要。'.repeat(50) });
-      }
-      if (!prompt.includes('"small_summary": ""')) {
-        fallbackTriggeredFor34 = true;
-      }
       const layerMatches = [...prompt.matchAll(/\[楼层 (\d+)\]/g)].map(x => Number(x[1]));
       const maxL = layerMatches.length ? Math.max(...layerMatches) : 0;
-      const tag = maxL ? `${maxL - 1}-${maxL}` : '未知';
-      return JSON.stringify({
-        character_profile_updates: [{
-          name: [`人物_${tag}`],
-          basic_info: { identity: `身份_${tag}`, appearance: '', personality: '', abilities: '', relations: '' },
-          experiences: `在阶段 ${tag} 完成了关键部署。`
-        }],
-        personal_memory: [],
-        entity_updates: [{ type: 'location', name: `据点_${tag}`, aliases: [], description: '关键据点', event: '完成布防', time: '' }],
-        ongoing_fact_updates: [{ action: 'upsert', id: '', category: '状态', subject: '全局', fact: `阶段_${tag}_持续状态`, keywords: [] }],
-        character_arc_updates: [{ name: `人物_${tag}`, current_stance: '坚定', arc_summary: '推进部署', relationship: '盟友', progress_pct: 50 }],
-        small_summary: `阶段 ${tag} 详实纪要。`.repeat(55)
-      });
+      if (maxL === 4 && !firstFailDone) {
+        firstFailDone = true;
+        return JSON.stringify({ important_characters: { upsert: [{ name: '人物_4', brief_intro: '临时' }], delete: [] } });
+      }
+      if (prompt.includes('【填表纠错】')) {
+        retryCorrectionSeen = true;
+      }
+      const tag = `L${maxL}`;
+      const res = {
+        global_state: { current_location: `据点_${tag}` },
+        important_characters: {
+          upsert: [{ name: `人物_${tag}`, brief_intro: `身份_${tag}`, presence_status: '在场', past_experience: `在阶段 ${tag} 完成关键部署。` }],
+          delete: []
+        },
+        quests_events: {
+          upsert: [{ quest_name: `阶段任务_${tag}`, quest_type: '支线任务', issuer: '全局', detail_desc: `阶段_${tag}_持续状态`, current_progress: '进行中' }],
+          delete: []
+        }
+      };
+      if (prompt.includes('"chronicle":')) {
+        res.chronicle = { summary: `阶段 ${tag}`, chronicle_text: `阶段 ${tag} 详实纪要。`.repeat(55) };
+      }
+      return JSON.stringify(res);
     });
 
     // 先跑非覆盖范围填表 1..4，再跑一键追平到 8
     const r14 = await env.sandbox.MEMORY_ENGINE.fillSummaryRange({ startLayer: 1, endLayer: 4, batchSize: 1, overwrite: false });
-    assert.strictEqual(r14.completedBatches, 2, '1-2 缺记忆、3-4 全缺，均应执行补填');
-    assert.strictEqual(fallbackTriggeredFor34, true, '3-4 联合请求漏填结构化字段时应自动触发独立补提');
+    assert.strictEqual(r14.completedBatches, 2, '第 2 层仅补 6 表、第 4 层补全 7 表，共 2 批');
+    assert.strictEqual(retryCorrectionSeen, true, '第 4 层缺少必填 chronicle 时应触发带错回灌纠错重试并成功修复');
 
-    const cu8 = await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
-    assert.strictEqual(cu8.completedBatches, 2, '剩余 5-6 与 7-8 两批应追平');
+    const cu8 = await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
+    assert.strictEqual(cu8.completedBatches, 2, '剩余第 6 层与第 8 层两批应追平');
 
     const finalSt = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(finalSt.event_memory.small_summaries.length, 4, '4 段纪要齐全');
-    assert.ok(finalSt.personal_memory.length >= 4, `4 批新人物档案均须落表，实际=${finalSt.personal_memory.length}`);
-    assert.strictEqual(finalSt.entity_memory.location.length, 4, '4 批地点实体均须落表');
-    assert.ok(finalSt.ongoing_facts.some(f => f.fact === '手动全局铁律'), '用户之前的手动事实必须保留');
-    assert.strictEqual(finalSt.ongoing_facts.length, 5, '1 条手动 + 4 批新增 = 5 条持续事实全部在表');
-    assert.strictEqual(finalSt.character_arcs.length, 4, '4 批角色弧光全部在表');
-    console.log('✓ 场景 3 通过：非空手动快照 + 空壳旧节点 + 模型偷懒漏字段兜底补提下，范围填表与一键追平全要素 100% 落表');
+    assert.strictEqual(finalSt.tables.chronicle.length, 4, '4 段纪要齐全且第 2 层旧纪要未被重复写入');
+    assert.ok(finalSt.tables.important_characters.length >= 4, `4 批重要角色均须落表，实际=${finalSt.tables.important_characters.length}`);
+    assert.ok(finalSt.tables.quests_events.some(q => q.quest_name === '手动全局铁律'), '用户之前的手动任务必须保留');
+    assert.strictEqual(finalSt.tables.quests_events.length, 5, '1 条手动 + 4 批新增 = 5 条任务全部在表');
+    console.log('✓ 场景 3 通过：手动快照 + 分表水位参差 Wave 补漏 + 带错回灌纠错重试全部 100% 落表');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -454,8 +452,8 @@ async function runAll() {
       ledger.recordChanges(ws);
       core.updateCurrentHistorySnapshot(ws);
 
-      // 2) 世界 -> 记忆轻同步（产生 synthetic world_link 节点 + world_engine 纪要）
-      await memEngine.ingestWorldEvolution({
+      // 2) 弱联动校验：世界推演后不得往记忆 7 表写入任何世界同步记录
+      const linkRes = await memEngine.ingestWorldEvolution({
         layer,
         worldRound: ws.round,
         worldDigest: ws.worldDigest,
@@ -463,28 +461,31 @@ async function runAll() {
         lightweight: true,
         force: true
       });
+      assert.strictEqual(linkRes.skipped, true, '弱联动模式下世界不得向记忆写入记录');
 
       // 3) 记忆引擎提取本层对话 + 向量维护
       env.setApiHandler(async () => JSON.stringify({
-        character_profile_updates: [{
-          name: ['林墨'],
-          basic_info: { identity: `第${r}阶密探`, appearance: '', personality: '', abilities: '', relations: '' },
-          experiences: `截至第${r}轮的关键经历。`
-        }],
-        personal_memory: [],
-        entity_updates: [],
-        ongoing_fact_updates: [{ action: 'upsert', id: '', category: '状态', subject: '林墨', fact: `第${r}轮状态事实`, keywords: [`状态${r}`] }],
-        character_arc_updates: [],
-        small_summary: `第${r}轮对话纪要。`.repeat(55)
+        important_characters: {
+          upsert: [{ name: '林墨', brief_intro: `第${r}阶密探`, presence_status: '在场', past_experience: `截至第${r}轮的关键经历。` }],
+          delete: []
+        },
+        quests_events: {
+          upsert: [{ quest_name: `第${r}轮状态任务`, quest_type: '支线任务', issuer: '林墨', detail_desc: `第${r}轮状态事实`, current_progress: '进行中' }],
+          delete: []
+        },
+        chronicle: {
+          summary: `第${r}轮对话纪要`,
+          chronicle_text: `第${r}轮对话纪要。`.repeat(55)
+        }
       }));
-      await memEngine.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+      await memEngine.catchUpToLatest({ includeCurrentFloor: true });
       await memVector.maintainVectors();
     }
 
     assert.strictEqual(core.loadState().round, 4);
     assert.strictEqual(core.loadState().time, 8);
     assert.strictEqual(core.getLastStoryDay(), 8);
-    assert.strictEqual(env.sandbox.MEMORY_ENGINE_DATA.loadState().event_memory.small_summaries.length, 8, '4 对话纪要 + 4 世界同步纪要');
+    assert.strictEqual(env.sandbox.MEMORY_ENGINE_DATA.loadState().tables.chronicle.length, 4, '弱联动下记忆纪要表保持纯净：4 轮 = 4 条对话纪要（零世界掺水）');
 
     // 删除第 3、4 轮（保留 0..4，即前 2 轮）
     env.ctx.chat.splice(5);
@@ -498,21 +499,20 @@ async function runAll() {
     assert.deepStrictEqual(plain(core.loadState().events.map(e => e.name)).sort(), ['世界事件_1', '世界事件_2']);
 
     const memRolled = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(memRolled.event_memory.small_summaries.length, 4, '第 3、4 轮的对话纪要与世界同步纪要均已回退');
-    assert.ok(!memRolled.ongoing_facts.some(f => f.fact.includes('大势_3') || f.fact.includes('大势_4')),
-      '第 3、4 轮世界轻同步产生的 synthetic world_link 持续事实必须随删楼一并清理，不得残留');
-    assert.strictEqual(memRolled.personal_memory[0].profile.basicInfo.identity, '第2阶密探', '人物统一档案回退至第 2 轮');
+    assert.strictEqual(memRolled.tables.chronicle.length, 2, '第 3、4 轮的对话纪要已回退，保留前 2 轮');
+    assert.strictEqual(memRolled.tables.quests_events.length, 2, '第 3、4 轮任务已同步回退');
+    assert.strictEqual(memRolled.tables.important_characters[0].brief_intro, '第2阶密探', '重要角色信息回退至第 2 轮');
     const vecKeys = Object.keys(memVector.loadVectorStore().records);
-    assert.ok(!vecKeys.some(k => k.includes('small_000007') || k.includes('small_000008')), '已删楼层的向量同步清理');
+    assert.ok(!vecKeys.some(k => k.includes('small_000003') || k.includes('small_000004')), '已删楼层的向量同步清理');
 
-    // 再彻底清空整个聊天（chat.length = 0），验证无任何 synthetic 残留
+    // 再彻底清空整个聊天（chat.length = 0），验证无任何残留
     env.ctx.chat.length = 0;
     core.rollbackToLayer();
     await memEngine.reconcileHistory({ refillUncovered: false });
     const memEmpty = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(memEmpty.event_memory.small_summaries.length, 0, '清空聊天后世界同步纪要也必须清零');
-    assert.strictEqual(memEmpty.timeline.nodes.length, 0, '清空聊天后 synthetic 节点也必须清零');
-    console.log('✓ 场景 4 通过：独立模式世界（含时间/账本）+ 记忆（含世界轻同步 synthetic 节点/档案/向量）删楼与清空全链路回退零残留');
+    assert.strictEqual(memEmpty.tables.chronicle.length, 0, '清空聊天后纪要清零');
+    assert.strictEqual(memEmpty.timeline.nodes.length, 0, '清空聊天后时间线节点清零');
+    console.log('✓ 场景 4 通过：弱联动独立模式下世界（含时间/账本）+ 纯净记忆 7 表 + 向量删楼与清空全链路回退零残留');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -620,8 +620,8 @@ async function runAll() {
 
     assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().round, 1, '联合世界回退至第 1 轮');
     assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().worldDigest, '第1轮联合世界摘要');
-    const shenBack = env.sandbox.MEMORY_ENGINE_DATA.loadState().personal_memory.find(p => p.names.includes('沈清秋'));
-    assert.strictEqual(shenBack.profile.basicInfo.relations, '盟友', '联合模式下人物档案同步回退至第 1 轮');
+    const shenBack = env.sandbox.MEMORY_ENGINE_DATA.loadState().tables.important_characters.find(p => p.name === '沈清秋');
+    assert.strictEqual(shenBack.relation_text, '盟友', '联合模式下重要角色关系同步回退至第 1 轮');
     console.log('✓ 场景 5 通过：三模块全开协同、私密大纲零泄露、人物履历桥接与联合删楼同步回退全部正常');
   }
 
@@ -630,68 +630,72 @@ async function runAll() {
   // ═══════════════════════════════════════════════════════════════════════════
   {
     const env = createProductionSandbox(makeOpeningChat(2));
-    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ smallSummaryEveryX: 1, memoryInjectMaxChars: 900 });
+    env.sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ catchUpBatchSize: 1, smallSummaryEveryX: 1, memoryInjectMaxChars: 900 });
 
     env.setApiHandler(async () => JSON.stringify({
-      character_profile_updates: [{
-        name: ['苏晚'],
-        basic_info: { identity: '漕帮少主', appearance: '红衣短刃', personality: '爽利直率', abilities: '水上功夫', relations: '合作者' },
-        experiences: '接管南城码头后协助林墨核查黑水帮私盐船队。'
-      }],
-      personal_memory: [{ name: ['苏晚'], known_by: ['林墨'], memory: '苏晚知晓私盐船暗舱位置。', time: '第1日' }],
-      entity_updates: [{ type: 'organization', name: '漕帮', aliases: [], description: '掌控南城水路', event: '封查私盐船', time: '第1日' }],
-      ongoing_fact_updates: [{ action: 'upsert', id: '', category: '状态', subject: '漕帮', fact: '正在封锁南城水路盘查私盐', keywords: ['私盐'] }],
-      character_arc_updates: [{ name: '苏晚', current_stance: '积极助拳', arc_summary: '主动借出水路耳目', relationship: '盟友', progress_pct: 60 }],
-      small_summary: '苏晚协助林墨封查南城水路。'.repeat(50)
+      important_characters: {
+        upsert: [{
+          name: '苏晚',
+          brief_intro: '漕帮少主',
+          appearance: '红衣短刃',
+          presence_status: '在场',
+          relation_text: '林墨:合作者',
+          past_experience: '接管南城码头后协助林墨核查黑水帮私盐船队。'
+        }],
+        delete: []
+      },
+      quests_events: {
+        upsert: [{ quest_name: '封查南城私盐', quest_type: '支线任务', issuer: '漕帮', detail_desc: '正在封锁南城水路盘查私盐', current_progress: '进行中' }],
+        delete: []
+      },
+      chronicle: {
+        summary: '苏晚协助封查水路',
+        chronicle_text: '苏晚协助林墨封查南城水路。'.repeat(50)
+      }
     }));
 
-    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
+    await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true });
 
-    // 1) 验证总结记忆包导出 -> 在新聊天导入后人物统一档案（basicInfo + experiences）100% 保留
+    // 1) 验证总结记忆包导出 -> 在新聊天导入后核心 7 表 100% 保留
     const pkg = env.sandbox.MEMORY_ENGINE_DATA.exportMemoryPackage();
     env.ctx.chatId = 'prod-sim-imported-chat';
     env.sandbox.MEMORY_ENGINE_DATA.importMemoryPackage(pkg);
     const importedSt = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    const su = importedSt.personal_memory.find(p => p.names.includes('苏晚'));
-    assert.ok(su, '导入后人物存在');
-    assert.strictEqual(su.profile.basicInfo.identity, '漕帮少主', '记忆包导入后人物统一基本信息完好保留');
-    assert.strictEqual(su.profile.basicInfo.appearance, '红衣短刃');
-    assert.ok(su.profile.experiences.includes('协助林墨核查黑水帮'), '记忆包导入后人物迄今经历完好保留');
+    const su = importedSt.tables.important_characters.find(p => p.name === '苏晚');
+    assert.ok(su, '导入后角色存在');
+    assert.strictEqual(su.brief_intro, '漕帮少主', '记忆包导入后角色简介完好保留');
+    assert.strictEqual(su.appearance, '红衣短刃');
+    assert.ok(su.past_experience.includes('协助林墨核查黑水帮'), '记忆包导入后过往经历完好保留');
 
     // 2) 验证紧预算下正文注入格式完整且不超预算
     env.ctx.chat.push({ is_user: true, name: '林墨', mes: '苏晚在漕帮那边查得如何了？', swipe_id: 0, extra: {} });
     const inj = env.sandbox.MEMORY_ENGINE.applyInjection();
-    assert.ok(inj.includes('【记忆信息】'));
-    assert.ok(inj.includes('[基本信息] 身份：漕帮少主｜外貌：红衣短刃'));
-    assert.ok(inj.includes('[迄今经历] 接管南城码头后'));
+    assert.ok(inj.includes('【长期记忆数据库'));
+    assert.ok(inj.includes('漕帮少主') && inj.includes('红衣短刃'));
+    assert.ok(inj.includes('接管南城码头后'));
     assert.ok(inj.length <= 930, `注入总长度必须遵守预算控制，实际=${inj.length}`);
 
-    // 3) 验证设置页 backfill() 重填前彻底清空旧 ongoing_facts 与 character_arcs，绝不残留进 root.base
+    // 3) 验证设置页 backfill() 重填结构化 6 表前彻底清空旧任务等非纪要表，绝不残留进 root.base
     env.ctx.chatId = 'prod-sim-chat-1';
     env.setApiHandler(async () => JSON.stringify({
-      character_profile_updates: [{
-        name: ['全新人物'],
-        basic_info: { identity: '重填后新身份', appearance: '', personality: '', abilities: '', relations: '' },
-        experiences: '重填后全新经历。'
-      }],
-      personal_memory: [],
-      entity_updates: [],
-      ongoing_fact_updates: [],
-      character_arc_updates: []
+      important_characters: {
+        upsert: [{ name: '全新人物', brief_intro: '重填后新身份', presence_status: '在场', past_experience: '重填后全新经历。' }],
+        delete: []
+      },
+      quests_events: { upsert: [], delete: [] }
     }));
     await env.sandbox.MEMORY_ENGINE.backfill();
     const afterBackfill = env.sandbox.MEMORY_ENGINE_DATA.loadState();
-    assert.strictEqual(afterBackfill.ongoing_facts.length, 0, 'backfill 重填必须彻底清空旧持续事实，不能残留进 root.base');
-    assert.strictEqual(afterBackfill.character_arcs.length, 0, 'backfill 重填必须彻底清空旧角色弧光，不能残留进 root.base');
-    assert.strictEqual(afterBackfill.personal_memory.length, 1);
-    assert.strictEqual(afterBackfill.personal_memory[0].names[0], '全新人物');
+    assert.strictEqual(afterBackfill.tables.quests_events.length, 0, 'backfill 重填必须彻底清空旧任务，不能残留进 root.base');
+    assert.strictEqual(afterBackfill.tables.important_characters.length, 1);
+    assert.strictEqual(afterBackfill.tables.important_characters[0].name, '全新人物');
 
     // 4) 验证旧默认预算 3500 自动迁移至 8000，而用户自定义预算原样保留
     env.sandbox.WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({ memoryInjectMaxChars: 3500 }));
     assert.strictEqual(env.sandbox.MEMORY_ENGINE_SETTINGS.getSettings(true).memoryInjectMaxChars, 8000, '旧默认 3500 应平滑升级至 8000');
     env.sandbox.WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({ memoryInjectMaxChars: 5200 }));
     assert.strictEqual(env.sandbox.MEMORY_ENGINE_SETTINGS.getSettings(true).memoryInjectMaxChars, 5200, '用户自定义预算 5200 应原样保留');
-    console.log('✓ 场景 6 通过：记忆包档案往返无损、注入预算公平分配与旧预算平滑迁移、backfill 重填清理彻底无旧残留');
+    console.log('✓ 场景 6 通过：记忆包 7 表往返无损、注入预算公平控制、backfill 重填清理彻底无旧残留');
   }
 
   console.log('\n🎉 全量生产级多角度端到端仿真测试 6 大综合场景全部通过！');

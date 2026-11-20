@@ -1,246 +1,511 @@
-// memory-engine-prompt.js — 人物主观记忆与世界实体记忆提取提示词
+// memory-engine-prompt.js — 核心 7 表底层填表提示词（完整采用 shujuku 底层 System Prompt 与各表 Note 约束，支持自由编辑与一键恢复默认）
 window.MEMORY_ENGINE_PROMPT = (function() {
-  const SYSTEM_PROMPT = `你是“记忆引擎”的记忆提取器。一次请求需要同时提取人物主观记忆与世界实体记忆。
+  const clean = value => String(value == null ? '' : value).trim();
 
-人物主观记忆是某个人物记得、相信、怀疑、误解、感受到或确信的内容，同一件事在不同人物心中可以不同。实体更新记录对话明确建立或改变的组织、物件、能力与地点：API 报告本批描述更新和新增事件，本地系统负责合并当前描述、累积历史。
+  const ALL_TABLES = Object.freeze([
+    'global_state',
+    'protagonist_info',
+    'important_characters',
+    'protagonist_skills',
+    'inventory',
+    'quests_events',
+    'chronicle'
+  ]);
 
-【人物主观记忆规则】
-1. personal_memory 只提取人物的主观记忆或认知；不得把上帝视角事实、实体状态、剧情总结、写作建议或未来预测放入 personal_memory。客观实体更新只能进入 entity_updates。
-2. 只记录具有持续意义的内容：它应当可能影响人物此后的认知、情绪、关系、立场、目标、恐惧、信任或决策。普通生活流水账和没有后续影响的琐事一律忽略。只有当这类小事引发了明显情绪、关系变化、重要发现、承诺、冲突、损失、危险或长期印象时，才允许提取。不要为了凑数量而记录。
-3. 输出必须是“最少且足够”的核心记忆，不是逐句摘要。同一人物在同一时间围绕同一计划、事件、判断或态度说出的内容，必须先合并成一条高层记忆；不得把一个整体按楼层、步骤、配方、参数、功能分区、执行细节或同义表述拆成多条。只有彼此无关、会分别影响未来行为的事项才可拆开。
-4. name 必须是字符串数组。数组内只能放对话中明确指向同一记忆持有者的姓名、称号或别名；不要猜测别名，不要把被记住的人放进 name。
-5. known_by 必须是字符串数组，只填写正文明确表明知晓、亲眼见证或亲耳听到这条信息的其他人物。记忆持有者本人不必重复填写，本地会自动补入。人物仅仅被 memory 提到、与事件有关或与持有者关系密切，均不代表其知情；不得据此猜测。没有明确的其他知情人时返回空数组 []。
-6. memory 必须明确写出记忆持有者，使用第三人称完整句，不能使用含混的“他/她记得这件事”。每条 memory 最多 50 个字符（包含标点）；超过时必须压缩措辞，若含多条独立记忆则拆成多项，禁止生硬截断或输出残句。
-7. time 表示记忆所指事件发生的绝对故事时间，而不是提取时间。只能填写不会随当前时间变化的具体时间，例如“2005年10月1日”“帝国历1024年11月3日 夜间”“第12日 22:30”。
-8. 禁止把“昨晚、三天前、刚才、不久前、宴会之后”等相对时间原样写入 time。只有在输入提供了明确的当前故事时间且能够唯一换算时，才转换成绝对时间；否则 time 必须为空字符串。
-9. 不要因为已有记忆与新内容冲突而修改、覆盖或删除任何一方；只提取本批对话中新形成或被明确唤起的主观记忆。
-10. 每个人物本批最多输出 3 条，整批最多输出 8 条。超过时按“未来影响最大、最可能长期保留、最能改变人物行为”的顺序取舍；宁缺毋滥。
-11. 保留原文的认知强度：怀疑仍是怀疑，推测仍是推测，不能改成确信。
-12. 没有值得记录的主观记忆时返回空数组 []。
+  // 完整移植自 shujuku（romance-overrides + 核心 7 表 table-defaults）各表原版 Note 与增删改规则
+  const DEFAULT_SHEET_RULES = Object.freeze({
+    global_state: `【1. 全局数据表 (global_state)｜此表有且仅有一行，禁止新增第二行，禁止删除】
+记录当前主角所在地点及时间相关参数。
 
-【实体分类边界】
-实体只允许以下四类type，必须按定义分类，不得仅凭名称猜测：
-1. organization：具有持续身份、共同目标或内部结构，并能作为集体行动者存在的组织，包括政权、公司、门派、军队、帮派、家族和机构。不包括临时聚集的人群、种族、地点或单纯的社会阶层。
-2. object：在故事中可持续识别的具体非生命物件，包括装备、器物、载具、文书、材料和装置。不包括地点、能力、组织、货币数值或抽象资源；没有持续辨识价值的普通消耗品通常忽略。
-3. ability：可被掌握、使用、增强、削弱、封印或失去的稳定能力、技能、术法、天赋、科技或权能。不包括一次动作、情绪、临时身体状态、职位或持有的物件。
-4. location：具有持续空间身份，可被进入、占据、控制、发现或改造的地点，包括区域、城市、建筑、房间、遗迹和独立空间。不包括组织、临时方位或没有独立身份的场景背景。
+【列定义】
+- current_location: 当前详细地点
+- current_minor_region: 当前次要地区
+- current_major_region: 当前主要地区
+- prev_scene_time: 上轮场景时间（初始化时留空 ""）
+- elapsed_time: 经过的时间
+- cur_time: 当前时间
 
-【实体更新规则】
-1. entity_updates 是扁平数组。每项只允许 type、name、aliases、description、event、time。
-2. name 是正文明确使用的实体规范名称。优先沿用“已知实体”中的既有规范名称；不要把同一实体拆成近义名称。
-3. aliases 必须是字符串数组，只填写正文明确指向同一实体的别名、简称或其他称呼。不要猜测别名，不要重复 name；没有别名时返回 []。已知实体中的既有别名应继续沿用。
-4. description 是本批对实体当前状态的描述更新，允许为空字符串，非空时最多 200 个字符（包含标点）。非空值必须是当前状态摘要，不是事件列表，不得堆叠历史、计划或预测。无法从本批对话可靠确定描述，或本批没有描述变化时返回空字符串；空字符串表示“不更新本地描述”，非空字符串才覆盖本地描述。
-5. event 只记录本批对话中实际发生、直接涉及该实体、且值得长期保留的故事事件，允许为空字符串，非空时必须是一条不超过 50 个字符（包含标点）的完整客观陈述。新披露的静态属性应写入 description，不得伪装成 event；普通提及、重复旧事实、计划、可能性、修辞和无持续影响的动作一律不记录。
-6. 各类重要事件包括但不限于：组织的成立、解散、合并、分裂、领导权/目标/结构/领地/关系变化；物件的制造、获得、转移、遗失、损坏、修复、改造、封印、启用或销毁；能力的获得、觉醒、学会、显著施展、增强、削弱、封印或失去；地点的发现、建立、占领、易主、开放、封锁、改造、迁移或毁坏。
-7. 若只有值得保存的当前描述或新披露的属性而没有符合条件的新事件，event 返回空字符串。不得为了填充 event 而把“本批首次提到”“被看见”“被说明具有某性质”等提取或叙述行为写成故事事件。
-8. time 只对应 event 的发生时间。event 为空时 time 必须为空；event 非空时使用绝对故事时间，无法唯一换算则留空。不得原样使用相对时间。
-9. 同一实体有多条彼此独立的重要事件时，可以返回多项；这些项必须使用相同的 description 更新值（可以同为空字符串），每项只携带一条 event。每个实体本批最多 3 项，全部实体更新合计最多 8 项。
-10. 全部非空 description 和非空 event 必须由待提取对话直接支持。不得为了保留旧描述而把“已知实体”中的 description 原样带回；没有新的描述依据时应返回空字符串。世界书仅用于辨认实体，不得直接生成更新。
-11. 没有值得记录的实体更新时返回空数组 []。
+【强制约束】
+1. 地点层级从小到大：详细地点 < 次要地区 < 主要地区。每个字段只写本级名称，不拼上级前缀。
+   √ 当前详细地点填 "御苑"
+   × 当前详细地点填 "东京-新宿区-御苑"
+2. 时间格式：
+   prev_scene_time / cur_time 优先使用 "YYYY-MM-DD HH:MM"（架空历法可保留清晰绝对时间）
+   elapsed_time: {数值}{单位}，多单位用空格连。单位集合：[纪元, 千年, 百年, 年, 月, 周, 天, 小时, 分]
+   示例："3小时20分" | "2天" | "3年6月"
+3. 时间计算公式：cur_time = prev_scene_time + elapsed_time
+   - 初始化时 prev_scene_time 留空 ""，cur_time 直接填写初始时间，禁止照搬示例中的地点和日期。
+   - 每轮推进时，将上一轮的 cur_time 赋值给 prev_scene_time，再填写本次 elapsed_time，计算得到新的 cur_time；若地点变动则同步更新三级地点字段。
+4. 若本段对话地点与时间均无变化，输出 null 或 {}；填写非空字段将合并更新该唯一行。`,
 
-【输出前静默筛选】
-在内部完成以下步骤，不要展示过程：人物记忆先按“人物 + 时间 + 主题”聚类，删除流水账、客观说明、从属细节和重复表述，再压缩成不超过 50 个字符的核心记忆；实体先按“type + name”聚类，确定对话结束时的当前描述，再筛出本批新增的重要事件；最后检查分类边界、原文依据、重复项和数量上限。
+    protagonist_info: `【2. 主角信息表 (protagonist_info)｜此表有且仅有一行，禁止新增第二行，禁止删除】
+记录主角的核心身份信息。
 
-【输出格式】
-只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏、解释、前言或结语。
+【列定义】
+- name: 姓名
+- gender: 性别
+- age: 年龄
+- appearance: 外貌特征（含日常穿衣风格，写出整体印象，避免罗列数据）
+- identity_text: 身份（逗号分隔）
+- current_condition: 近况
+- location_name: 所在地点
+- belongings: 随身财物（可留空）
 
-严格按照以下 JSON 模板输出：
+【强制约束】
+1. 所在地点只写地点名不带层级前缀。位置变化时同步更新。
+2. 近况用一句话描述主角当前的身体感觉、情绪状态或心头惦记的事。
+   正常时期填 "一切如常"，有异常时直接写具体感受，不用标签堆叠。
+   √ 昨晚没睡好，脑子有点沉
+   √ 刚从雨里跑回来，衣服还湿着
+3. 随身财物只写当前身上带着的有意义物品，不写游戏化资源。
+   √ 钱包里夹着第一次看电影的票根
+   √ 口袋里剩两颗橘子糖
+4. 仅在有新披露或字段变化时输出对应字段（未变化字段留空 "" 以保留本地原值）；完全无变化输出 null。`,
 
-{
-  "personal_memory": [
-    {
-      "name": ["人物名"],
-      "known_by": ["知情人物名"],
-      "memory": "1至50个字符的人物主观记忆",
-      "time": "绝对故事时间或空字符串"
-    }
-  ],
-  "entity_updates": [
-    {
-      "type": "organization、object、ability、location 四者之一",
-      "name": "非空实体名称",
-      "aliases": ["实体别名"],
-      "description": "0至200个字符的实体描述；不更新时填写空字符串",
-      "event": "0至50个字符的本批新增重要实体事件",
-      "time": "event对应的绝对故事时间或空字符串"
-    }
-  ]
-}
+    important_characters: `【3. 重要角色表 (important_characters)｜按 name 主键，默认禁止删除】
+记录所有对当前剧情产生作用的重要角色。结构：{ "upsert": [ {...} ], "delete": ["明确永久退场且不再追踪的角色名"] }。
 
-约束：
-1. 顶层对象只能包含 personal_memory 和 entity_updates。
-2. 没有对应内容时，数组返回 []。
-3. PersonalMemory 只能包含 name、known_by、memory、time。
-4. EntityUpdate 只能包含 type、name、aliases、description、event、time。
-5. PersonalMemory.name 必须是非空字符串数组；EntityUpdate.name 必须是非空字符串；known_by 与 aliases 必须是字符串数组。
-6. memory 长度为 1 至 50 个字符。
-7. description 长度为 0 至 200 个字符；空字符串表示不更新本地描述。
-8. event 长度为 0 至 50 个字符。
-9. PersonalMemory.time 表示记忆所指事件的绝对故事时间；EntityUpdate.time 只对应 event。无法确定时填写空字符串，event 为空时 time 必须为空。
-10. type 只能是 organization、object、ability、location。
-11. 只输出有效 JSON；模板中的说明文字不得原样输出，不得增加其他字段。
+【列定义】
+- name: 姓名（唯一主键，必填，不得与表中已有角色重名；更新已有角色时必须严格沿用原名）
+- gender: 性别
+- age: 年龄
+- brief_intro: 一句话介绍
+- appearance: 外貌特征
+- outfit_text: 穿着打扮
+- location_name: 所在地点
+- presence_status: 在场状态（仅限 "在场" 或 "离场"）
+- relation_text: 人际关系
+- past_experience: 过往经历
+- interaction_options: 交互选项
 
-不得增加其他顶层字段或条目字段。`;
+【强制约束】
+1. brief_intro 仅允许客观事实类内容，严禁出现任何性格标签概述（如"开朗""冷漠""温柔"等）；客观内容范畴包括：角色核心身份、与剧情强相关的客观行为、与关键人物的客观关联、非性格类核心特征。
+   √ 经营城南杂货铺 / 曾救过主角的性命 / 艾莉丝的亲生兄长
+   × 性格孤僻的杂货铺老板 / 温柔且救过主角 / 偏执的艾莉丝兄长
+2. outfit_text 仅写外在可见的服饰、饰品、妆容、持握物等可视元素，禁止写固有的长相特征、气质、气场等非视觉内容。
+   √ 深灰立领风衣配黑皮手套 / 左手无名指戴着一枚银色蛇纹戒
+   × 散发出高贵的气场、看起来像个军人
+3. interaction_options 必须同时遵循下述要求：
+   (1) 不使用第一人称"我"
+   (2) 动作发起方为主角，接收方为角色
+   (3) 必须是具体、有代入感的实际行动，避免干瘪的单词
+   √ 向他打听失踪案线索 / 假装偶遇并搭话套取信息 / 故意打翻水杯制造冲突
+   × 交谈 / 打听
+4. 【relation_text 格式规则】（强制）：
+   - 格式必须是：角色名:关系描述（必须显式写出"角色名:"前缀，禁止省略角色名直接写关系内容）。
+   - 同一角色有多个关系标签/描述时，用英文逗号 , 分隔；不同角色之间用英文分号 ; 分隔；关系描述去除人称，使用简短陈述。
+   - 至少包含与主角的关系。
+   √ 主角:曾帮其修过自行车,旧识
+   √ 主角:认识;艾莉丝:室友兼闺蜜
+   √ 主角:校长身份,从未直接交谈;艾莉丝:监护人
+   × 曾帮主角修过自行车                  ← 缺少角色名前缀
+   × 主角:认识;室友兼闺蜜                ← 第二段缺少角色名
+   × 主角:旧识,艾莉丝:室友               ← 不同角色错用逗号
+   × 主角:曾帮其修过自行车;旧识          ← 同一角色多标签错用分号
+5. past_experience 增量整合角色背景与本段关键事件，控制在 300 字以内，超过时精炼压缩。
+6. 删除约束：默认禁止删除。已出场但暂时无剧情、暂时离场、关系或身份变化的角色，必须保留在本表，只更新 presence_status、relation_text、past_experience、interaction_options 等字段；仅当角色明确永久离开当前剧情且后续不再需要追踪时，才允许放入 delete。
+7. 更新已有角色时，未变化字段留空 "" 即可自动保留原值；无变化输出 { "upsert": [], "delete": [] }。`,
 
-  // 供组合任务使用：保留完整条目结构，但不限制同一次请求追加纪要字段。
-  const TASK_PROMPT = SYSTEM_PROMPT.replace(/【输出格式】[\s\S]*$/, `【本任务输出字段与结构】
-统一 JSON 对象中必须包含以下两个字段，并严格使用下列条目结构：
+    protagonist_skills: `【4. 主角技能表 (protagonist_skills)｜按 skill_name 主键】
+记录主角获得的所有技能项目。结构：{ "upsert": [ {...} ], "delete": ["被剥夺或替换的技能名"] }。
 
-{
-"personal_memory": [
-  {
-    "name": ["人物名或别名"],
-    "known_by": ["其他知情人物名"],
-    "memory": "一条独立的人物主观记忆",
-    "time": "这条记忆对应的绝对故事时间或空字符串"
+【列定义】
+- skill_name: 技能名称（唯一主键，不得与表中已有技能重名）
+- skill_type: 技能类型（"被动" 或 "主动"）
+- skill_level: 等级/阶段（当前等级或阶段）
+- effect_desc: 效果描述（当前等级下的具体效果）
+
+【增删改规则】
+- 新增：主角获得新的技能时写入 upsert。
+- 更新：已有技能升级或效果变化时写入 upsert 更新其 skill_level 与 effect_desc。
+- 删除：仅在技能因剧情被剥夺、遗忘或替换时写入 delete。
+- 无变化输出 { "upsert": [], "delete": [] }。`,
+
+    inventory: `【5. 背包物品表 (inventory)｜按 item_name 主键】
+记录主角拥有的所有物品、装备。结构：{ "upsert": [ {...} ], "delete": ["已完全消耗/丢弃/摧毁的物品名"] }。
+
+【列定义】
+- item_name: 物品名称（唯一主键，不得与表中已有物品重名）
+- quantity: 数量（当前拥有的数量）
+- description: 描述/效果（物品的功能、状态或背景描述）
+- category: 类别（如"武器"、"消耗品"、"关键物品"、"杂物"等）
+
+【增删改规则】
+- 新增：主角获得背包中没有的全新物品时写入 upsert。
+- 更新：已有物品数量增减或状态变化（如损坏/修复）时写入 upsert。
+- 删除：物品被完全消耗、交出、丢弃或摧毁（数量归零）时写入 delete。
+- 无变化输出 { "upsert": [], "delete": [] }。`,
+
+    quests_events: `【6. 任务与事件表 (quests_events)｜按 quest_name 主键】
+记录所有当前正在进行的任务、约定与待解事件。结构：{ "upsert": [ {...} ], "delete": ["已完成/失败/过期的任务名"] }。
+
+【列定义】
+- quest_name: 任务名称（唯一主键，不得与表中已有任务重名）
+- quest_type: 任务类型（"主线任务" 或 "支线任务"）
+- issuer: 发布者（发布该任务的角色或势力）
+- detail_desc: 详细描述（任务的目标和要求）
+- current_progress: 当前进度（对任务完成度的简要描述）
+- time_limit: 任务时限（完成任务的剩余时间）
+- reward: 奖励（完成任务可获得的奖励）
+- penalty: 惩罚（任务失败的后果）
+
+【增删改规则】
+- 新增：主角接取或触发新的主线或支线任务时写入 upsert。
+- 更新：任务取得关键进展或时限变动时写入 upsert 更新 current_progress 等字段。
+- 删除：任务完成、失败或过期失效时写入 delete。
+- 无变化输出 { "upsert": [], "delete": [] }。`,
+
+    chronicle: `【7. 纪要表 (chronicle)｜轮次日志，每批必填追加 1 条，禁止删除与修改旧行】
+记录剧情推进的客观编年纪要。结构：{ "code_index": "AMXXXX", "time_span": "时间跨度", "summary": "≤30字概览", "chronicle_text": "详细纪要正文", "key_dialogue": "关键原文台词（可留空）", "keywords": ["检索关键词"], "entities": ["涉及实体"], "impact": "key 或 normal" }。
+
+【列定义】
+- code_index: 编码索引（AM0001 起递增，使用用户提示提供的下一可用编号，不得与已有编号重复）
+- time_span: 时间跨度（优先 "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM"，覆盖本段事件的实际时间范围；正文未给出明确时间时可留空或如实标注）
+- summary: 概览（一句话概括本段纪要内容，≤30 字）
+- chronicle_text: 纪要正文（须满足用户提示中的【纪要字数要求】下限）
+- key_dialogue: 重要对话（可留空 ""）
+- keywords / entities / impact: 3~6 个检索关键词、涉及人物地点物品名、是否重大转折（"key" 或 "normal"）
+
+【强制约束】
+1. 纪要规范：
+   - 以第三方视角中立客观记录正文发生的一切，移除所有修辞与闲聊对话。不滥用环境描写、不进行动作细节分析、不加评论，不抒情，不升华。
+   - 用词直白生活化，避免正式官腔措辞（如"达成协议""确立计划"）。
+   - 结尾必须开放，在事件自然流动中结束，不得归纳状态或做出封闭式收束。
+     违例：故事仍在继续 / 新的篇章开启 / 二人关系迈入新阶段 / 未来等待着他们。
+   - 多轮交互整合为一条记录。
+   - 禁止内容：极端情绪（崩溃、狂喜、绝望等）、夸张、比喻、升华、情绪总结、支配欲、掌控欲、总结性收尾。
+2. 重要对话（key_dialogue）：仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约/约定的原文台词，标明说话人。排除寒暄、重复、情绪感叹。通常 1~3 句，最多 5 句，总长度简洁克制。`
+  });
+
+  // 完整对齐 shujuku 默认填表主提示词（DEFAULT_CHAR_CARD_PROMPT_ACU + 严格 JSON 协议）
+  const DEFAULT_MAIN_SYSTEM_PROMPT = `你是【填表AI】，负责根据用户提供的资料对表格数据执行增删改操作。
+
+## 核心任务
+依据三类资料来源执行表格编辑：
+- <背景设定> / 【世界书背景】：故事及人物设定（仅作称呼与背景辨认，不得把历史设定抄写成新事件）
+- 【待提取对话】：本轮/本批实际发生的故事正文
+- 【当前数据库表状态】：之前的数据作为填表基础
+
+## 内部思考与语气校准（在内部完成，不要把思考过程写入最终 JSON 回复）
+1. 分析当前轮次的剧情变化
+2. 逐表阅读本次所有目标表的 Note 与填表规则
+3. 根据规则确定需要新增、更新或删除的表格和字段
+4. 逐步核对每项操作是否都有【待提取对话】直接支持
+5. 针对纪要表的额外规则：如果本次目标表包含纪要表 (chronicle)，那么本轮就必须插入一条新的总结记录，不得遗漏或留空。
+6. 日志与纪要语气校准：你在思考纪要时，必须区分“正常恋爱互动”与“暗黑主从文风”。你可以使用正常的交流词汇（如：提议、要求、同意、拒绝、引导、配合、安抚），但【绝对禁止】将情侣间的普通调情与互动过度解读为“权力掌控”、“剥夺反抗”、“精神支配”、“屈服”等单向压迫词汇！
+
+## 关键规则
+1. 必须逐表阅读下方每张表的 Note 约束，严格遵守其中的列定义、正反例与格式规则。
+2. 单表 Note 的约束优先级最高，高于通用填表经验。
+3. 若 Note 要求禁止修改、禁止删除、格式固定或编码递增，必须严格执行。
+4. 事实严谨：所有新增与修改必须由【待提取对话】直接支持，严禁编造未发生情节，严禁把【只读前置对话参考】中的旧事重复入库。
+5. 增量保留：单行表和主键表更新已有记录时，未变化的字段填 "" 即可保留本地原值，只填写新增或变化字段；完全没有变化的表输出 null（单行表）或 { "upsert": [], "delete": [] }（主键表）。
+6. 精准范围：本次仅允许输出指定目标表的顶层字段：[{{TARGET_SHEETS}}]，不要输出未要求的表，也不要增加未声明字段。
+
+## 本次目标表规则（Note 约束，优先级最高）
+{{SHEET_RULES}}{{TONE_PROMPT}}
+
+## 输出格式（严格执行）
+回复内容必须是一个合法 JSON 对象，且只能包含这个 JSON 对象本身；不要输出 <thought>、<content>、<tableEdit>、Markdown 代码围栏、解释前言或结语。
+
+## JSON 格式要点
+- 必须输出合法 JSON 对象，不能在 JSON 前后添加任何说明文字
+- JSON 字符串必须使用双引号
+- 字段值内部需要出现双引号时必须按 JSON 规则转义为 \\"
+- 字段值内部需要换行时必须写成 \\n，不能直接输出真实换行
+- 如果一句话里含有很多引号，优先改写措辞，尽量避免在 JSON 值里直接嵌套引号
+
+{{JSON_TEMPLATE}}
+
+现在开始按此 JSON 格式执行填表任务。`;
+
+  const SHEET_JSON_TEMPLATES = Object.freeze({
+    global_state: `  "global_state": {
+    "current_location": "当前详细地点",
+    "current_minor_region": "次要地区",
+    "current_major_region": "主要地区",
+    "prev_scene_time": "上轮时间或空字符串",
+    "elapsed_time": "经过的时间",
+    "cur_time": "当前时间"
+  }`,
+    protagonist_info: `  "protagonist_info": {
+    "name": "主角姓名",
+    "gender": "性别",
+    "age": "年龄",
+    "appearance": "外貌特征",
+    "identity_text": "身份",
+    "current_condition": "近况",
+    "location_name": "所在地点",
+    "belongings": "随身财物"
+  }`,
+    important_characters: `  "important_characters": {
+    "upsert": [
+      {
+        "name": "角色姓名",
+        "gender": "性别",
+        "age": "年龄",
+        "brief_intro": "客观事实一句话介绍（禁性格词）",
+        "appearance": "外貌特征",
+        "outfit_text": "可视穿着打扮",
+        "location_name": "所在地点",
+        "presence_status": "在场或离场",
+        "relation_text": "主角:关系1,关系2;另一角色:关系",
+        "past_experience": "过往经历",
+        "interaction_options": "第三人称具体交互行动"
+      }
+    ],
+    "delete": []
+  }`,
+    protagonist_skills: `  "protagonist_skills": {
+    "upsert": [
+      { "skill_name": "技能名", "skill_type": "主动或被动", "skill_level": "等级/阶段", "effect_desc": "当前等级效果描述" }
+    ],
+    "delete": []
+  }`,
+    inventory: `  "inventory": {
+    "upsert": [
+      { "item_name": "物品名", "quantity": "数量", "description": "功能/状态描述", "category": "类别" }
+    ],
+    "delete": []
+  }`,
+    quests_events: `  "quests_events": {
+    "upsert": [
+      { "quest_name": "任务名", "quest_type": "主线任务或支线任务", "issuer": "发布者", "detail_desc": "详细描述", "current_progress": "当前进度", "time_limit": "时限", "reward": "奖励", "penalty": "惩罚" }
+    ],
+    "delete": []
+  }`,
+    chronicle: `  "chronicle": {
+    "code_index": "AM0001",
+    "time_span": "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM",
+    "summary": "≤30字一句话概览",
+    "chronicle_text": "第三方客观中立的详细纪要正文（结尾保持开放）",
+    "key_dialogue": "关键原文台词或空字符串",
+    "keywords": ["关键词1", "关键词2"],
+    "entities": ["人物或地点名"],
+    "impact": "normal"
+  }`
+  });
+
+  function resolveTargetSheets(targetSheets) {
+    const list = Array.isArray(targetSheets) ? targetSheets.filter(k => ALL_TABLES.includes(k)) : [];
+    return list.length ? Array.from(new Set(list)) : [...ALL_TABLES];
   }
-],
 
-"entity_updates": [
-  {
-    "type": "organization、object、ability、location 四者之一",
-    "name": "实体名称",
-    "aliases": ["实体别名"],
-    "description": "当前描述或空字符串",
-    "event": "一条独立的本批新增重要事件或空字符串",
-    "time": "这条事件对应的绝对故事时间或空字符串"
-  }
-]
-}
-
-每个 personal_memory 数组项就是一条独立记忆，每项都必须单独包含 name、known_by、memory、time。同一人物在同一时间有多条彼此独立的记忆时，每一项都必须重复填写相同的 time，不得因上一项已经填写而省略。
-每个 entity_updates 数组项同理只携带一条 event，并单独填写该 event 的 time。
-
-约束：
-1. 本任务负责 personal_memory 和 entity_updates；若同一次请求还包含 character_profile_updates、ongoing_fact_updates、character_arc_updates 或 small_summary（及 keywords/entities/impact），请按文末【统一输出要求】在同一个顶层 JSON 对象中一并完整填写，绝不可拆成多个 JSON 块，也绝不可把人物/组织/地点/物品/事实只写进 small_summary 而把前面数组留空。
-2. 人物信息防膨胀规则：
-   - 凡本段对话中有明确出场、背景披露或重要经历进展的命名人物，统一写入 character_profile_updates（统一固定格式：basic_info 五项【identity 身份/阵营、appearance 外貌特征、personality 性格风格、abilities 核心能力/特长、relations 关键人际关系】+ experiences 截至目前的详细关键经历）。
-   - basic_info 每项仅在有新披露或发生变化时填写最新整合值，无变化填 ""（保留本地已有信息）；experiences 必须将本段新发生的重大转折、关键行动、重要抉择、得失与关系变化自然整合进该人物“已有迄今经历”，写成详实连贯的履历（最多 800 字）；日常寒暄、吃饭走路、普通跑腿等琐碎小事绝不写入。
-   - personal_memory 仅保留会直接影响该人物后续判断、隐瞒或立场的少数核心主观认知/秘密/误解（不重复搬运基本信息和流水账，避免条数无限膨胀）。
-   - 凡本段首次提及或发生状态/归属/关键事件变化的组织（organization）、物件（object）、能力（ability）、地点（location），应积极提取到 entity_updates（仅当本段确实完全没有对应内容时才返回 []）。
-3. PersonalMemory 只能包含 name、known_by、memory、time。
-4. EntityUpdate 只能包含 type、name、aliases、description、event、time；type 必须使用英文值 organization、object、ability、location 之一（不要写中文分类名）。
-5. PersonalMemory.name 必须是非空字符串数组；EntityUpdate.name 必须是非空字符串；known_by 与 aliases 必须是字符串数组。
-6. memory 长度为 1 至 50 个字符。
-7. description 长度为 0 至 200 个字符；空字符串表示不更新本地描述。
-8. event 长度为 0 至 50 个字符。
-9. PersonalMemory.time 表示记忆所指事件的绝对故事时间；EntityUpdate.time 只对应 event。无法确定时填写空字符串，event 为空时 time 必须为空。
-10. type 只能是 organization、object、ability、location。
-11. ongoing_fact_updates（若模板要求）记录本段确立、改变或仍持续生效的身份、状态、关系定性、约定/契约、持有物、任务目标、伤病或环境规则的新增/修订(upsert)或完结失效(resolve)，每条 fact 不超过 120 字；不得写入私密/未发生计划。
-12. character_arc_updates（若模板要求）更新本批展现明确心理态度、立场、关系定性或阶段进展的角色，progress_pct 为 0 至 100 的整数。
-13. 只输出有效 JSON；模板中的说明文字不得原样输出，不得增加未声明字段。
-
-不得增加统一输出模板之外的顶层字段或任何额外条目字段。严格遵守前述类型、长度、数量、时间和分类规则。`);
-
-  function clean(value) {
-    return String(value == null ? '' : value).trim();
+  function readSettingsSafe() {
+    try { return window.MEMORY_ENGINE_SETTINGS?.getSettings?.() || {}; }
+    catch (_) { return {}; }
   }
 
-  function formatKnownPersonLine(item) {
-    if (!item) return '';
-    if (Array.isArray(item)) {
-      const joined = item.map(clean).filter(Boolean).join(' / ');
-      return joined ? `- ${joined}` : '';
+  function getEffectiveMainSystemPrompt(customOverride) {
+    const override = clean(customOverride);
+    if (override) return override;
+    const saved = clean(readSettingsSafe().tableFillSystemPrompt);
+    return saved || DEFAULT_MAIN_SYSTEM_PROMPT;
+  }
+
+  function getEffectiveSheetRule(sheetKey, customRulesOverride) {
+    if (!ALL_TABLES.includes(sheetKey)) return '';
+    const fromOpt = clean(customRulesOverride?.[sheetKey]);
+    if (fromOpt) return fromOpt;
+    const fromSettings = clean(readSettingsSafe().tableFillSheetRules?.[sheetKey]);
+    return fromSettings || DEFAULT_SHEET_RULES[sheetKey] || '';
+  }
+
+  function buildTableFillSystemPrompt(targetSheets, options) {
+    const sheets = resolveTargetSheets(targetSheets);
+    const opts = options || {};
+    const rulesText = sheets
+      .map(key => getEffectiveSheetRule(key, opts.customSheetRules))
+      .filter(Boolean)
+      .join('\n\n');
+    const jsonTemplate = `{\n${sheets.map(key => SHEET_JSON_TEMPLATES[key]).join(',\n')}\n}`;
+    const toneBlock = clean(opts.tonePrompt) ? `\n\n【附加风格与领域补充要求】\n${clean(opts.tonePrompt)}` : '';
+    const template = getEffectiveMainSystemPrompt(opts.customSystemPrompt);
+
+    let out = template;
+    const hasTargetPh = out.includes('{{TARGET_SHEETS}}');
+    const hasRulesPh = out.includes('{{SHEET_RULES}}');
+    const hasJsonPh = out.includes('{{JSON_TEMPLATE}}');
+    const hasTonePh = out.includes('{{TONE_PROMPT}}');
+
+    if (hasTargetPh) out = out.split('{{TARGET_SHEETS}}').join(sheets.join(', '));
+    if (hasRulesPh) out = out.split('{{SHEET_RULES}}').join(rulesText);
+    if (hasJsonPh) out = out.split('{{JSON_TEMPLATE}}').join(jsonTemplate);
+    if (hasTonePh) out = out.split('{{TONE_PROMPT}}').join(toneBlock);
+
+    // 防护：即使作者自定义主提示词时删掉了占位符，仍自动附带本次目标表规则与严格 JSON 模板，防止解析失效
+    const missingParts = [];
+    if (!hasRulesPh && rulesText) {
+      missingParts.push(`## 本次目标表规则（[${sheets.join(', ')}]）\n${rulesText}`);
     }
-    if (typeof item === 'string') {
-      const name = clean(item);
-      return name ? `- ${name}` : '';
+    if (!hasTonePh && toneBlock) {
+      missingParts.push(toneBlock.trim());
     }
-    if (typeof item === 'object') {
-      const names = (Array.isArray(item.names) ? item.names : [item.name]).map(clean).filter(Boolean);
-      if (!names.length) return '';
-      const profile = item.profile && typeof item.profile === 'object' ? item.profile : {};
-      const basic = profile.basicInfo && typeof profile.basicInfo === 'object' ? profile.basicInfo : {};
-      const basicParts = [
-        clean(basic.identity) ? `身份：${clean(basic.identity)}` : '',
-        clean(basic.appearance) ? `外貌：${clean(basic.appearance)}` : '',
-        clean(basic.personality) ? `性格：${clean(basic.personality)}` : '',
-        clean(basic.abilities) ? `能力：${clean(basic.abilities)}` : '',
-        clean(basic.relations) ? `关系：${clean(basic.relations)}` : ''
-      ].filter(Boolean);
-      const experiences = clean(profile.experiences);
-      const lines = [`- ${names.join(' / ')}`];
-      if (basicParts.length) lines.push(`  基本信息：${basicParts.join('｜')}`);
-      if (experiences) lines.push(`  迄今经历：${experiences}`);
-      return lines.join('\n');
+    if (!hasJsonPh) {
+      missingParts.push(`## 本次输出 JSON 模板（仅输出以下顶层字段：[${sheets.join(', ')}]）\n${jsonTemplate}`);
     }
-    return '';
+    return missingParts.length ? `${out.trim()}\n\n${missingParts.join('\n\n')}` : out;
+  }
+
+  const SYSTEM_PROMPT = buildTableFillSystemPrompt(ALL_TABLES);
+  const TASK_PROMPT = SYSTEM_PROMPT;
+
+  function cellEsc(val) {
+    return clean(val).replace(/\|/g, '｜').replace(/\r?\n/g, ' ');
+  }
+
+  function formatTablesMarkdown(tables, targetSheets, options) {
+    const dataApi = window.MEMORY_ENGINE_DATA;
+    const schemas = dataApi?.TABLE_SCHEMAS || {};
+    const src = tables && typeof tables === 'object' ? tables : {};
+    const opts = options || {};
+    const chronicleLimit = Math.max(1, parseInt(opts.referenceChronicleCount, 10) || 5);
+    const displaySheets = Array.from(new Set(['global_state', 'protagonist_info', ...resolveTargetSheets(targetSheets)]));
+    const blocks = [];
+
+    for (const key of displaySheets) {
+      const schema = schemas[key];
+      if (!schema) continue;
+      let rows = Array.isArray(src[key]) ? src[key] : [];
+      if (key === 'chronicle') {
+        rows = rows.filter(r => {
+          if (!r || r.status === 'stale' || r.status === 'failed') return false;
+          if (opts.beforeLayer !== undefined && Number.isFinite(Number(opts.beforeLayer)) && Number.isFinite(Number(r.endLayer)) && Number(r.endLayer) >= Number(opts.beforeLayer)) {
+            return false;
+          }
+          return true;
+        }).slice(-chronicleLimit);
+      }
+      const cols = schema.columns || [];
+      const header = `| row_id | ${cols.map(c => c.label).join(' | ')} |`;
+      const sep = `| --- | ${cols.map(() => '---').join(' | ')} |`;
+      if (!rows.length) {
+        blocks.push(`### ${schema.name} (${key}) — 当前为空\n${header}\n${sep}`);
+        continue;
+      }
+      const body = rows.map(row => {
+        const vals = cols.map(c => {
+          let v = row[c.key];
+          if (key === 'chronicle' && c.key === 'chronicle_text' && clean(v).length > 180) {
+            v = clean(v).slice(0, 180) + '…';
+          }
+          return cellEsc(v);
+        });
+        return `| ${row.rowId || 1} | ${vals.join(' | ')} |`;
+      }).join('\n');
+      const note = key === 'chronicle' ? `（仅展示最近 ${rows.length} 条供衔接）` : '';
+      blocks.push(`### ${schema.name} (${key})${note}\n${header}\n${sep}\n${body}`);
+    }
+    return blocks.join('\n\n');
   }
 
   function buildUserPrompt(options) {
     const input = options || {};
+    const targetSheets = resolveTargetSheets(input.targetSheets);
+    const tables = input.tables || {};
     const currentStoryTime = clean(input.currentStoryTime);
-    const knownPeople = Array.isArray(input.knownPeople)
-      ? input.knownPeople.map(formatKnownPersonLine).filter(Boolean)
-      : [];
-    const knownEntities = Array.isArray(input.knownEntities)
-      ? input.knownEntities.map(item => {
-          if (!item || typeof item !== 'object') return '';
-          const type = clean(item.type), name = clean(item.name), description = clean(item.description);
-          const aliases = (Array.isArray(item.aliases) ? item.aliases : [item.aliases]).map(clean).filter(Boolean);
-          return name ? `- [${type}] ${name}${aliases.length ? ` / ${aliases.join(' / ')}` : ''}${description ? `：${description}` : ''}` : '';
-        }).filter(Boolean)
-      : [];
     const worldbook = clean(input.worldbook);
-    const activeOngoingFacts = Array.isArray(input.activeOngoingFacts) ? input.activeOngoingFacts : [];
-    const knownCharacterArcs = Array.isArray(input.knownCharacterArcs) ? input.knownCharacterArcs : [];
     const outlineFocusHint = clean(input.outlineFocusHint);
     const worldContextHint = clean(input.worldContextHint);
     const referenceContext = clean(input.referenceContext);
     const conversation = clean(input.conversation);
+    const startLayer = Number.isFinite(Number(input.startLayer)) ? Number(input.startLayer) : 0;
+    const endLayer = Number.isFinite(Number(input.endLayer)) ? Number(input.endLayer) : startLayer;
+    const aiCount = Math.max(1, parseInt(input.aiCount, 10) || 1);
+    const minChars = Math.max(50, parseInt(input.minChars, 10) || 500);
+    const nextCode = clean(input.nextChronicleCode) || window.MEMORY_ENGINE_DATA?.nextChronicleCode?.(tables.chronicle) || 'AM0001';
+    const rangeLabel = startLayer === endLayer ? `楼层 ${endLayer}` : `楼层 ${startLayer} 至 ${endLayer}`;
 
     const sections = [
-      `【当前绝对故事时间】\n${currentStoryTime || '未提供；不得换算任何相对时间'}`,
-      `【已知人物档案与别名（更新基本信息与迄今经历时请在此基础上整合，无变化字段留空）】\n${knownPeople.length ? knownPeople.join('\n') : '未提供；仅使用对话中明确出现的称呼'}`,
-      `【已知实体】\n${knownEntities.length ? knownEntities.join('\n') : '未提供；仅提取对话中明确命名且符合分类定义的实体'}`
+      `【本次填表范围与目标表】\n楼层范围：${rangeLabel}（共 ${aiCount} 条 AI 回复）\n本次待填表：[${targetSheets.join(', ')}]${targetSheets.includes('chronicle') ? `\n下一可用纪要编码索引：${nextCode}` : ''}`
     ];
 
-    if (activeOngoingFacts.length) {
-      sections.push(`【当前生效的持续事实（供去重与判定 resolve 完结）】\n${activeOngoingFacts.map(item =>
-        `- [${item.id}] (${item.category || '状态'}) ${item.subject || '全局'}：${item.fact}`
-      ).join('\n')}`);
+    if (targetSheets.includes('chronicle')) {
+      sections.push(`【纪要字数要求】\nchronicle.chronicle_text 正文最低不少于 ${minChars * aiCount} 字（单层最低 ${minChars} 字 × ${aiCount} 层），须详实客观展开本段行动、关键台词原意、细节与结果，禁止空泛敷衍或总结性收尾。`);
     }
 
-    if (knownCharacterArcs.length) {
-      sections.push(`【已知角色弧光状态】\n${knownCharacterArcs.map(arc =>
-        `- ${Array.isArray(arc.names) ? arc.names[0] : (arc.name || arc.characterId)}（${Number.isFinite(Number(arc.progressPct)) ? `${arc.progressPct}%` : '0%'} · ${arc.relationship || '未定'}）：${arc.currentStance || ''}${arc.arcSummary ? `｜${arc.arcSummary}` : ''}`
-      ).join('\n')}`);
+    if (currentStoryTime) {
+      sections.push(`【当前故事时间参考】\n${currentStoryTime}`);
+    }
+
+    const mdTables = formatTablesMarkdown(tables, targetSheets, {
+      referenceChronicleCount: input.referenceChronicleCount,
+      beforeLayer: input.beforeLayer
+    });
+    if (mdTables) {
+      sections.push(`【当前数据库表状态（只读基线，仅输出本段新增/变动）】\n${mdTables}`);
     }
 
     if (worldContextHint) {
-      sections.push(`【世界客观动态参考（仅作实体与事实核对，不得替角色猜知情）】\n${worldContextHint}`);
+      sections.push(`【世界客观动态参考（仅作实体与事实核对）】\n${worldContextHint}`);
     }
-
     if (outlineFocusHint) {
-      sections.push(`【当前公开剧情焦距（仅作主题参考，未发生事件不得提取）】\n${outlineFocusHint}`);
+      sections.push(`【当前公开剧情焦距（仅作主题对齐，未发生情节不得写入）】\n${outlineFocusHint}`);
     }
-
     if (worldbook) {
-      sections.push(`【可选世界书背景】\n${worldbook}\n\n世界书只用于辨认人物、实体、称呼和背景，不得把其中内容直接当作本批新形成的人物记忆或实体更新。`);
+      sections.push(`【世界书背景（仅用于辨认设定与称呼，不得直接抄入新事件）】\n${worldbook}`);
     }
-
     if (referenceContext) {
-      sections.push(`【只读辅助参考】\n${referenceContext}\n\n以上内容只用于识别人物、指代、前因和既有状态；不得把参考内容重新提取为本轮新增记忆或实体更新。`);
+      sections.push(`【只读前置对话参考（仅用于理解前因指代，勿重复填表）】\n${referenceContext}`);
     }
 
     sections.push(`【待提取对话】\n${conversation || '（空）'}`);
-    if (input.combinedTask !== true) {
-      sections.push('请严格按照系统规则，只返回一个 JSON 对象。');
-    }
+    sections.push(`请严格按照系统规则，针对 [${targetSheets.join(', ')}] 输出单个合法 JSON 对象。`);
     return sections.join('\n\n');
   }
 
   function buildMessages(options) {
+    const opts = options || {};
     return [
-      { role: 'system', content: TASK_PROMPT },
-      { role: 'user', content: buildUserPrompt(options) }
+      { role: 'system', content: buildTableFillSystemPrompt(opts.targetSheets, opts) },
+      { role: 'user', content: buildUserPrompt(opts) }
     ];
   }
 
+  // 对齐 shujuku 的 table-fill-retry：解析或字段校验失败时，把上轮失败回复与具体错误清单回灌给模型定向修正
+  function buildRetryCorrectionMessages(baseMessages, retryHistory, targetSheets) {
+    if (!Array.isArray(retryHistory) || !retryHistory.length) return baseMessages;
+    const sheets = resolveTargetSheets(targetSheets);
+    const extra = [];
+    for (const turn of retryHistory) {
+      if (clean(turn?.response)) {
+        extra.push({ role: 'assistant', content: String(turn.response).slice(0, 6000) });
+      }
+      const errList = Array.isArray(turn?.errors) && turn.errors.length
+        ? turn.errors.map((e, i) => `${i + 1}. ${clean(e)}`).join('\n')
+        : clean(turn?.error || '输出格式不符合 JSON 规范');
+      extra.push({
+        role: 'user',
+        content: `【填表纠错】\n你上一条回复未通过结构校验，具体报错如下：\n${errList}\n\n修正要求：\n1. 仅输出一个完整合法的 JSON 对象，不要包含 Markdown 代码围栏或多余文字。\n2. 顶层字段严格限定在本次目标表 [${sheets.join(', ')}] 内；主键字段（如 name / skill_name / item_name / quest_name / code_index）不得为空。\n3. 保留上一轮所有有效提取内容，针对报错逐项修复，禁止编造未发生的剧情。`
+      });
+    }
+    return [...baseMessages, ...extra];
+  }
+
+  function messagesToPromptString(messages) {
+    if (!Array.isArray(messages)) return String(messages == null ? '' : messages);
+    return messages.map(m => {
+      const role = clean(m?.role);
+      const body = String(m?.content == null ? '' : m.content).trim();
+      if (!body) return '';
+      if (role === 'assistant') return `【上一次模型输出】\n${body}`;
+      return body;
+    }).filter(Boolean).join('\n\n---\n\n');
+  }
+
   return {
+    ALL_TABLES,
+    DEFAULT_MAIN_SYSTEM_PROMPT,
+    DEFAULT_SHEET_RULES,
     SYSTEM_PROMPT,
     TASK_PROMPT,
+    getEffectiveMainSystemPrompt,
+    getEffectiveSheetRule,
+    buildTableFillSystemPrompt,
+    formatTablesMarkdown,
     buildUserPrompt,
-    buildMessages
+    buildMessages,
+    buildRetryCorrectionMessages,
+    messagesToPromptString
   };
 })();

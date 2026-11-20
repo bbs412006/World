@@ -1,77 +1,58 @@
-// 记忆引擎运行链：复用世界引擎的 API、过滤、世界书、存档和注入机制。
+// memory-engine.js — 记忆引擎（对齐 shujuku 核心 7 表、单表水位线、Wave 波次追平、带错纠错重试与同步删楼回退）
 window.MEMORY_ENGINE = (function() {
+  'use strict';
+
   const INJECTION_NAME = 'memory-engine-memory';
-  const SENTINEL = '【记忆信息】';
-  const DEFAULT_INJECTION_DICE_SIDES = 10000;
-  const ENTITY_TYPES = ['organization', 'object', 'ability', 'location'];
-  const ENTITY_LABELS = { organization: '组织', object: '物件', ability: '能力', location: '地点' };
-  let initialized = false, running = false, backfillRunning = false, reconciling = false;
-  let runningLabel = '';
-  let abortController = null, autoTimer = null, historyRefillTimer = null, lastEventKey = '';
+  const MUTATION_TRAILING_MS = 1200;
+  const MUTATION_MAX_WAIT_MS = 3000;
+
+  let initialized = false;
+  let running = false;
+  let backfillRunning = false;
+  let reconciling = false;
   let generationActive = false;
+  let abortController = null;
+  let autoTimer = null;
+  let lastEventKey = '';
+  let lastError = '';
+  let runningLabel = '';
+  let lastDebug = null;
+  let lastInjectionDebug = null;
   let hiddenSyncPromise = Promise.resolve();
-  let lastDebug = { prompt: '', rawResult: '', parsed: null, error: '' };
   let backfillStatus = { running: false, current: 0, total: 0, message: '' };
   let summaryBackfillStatus = { running: false, current: 0, total: 0, message: '' };
 
-  const clone = v => v == null ? v : JSON.parse(JSON.stringify(v));
-  const clean = v => String(v == null ? '' : v).trim();
-  const unique = list => Array.from(new Set((list || []).map(clean).filter(Boolean)));
-  const normalized = v => clean(v).toLocaleLowerCase();
-  const settings = () => window.MEMORY_ENGINE_SETTINGS?.getSettings(true) || {};
-  const data = () => window.MEMORY_ENGINE_DATA;
-  const timelineApi = () => window.MEMORY_ENGINE_TIMELINE;
-  function setExternalStatus(text, isError) {
-    window.__WE_SetExternalStatus?.(text, !!isError);
-  }
-  function refreshMemoryPanel() {
-    window.WORLD_ENGINE_UI?.refresh?.(true);
-  }
-  function context() { try { return SillyTavern.getContext(); } catch (_) { return null; } }
-  const chat = () => context()?.chat || [];
-  const currentLayer = () => Math.max(0, chat().length - 1);
-  const ignoreFirstLayer = st => st?.firstLayerIsAiOpening !== false;
+  // 事件代次锁（对齐 shujuku Epoch Lease）与删/滑/改楼防抖调度状态
+  let autoFillEpoch = 0;
+  let mutationGeneration = 0;
+  let mutationTimer = null;
+  let mutationFirstAt = 0;
+  let mutationRunning = false;
+  let mutationPending = false;
+  let mutationReason = '';
+  let mutationRefillRequested = false;
+
+  const clean = value => String(value == null ? '' : value).trim();
+  const normalized = value => clean(value).toLocaleLowerCase();
+  const unique = values => Array.from(new Set((Array.isArray(values) ? values : [values]).map(clean).filter(Boolean)));
+  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  function configuredNameBlacklist(st) {
-    return new Set(clean(st?.nameBlacklist).split(/\r?\n/).map(normalized).filter(Boolean));
+  function context() {
+    try { return typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null; }
+    catch (_) { return null; }
   }
-
-  function nameIsBlacklisted(value, blacklist) {
-    const names = Array.isArray(value) ? value : [value];
-    return names.some(name => blacklist.has(normalized(name)));
+  function chat() {
+    const list = context()?.chat;
+    return Array.isArray(list) ? list : [];
   }
-
-  function rollbackLinkedLayer(layer) {
-    const state = data()?.loadState?.();
-    if (!state) return false;
-    const removed = removeLinkedLayerFromState(state, layer);
-    if (!removed.removed) return false;
-    data().saveState(replayTimeline(state));
-    applyInjection();
-    return true;
-  }
-
-  // 每条候选记录各掷一次离散骰子，再按指数衰减权重计算优先级。
-  // 最新记录权重最高；最旧记录的权重至少为 1 / 骰子面数，因此始终保留非零机会。
-  function exponentialMemorySample(items, limit, randomFn = Math.random, diceSides = DEFAULT_INJECTION_DICE_SIDES) {
-    const source = Array.isArray(items) ? items : [];
-    const take = Math.max(0, Math.min(source.length, parseInt(limit) || 0));
-    if (!take || !source.length) return [];
-    if (source.length <= take) return source.slice();
-    const sides = Math.max(1000, Math.min(10000, parseInt(diceSides) || DEFAULT_INJECTION_DICE_SIDES));
-    const scale = Math.max(1, take);
-    return source.map((item, index) => {
-      const age = source.length - 1 - index;
-      const weight = Math.max(1 / sides, Math.exp(-age / scale));
-      const roll = Math.max(1, Math.min(sides, Math.floor(Number(randomFn()) * sides) + 1));
-      const unit = roll / (sides + 1);
-      return { item, index, priority: -Math.log(unit) / weight };
-    }).sort((a, b) => a.priority - b.priority)
-      .slice(0, take)
-      .sort((a, b) => a.index - b.index)
-      .map(entry => entry.item);
-  }
+  function data() { return window.MEMORY_ENGINE_DATA; }
+  function settings() { return window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {}; }
+  function promptApi() { return window.MEMORY_ENGINE_PROMPT; }
+  function timelineApi() { return window.MEMORY_ENGINE_TIMELINE; }
+  function tableKeys() { return data()?.TABLE_KEYS || ['global_state', 'protagonist_info', 'important_characters', 'protagonist_skills', 'inventory', 'quests_events', 'chronicle']; }
+  function tableSchemas() { return data()?.TABLE_SCHEMAS || {}; }
+  function bumpAutoFillEpoch() { return ++autoFillEpoch; }
 
   function formatLayerSpan(startLayer, endLayer, sep = '-') {
     const s = Number.isFinite(Number(startLayer)) ? Number(startLayer) : 0;
@@ -79,247 +60,194 @@ window.MEMORY_ENGINE = (function() {
     return s === e ? String(e) : `${s}${sep}${e}`;
   }
 
-  function formatMessages(messages, startLayer) {
-    const ctx = context();
-    return (messages || []).map((message, i) => {
-      const fallback = message?.is_user ? (ctx?.name1 || '用户') : (ctx?.name2 || '角色');
-      return `[楼层 ${Number(startLayer || 0) + i}]【${clean(message?.name) || fallback}】\n${clean(message?.mes)}`;
-    }).filter(Boolean).join('\n\n');
+  // 对齐 shujuku message-handler：剔除用户消息、系统旁白（narrator）与工具调用空楼
+  function isFillEligibleAiMessage(message) {
+    if (!message || typeof message !== 'object') return false;
+    if (message.is_user === true) return false;
+    if (message.extra?.type === 'narrator') return false;
+    if (message.is_system === true && Array.isArray(message.extra?.tool_invocations)) return false;
+    return true;
   }
 
-  function recentConversation(rounds) {
-    return recentConversationBatch(rounds).conversation;
+  function ignoreFirstLayer(stOverride) {
+    const st = stOverride || settings();
+    return st.firstLayerIsAiOpening !== false;
   }
 
-  function recentConversationBatch(rounds) {
-    const all = chat(), count = Math.max(1, parseInt(rounds) || 1) * 2;
-    const start = Math.max(ignoreFirstLayer(settings()) ? 1 : 0, all.length - count);
-    const end = Math.max(start, all.length - 1);
-    const aiInSlice = all.map((m, idx) => (idx >= start && idx <= end && m && !m.is_user ? idx : -1)).filter(idx => idx >= 0);
-    return {
-      startLayer: aiInSlice.length ? aiInSlice[0] : start,
-      endLayer: aiInSlice.length ? aiInSlice[aiInSlice.length - 1] : end,
-      dialogueStart: start,
-      conversation: formatMessages(all.slice(start), start),
-      sourceRefs: timelineApi()?.captureRange?.(start, end) || []
-    };
-  }
-
-  function extractStoryTime(text) {
-    const found = Array.from(String(text || '').matchAll(/『([^』]*(?:年|月|日|时|刻)[^』]*)』/g));
-    return found.length ? clean(found.at(-1)[1].split('丨').slice(0, 3).join(' ')) : '';
-  }
-
-  function filterConversation(conversation, st) {
-    return window.WORLD_ENGINE_CORE?.filterDialogue?.(
-      conversation, { evolveFilterRegex: st.filterRegex || '' }
-    ) || conversation;
-  }
-
-  function previousRawReference(task, roundCount, st) {
-    const count = Math.max(0, parseInt(roundCount) || 0);
+  function currentLayer() {
     const all = chat();
-    const boundary = Number.isFinite(Number(task?.startLayer)) ? Number(task.startLayer) : all.length;
-    if (!count || boundary <= 0) return { conversation: '', startLayer: boundary, endLayer: boundary - 1 };
-    const aiLayers = all.map((message, index) => (
-      index < boundary && !(ignoreFirstLayer(st || settings()) && index === 0) && message && !message.is_user ? index : -1
-    )).filter(index => index >= 0).slice(-count);
-    if (!aiLayers.length) return { conversation: '', startLayer: boundary, endLayer: boundary - 1 };
-    const firstAi = aiLayers[0];
-    let start = firstAi;
-    for (let index = firstAi - 1; index >= 0; index--) {
-      if (all[index] && !all[index].is_user) break;
-      start = index;
+    return all.length ? all.length - 1 : 0;
+  }
+
+  function collectEligibleAiLayers(stOverride, startLayer, endLayer) {
+    const st = stOverride || settings();
+    const all = chat();
+    if (!all.length) return [];
+    const minStart = ignoreFirstLayer(st) ? 1 : 0;
+    const lo = Math.max(minStart, Number.isFinite(Number(startLayer)) ? Number(startLayer) : minStart);
+    const hi = Math.min(all.length - 1, Number.isFinite(Number(endLayer)) ? Number(endLayer) : all.length - 1);
+    const out = [];
+    for (let i = lo; i <= hi; i++) {
+      if (isFillEligibleAiMessage(all[i])) out.push(i);
     }
-    const end = aiLayers.at(-1);
+    return out;
+  }
+
+  function getEffectiveSummaryDelay(stOverride) {
+    const st = stOverride || settings();
+    const rawDelay = Math.max(0, parseInt(st.summaryDelayFloors, 10) || 0);
+    return st.skipCurrentFloorSummary === true ? Math.max(1, rawDelay) : rawDelay;
+  }
+
+  function stableAutoEndLayer(stOverride) {
+    const st = stOverride || settings();
+    const delayFloors = getEffectiveSummaryDelay(st);
+    const allAi = collectEligibleAiLayers(st);
+    if (!allAi.length) return -1;
+    if (delayFloors <= 0) return allAi[allAi.length - 1];
+    if (allAi.length <= delayFloors) return -1;
+    return allAi[allAi.length - 1 - delayFloors];
+  }
+
+  function setExternalStatus(text, isError) {
+    try { window.__WE_SetExternalStatus?.(text, Boolean(isError)); } catch (_) {}
+  }
+
+  function setRunningUI(active, label) {
+    running = Boolean(active);
+    runningLabel = active ? clean(label) : '';
+    try { window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(running || backfillRunning || reconciling, runningLabel); } catch (_) {}
+  }
+
+  function refreshMemoryPanel() {
+    try { window.WORLD_ENGINE_UI?.refresh?.(); } catch (_) {}
+  }
+
+  function setBackfillStatus(current, total, message) {
+    backfillStatus = { running: backfillRunning, current, total, message: message || '' };
+    if (typeof document !== 'undefined') {
+      const el = document.getElementById('we-memory-person-backfill-status');
+      if (el) el.textContent = backfillStatus.message;
+    }
+  }
+
+  function setSummaryBackfillStatus(current, total, message) {
+    summaryBackfillStatus = { running: backfillRunning, current, total, message: message || '' };
+    if (typeof document !== 'undefined') {
+      for (const id of ['we-memory-home-fill-status', 'we-memory-core-status', 'we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = summaryBackfillStatus.message;
+      }
+    }
+  }
+
+  function filterText(text, stOverride) {
+    const st = stOverride || settings();
+    let out = String(text == null ? '' : text);
+    const rawRegex = clean(st.filterRegex);
+    if (rawRegex && window.WORLD_ENGINE_CORE?.applyFilterRegex) {
+      try { out = window.WORLD_ENGINE_CORE.applyFilterRegex(out, rawRegex); } catch (_) {}
+    } else if (rawRegex) {
+      for (const line of rawRegex.split('\n').map(clean).filter(Boolean)) {
+        try {
+          const m = line.match(/^\/(.+)\/([gimsuy]*)$/);
+          const re = m ? new RegExp(m[1], m[2] || 'g') : new RegExp(line, 'g');
+          out = out.replace(re, '');
+        } catch (_) {}
+      }
+    }
+    return out.trim();
+  }
+
+  function formatConversationSlice(startLayer, endLayer, stOverride) {
+    const all = chat();
+    const st = stOverride || settings();
+    const lines = [];
+    for (let i = Math.max(0, startLayer); i <= Math.min(all.length - 1, endLayer); i++) {
+      const msg = all[i];
+      if (!msg) continue;
+      if (!msg.is_user && !isFillEligibleAiMessage(msg)) continue;
+      const speaker = msg.is_user ? (clean(msg.name) || '用户') : (clean(msg.name) || '角色');
+      const body = filterText(msg.mes, st);
+      if (!body) continue;
+      lines.push(`[楼层 ${i}] ${speaker}：${body}`);
+    }
+    return lines.join('\n\n');
+  }
+
+  function buildBatchFromAiLayers(aiLayers, stOverride) {
+    const all = chat();
+    const st = stOverride || settings();
+    const layers = (Array.isArray(aiLayers) ? aiLayers : []).filter(l => Number.isInteger(l) && l >= 0 && l < all.length).sort((a, b) => a - b);
+    if (!layers.length) return null;
+    const startLayer = layers[0];
+    const endLayer = layers[layers.length - 1];
+    // 对话上下文与溯源包含紧邻的前一层用户输入，保证语义完整与删改用户楼层可回退；记录的起止楼层保持纯 AI 楼层号
+    const dialogueStart = startLayer > 0 && all[startLayer - 1]?.is_user ? startLayer - 1 : startLayer;
+    const sourceRefs = timelineApi()?.captureRange?.(dialogueStart, endLayer) || [];
+    const sourceDigest = timelineApi()?.digestRefs?.(sourceRefs) || `layers:${layers.join(',')}`;
+    const conversation = formatConversationSlice(dialogueStart, endLayer, st);
     return {
-      conversation: formatMessages(all.slice(start, end + 1), start),
-      startLayer: firstAi,
-      dialogueStart: start,
-      endLayer: end
+      startLayer,
+      endLayer,
+      dialogueStart,
+      aiLayers: layers,
+      aiCount: layers.length,
+      sourceRefs,
+      sourceDigest,
+      conversation
     };
   }
 
-  function buildTaskReferenceContext(state, task, st) {
-    const eventMemory = ensureEventState(state);
-    const rawCount = st?.referenceRawRounds === undefined ? 1 : Math.max(0, parseInt(st.referenceRawRounds) || 0);
-    const raw = previousRawReference(task, rawCount, st);
-    const rawBoundary = raw.conversation
-      ? raw.startLayer
-      : (Number.isFinite(Number(task?.startLayer)) ? Number(task.startLayer) : Infinity);
-    const currentChatId = clean(data()?.getChatId?.());
-    const valid = item => item?.status !== 'stale' && item?.status !== 'failed' && clean(item?.content);
-    const beforeLayer = (item, layer) => {
-      const originChatId = clean(item?.originChatId);
-      if (originChatId && currentChatId && originChatId !== currentChatId) return true;
-      return Number(item?.endLayer) < layer;
-    };
-    const smallCount = st?.referenceSmallSummaryCount === undefined
-      ? 5 : Math.max(0, parseInt(st.referenceSmallSummaryCount) || 0);
-    const eligibleSmall = eventMemory.small_summaries
-      .filter(item => valid(item) && beforeLayer(item, rawBoundary));
-    const historySmallSummaries = smallCount ? eligibleSmall.slice(-smallCount) : [];
-    const parts = [];
-    if (historySmallSummaries.length) parts.push(`【前置纪要】\n${historySmallSummaries.map((item, index) =>
-      `${index + 1}. [楼层 ${formatLayerSpan(item?.startLayer, item?.endLayer)}] ${clean(item?.content)}`
-    ).join('\n')}`);
-    if (raw.conversation) parts.push(`【近期正文】\n${filterConversation(raw.conversation, st)}`);
-    return { historySmallSummaries, raw, text: parts.join('\n\n') };
+  function previousRawReference(dialogueStart, stOverride) {
+    const st = stOverride || settings();
+    const rounds = Math.max(0, parseInt(st.referenceRawRounds, 10) || 0);
+    if (!rounds || dialogueStart <= 0) return '';
+    const all = chat();
+    const priorAi = [];
+    for (let i = dialogueStart - 1; i >= 0 && priorAi.length < rounds; i--) {
+      if (isFillEligibleAiMessage(all[i])) priorAi.unshift(i);
+    }
+    if (!priorAi.length) return '';
+    const refStart = priorAi[0] > 0 && all[priorAi[0] - 1]?.is_user ? priorAi[0] - 1 : priorAi[0];
+    return formatConversationSlice(refStart, dialogueStart - 1, st);
   }
 
-  function buildSmallHistoryContext(state, task) {
-    const st = settings();
-    const context = buildTaskReferenceContext(state, task, st);
-    return {
-      historySmallSummaries: context.historySmallSummaries
-    };
+  function currentStoryTimeFrom(state) {
+    const gs = state?.tables?.global_state?.[0];
+    if (clean(gs?.cur_time)) return clean(gs.cur_time);
+    try {
+      const world = window.WORLD_ENGINE_CORE?.loadState?.();
+      if (clean(world?.time?.current)) return clean(world.time.current);
+      if (Number.isFinite(Number(world?.time?.day))) return `第${world.time.day}天${clean(world.time.period) ? ` ${clean(world.time.period)}` : ''}`;
+    } catch (_) {}
+    return '';
   }
 
-  function buildRequestPrompt_hints() {
+  function getBridgeHints() {
     try { return window.STORY_ENGINE_BRIDGE?.getMemoryExtractionHints?.() || {}; }
     catch (_) { return {}; }
   }
 
-  async function buildRequestPrompt(tasks, state, st) {
-    const segments = [];
-    const hints = buildRequestPrompt_hints();
-    const enableStructured = st?.enableFactAndArcExtraction !== false;
-    const memoryReference = tasks.memory ? buildTaskReferenceContext(state, tasks.memory, st) : null;
-    const sharesReference = Boolean(tasks.memory && tasks.small
-      && Number(tasks.memory.startLayer) === Number(tasks.small.startLayer)
-      && Number(tasks.memory.endLayer) === Number(tasks.small.endLayer));
-    const smallReference = tasks.small && !sharesReference
-      ? buildTaskReferenceContext(state, tasks.small, st) : null;
-    const smallMinChars = Math.max(50, parseInt(st?.smallSummaryMinChars, 10) || 500);
-    const smallAiCount = Math.max(
-      1,
-      Number(tasks.small?.aiCount)
-      || (Array.isArray(tasks.small?.aiLayers) && tasks.small.aiLayers.length)
-      || 1
-    );
-    const targetSmallMinChars = smallMinChars * smallAiCount;
-    if (tasks.memory) {
-      const filtered = filterConversation(tasks.memory.conversation, st);
-      let worldbook = '';
-      if (st.worldbookEnabled && window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection) {
-        worldbook = await window.WORLD_ENGINE_WORLDBOOK.buildPromptSection(filtered, 'memory');
-      }
-      const activeOngoingFacts = (state.ongoing_facts || []).filter(item => item?.status !== 'resolved' && item?.status !== 'superseded').slice(-20);
-      const knownCharacterArcs = Array.isArray(state.character_arcs) ? state.character_arcs.slice(0, 20) : [];
-      const user = window.MEMORY_ENGINE_PROMPT.buildUserPrompt({
-        currentStoryTime: extractStoryTime(filtered),
-        knownPeople: (state.personal_memory || []).map(character => ({
-          names: unique(character.names),
-          profile: character.profile || null
-        })),
-        knownEntities: ENTITY_TYPES.flatMap(type => (state.entity_memory?.[type] || []).map(entity => ({
-          type: ENTITY_LABELS[type], name: entity.name, aliases: unique(entity.aliases), description: entity.description
-        }))),
-        activeOngoingFacts: enableStructured ? activeOngoingFacts : [],
-        knownCharacterArcs: enableStructured ? knownCharacterArcs : [],
-        outlineFocusHint: clean(hints.outlineFocusHint),
-        worldContextHint: clean(hints.worldContextHint),
-        worldbook,
-        referenceContext: memoryReference?.text || '',
-        conversation: filtered,
-        combinedTask: Boolean(tasks.small)
-      });
-      segments.push(`【任务说明】\n${window.MEMORY_ENGINE_PROMPT.TASK_PROMPT || window.MEMORY_ENGINE_PROMPT.SYSTEM_PROMPT}\n\n${user}`);
+  async function loadWorldbookContext(conversation, stOverride) {
+    const st = stOverride || settings();
+    if (!st.worldbookEnabled || !window.WORLD_ENGINE_WORLDBOOK?.buildPromptSection) return '';
+    try {
+      return clean(await window.WORLD_ENGINE_WORLDBOOK.buildPromptSection(conversation, 'memory'));
+    } catch (_) {
+      return '';
     }
-    if (tasks.small) {
-      segments.push(`【任务说明】\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.SYSTEM_PROMPT}\n\n${window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT.buildUserPrompt({
-        ...tasks.small,
-        minChars: smallMinChars,
-        aiCount: smallAiCount,
-        reuseConversation: sharesReference,
-        outlineFocusHint: clean(hints.outlineFocusHint),
-        referenceContext: sharesReference && memoryReference?.text
-          ? '沿用同一请求前文人物/实体任务中的【只读辅助参考】，不得把其中旧内容写成本段新增事件。'
-          : (smallReference?.text || ''),
-        conversation: filterConversation(tasks.small.conversation, st)
-      })}`);
-    }
-    const fields = [];
-    if (tasks.memory) {
-      fields.push(`"character_profile_updates": [
-    {
-      "name": ["人物规范名", "别名"],
-      "basic_info": {
-        "identity": "身份/职业/阵营（无新信息填空字符串）",
-        "appearance": "外貌与显著特征（无新信息填空字符串）",
-        "personality": "性格与行事风格（无新信息填空字符串）",
-        "abilities": "核心能力/特长/关键资源（无新信息填空字符串）",
-        "relations": "与主角及关键人物的关系（无新信息填空字符串）"
-      },
-      "experiences": "截至目前该人物的详细关键经历（将本段重大转折、关键行动、重要决策、得失与关系变化自然融合进已有迄今经历，形成详实连贯的履历，最多800字；日常寒暄、吃饭走路等琐碎小事绝不写入；本段无重大经历变化填空字符串）"
-    }
-  ]`, `"personal_memory": [
-    {
-      "name": ["人物名或别名"],
-      "known_by": ["其他知情人物名"],
-      "memory": "仅填会影响后续判断的关键主观认知/秘密/误解（不重复基本信息或琐事）",
-      "time": "这条记忆对应的绝对故事时间或空字符串"
-    }
-  ]`, `"entity_updates": [
-    {
-      "type": "organization、object、ability、location 四者之一",
-      "name": "实体名称",
-      "aliases": ["实体别名"],
-      "description": "当前描述或空字符串",
-      "event": "一条独立的本批新增重要事件或空字符串",
-      "time": "这条事件对应的绝对故事时间或空字符串"
-    }
-  ]`);
-      if (enableStructured) {
-        fields.push(`"ongoing_fact_updates": [
-    {
-      "action": "upsert 或 resolve",
-      "id": "修订/完结已有事实时填 fact_xxxxxx，新增填空字符串",
-      "category": "状态、契约、设定、持有、伤病、关系定性、环境 之一",
-      "subject": "事实主体（角色/物品/地点/全局）",
-      "fact": "当前生效的简明持续事实（不超过120字）",
-      "keywords": ["检索关键词"]
-    }
-  ]`, `"character_arc_updates": [
-    {
-      "name": "人物规范名称",
-      "current_stance": "当前态度/立场（不超过60字）",
-      "arc_summary": "近期心理转变与关系弧光摘要（不超过120字）",
-      "relationship": "当前关系定性标签",
-      "progress_pct": 0
-    }
-  ]`);
-      }
-    }
-    if (tasks.small) {
-      fields.push('"small_summary": ""');
-      if (enableStructured) {
-        fields.push('"small_summary_keywords": []', '"small_summary_entities": []', '"small_summary_impact": "normal"');
-      }
-    }
-    const tone = clean(st.tonePrompt);
-    const taskGuidance = [];
-    if (tasks.memory && tasks.small) {
-      taskGuidance.push(`【双任务并重铁律】必须在同一个顶层 JSON 对象中同时完整提取：人物档案（character_profile_updates，统一记录人物基本五项信息与截至目前的详细关键经历，不写琐碎小事）、关键主观记忆（personal_memory，仅记重要秘密/误解/主观认知，防膨胀）、实体更新（entity_updates，type 必须用英文 organization / object / ability / location）${enableStructured ? '、持续事实（ongoing_fact_updates）、角色弧光（character_arc_updates）' : ''} 与阶段纪要（small_summary，正文最低不少于 ${targetSmallMinChars} 字）。绝不可只写 small_summary 而把人物/组织/地点/物品/事实数组留空，也绝不可拆成两个 JSON 块输出！仅当原文确实完全未出现某类要素时才返回空数组（如 "character_profile_updates": [] / "personal_memory": [] / "entity_updates": []），不得省略任何字段。`);
-    } else if (tasks.memory) {
-      taskGuidance.push(`请完整提取本段对话涉及的人物档案（character_profile_updates，统一格式记录基本信息与截至目前的详细关键经历，忽略琐碎小事）、关键主观记忆（personal_memory）、实体更新（entity_updates，type 必须用英文 organization / object / ability / location）${enableStructured ? '、持续事实（ongoing_fact_updates）与角色弧光（character_arc_updates）' : ''}；仅当原文确实无对应内容时才返回空数组（如 "character_profile_updates": [] / "personal_memory": [] / "entity_updates": []），不得省略字段。`);
-    } else if (tasks.small) {
-      taskGuidance.push(`small_summary 正文必须最低不少于 ${targetSmallMinChars} 字，请详实还原人物行动、关键对话原意、组织/物品/地点细节与阶段结果，不得省略字段。`);
-    }
-    return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}\n\n${taskGuidance.join('\n')}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
 
-  // 生产级宽松 JSON 修复（仅在标准 JSON.parse 失败时兜底调用）：
-  // 1) 转义双引号字符串内部未转义的字面换行/回车/制表符（500+ 字长纪要与人物经历最常见故障）；
-  // 2) 移除字符串外部的单行 // 注释与对象/数组末尾多余逗号。
-  function repairLooseJson(raw) {
-    const src = String(raw || '');
-    if (!src) return src;
+  // ==================== JSON 提取、7 表校验与兼容适配 ====================
+
+  function sanitizeDirtyJson(raw) {
     let out = '';
     let inStr = false;
     let esc = false;
-    for (let i = 0; i < src.length; i++) {
-      const ch = src[i];
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      const next = raw[i + 1];
       if (inStr) {
         if (esc) { out += ch; esc = false; continue; }
         if (ch === '\\') { out += ch; esc = true; continue; }
@@ -327,30 +255,33 @@ window.MEMORY_ENGINE = (function() {
         if (ch === '\n') { out += '\\n'; continue; }
         if (ch === '\r') { out += '\\r'; continue; }
         if (ch === '\t') { out += '\\t'; continue; }
-        const code = ch.charCodeAt(0);
-        if (code < 0x20) { out += ' '; continue; }
         out += ch;
         continue;
       }
       if (ch === '"') { inStr = true; out += ch; continue; }
-      if (ch === '/' && src[i + 1] === '/') {
-        while (i < src.length && src[i] !== '\n') i++;
-        out += '\n';
+      if (ch === '/' && next === '/') {
+        while (i < raw.length && raw[i] !== '\n') i++;
+        continue;
+      }
+      if (ch === '/' && next === '*') {
+        i += 2;
+        while (i < raw.length && !(raw[i] === '*' && raw[i + 1] === '/')) i++;
+        i++;
         continue;
       }
       out += ch;
     }
-    // 移除字符串外的尾随逗号（如 [a, b, ] 或 {"k": 1, }）
+    // 清理字符串外尾随逗号（如 , } 或 , ]）
     let cleaned = '';
     inStr = false;
     esc = false;
     for (let i = 0; i < out.length; i++) {
       const ch = out[i];
       if (inStr) {
-        if (esc) { cleaned += ch; esc = false; continue; }
-        if (ch === '\\') { cleaned += ch; esc = true; continue; }
-        if (ch === '"') { cleaned += ch; inStr = false; continue; }
         cleaned += ch;
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
         continue;
       }
       if (ch === '"') { inStr = true; cleaned += ch; continue; }
@@ -364,2670 +295,474 @@ window.MEMORY_ENGINE = (function() {
     return cleaned;
   }
 
-  function tryParseJsonWithRepair(snippet) {
-    try {
-      const parsed = JSON.parse(snippet);
-      if (parsed && typeof parsed === 'object') return parsed;
-    } catch (_) {}
-    try {
-      const repaired = JSON.parse(repairLooseJson(snippet));
-      if (repaired && typeof repaired === 'object') return repaired;
-    } catch (_) {}
-    return null;
-  }
-
-  function extractAllBalancedJsonSpans(text) {
-    const results = [];
-    let inString = false;
-    let escaped = false;
-    let rootChar = '';
-    let depth = 0;
-    let start = -1;
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (ch === '\\') escaped = true;
-        else if (ch === '"') inString = false;
-        continue;
+  function extractJsonObject(raw) {
+    let text = String(raw == null ? '' : raw).trim();
+    if (!text) return { ok: false, error: '模型返回为空，没有合法 JSON 对象' };
+    text = text
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+      .trim();
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fence) text = fence[1].trim();
+    const tryParse = str => {
+      for (const candidate of [str, sanitizeDirtyJson(str)]) {
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch (_) {}
+        try {
+          const repaired = window.WORLD_ENGINE_API?.parseJSON?.(candidate);
+          if (repaired && typeof repaired === 'object' && !Array.isArray(repaired)) return repaired;
+        } catch (_) {}
       }
-      if (ch === '"') {
-        inString = true;
-        continue;
-      }
-      if (!rootChar && (ch === '{' || ch === '[')) {
-        rootChar = ch;
-        start = i;
-        depth = 1;
-      } else if (rootChar) {
-        const open = rootChar;
-        const close = open === '{' ? '}' : ']';
-        if (ch === open) depth++;
-        else if (ch === close) {
-          depth--;
-          if (depth === 0 && start !== -1) {
-            const parsed = tryParseJsonWithRepair(text.slice(start, i + 1));
-            if (parsed) results.push(parsed);
-            rootChar = '';
-            start = -1;
-          }
-        }
-      }
-    }
-    return results;
-  }
-
-  const KNOWN_PAYLOAD_KEYS = [
-    'character_profile_updates', 'character_profiles', 'profiles', 'characters', '人物档案', '人物信息', '人物资料',
-    'personal_memory', 'memories', 'memory', '人物记忆', '人物',
-    'entity_updates', 'entities', 'entity_memory', '实体更新', '实体', '世界实体',
-    'organizations', 'organization', 'objects', 'object', 'abilities', 'ability', 'locations', 'location',
-    'ongoing_fact_updates', 'ongoing_facts', 'facts', '持续事实', '事实更新', '事实',
-    'character_arc_updates', 'character_arcs', 'arcs', '角色弧光', '人物弧光', '弧光更新',
-    'small_summary', 'small_summary_keywords', 'small_summary_entities', 'small_summary_impact', '阶段纪要', '纪要'
-  ];
-
-  function unwrapPayloadObject(obj, depth = 0) {
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || depth > 3) return obj;
-    // 若外层同时存在 small_summary 与嵌套的 memory/memory_updates/data 容器对象，把嵌套对象拍平到顶层
-    let flat = obj;
-    for (const nestKey of ['memory', 'memory_updates', 'memory_data', 'result', 'output', 'response', 'data']) {
-      const inner = flat[nestKey];
-      if (inner && typeof inner === 'object' && !Array.isArray(inner)
-        && KNOWN_PAYLOAD_KEYS.some(k => Object.prototype.hasOwnProperty.call(inner, k))) {
-        const innerUnwrapped = unwrapPayloadObject(inner, depth + 1);
-        const rest = { ...flat };
-        delete rest[nestKey];
-        flat = { ...innerUnwrapped, ...rest };
-      }
-    }
-    const hasKnown = KNOWN_PAYLOAD_KEYS.some(k => Object.prototype.hasOwnProperty.call(flat, k));
-    if (hasKnown) return flat;
-    return flat;
-  }
-
-  function mergeParsedPayloads(objects) {
-    const validObjs = objects
-      .map(unwrapPayloadObject)
-      .filter(obj => obj && typeof obj === 'object');
-    if (!validObjs.length) return null;
-    if (validObjs.length === 1) return validObjs[0];
-    const plainObjs = validObjs.filter(obj => !Array.isArray(obj));
-    if (!plainObjs.length) return validObjs[validObjs.length - 1];
-    // 当模型误把人物/实体与纪要拆成多个 JSON 块输出时，合并所有块的字段而不是丢弃前面块
-    const merged = {};
-    const arrayKeys = new Set([
-      'character_profile_updates', 'character_profiles', 'profiles', 'characters',
-      'personal_memory', 'memories', 'entity_updates', 'ongoing_fact_updates',
-      'ongoing_facts', 'facts', 'character_arc_updates', 'character_arcs', 'arcs',
-      'small_summary_keywords', 'small_summary_entities'
-    ]);
-    for (const obj of plainObjs) {
-      for (const [key, val] of Object.entries(obj)) {
-        if (val === undefined || val === null) continue;
-        if (arrayKeys.has(key) && Array.isArray(val)) {
-          if (!Array.isArray(merged[key])) merged[key] = [];
-          merged[key].push(...val);
-        } else if (typeof val === 'string') {
-          if (clean(val) || merged[key] === undefined) merged[key] = val;
-        } else if (key === 'small_summary' && typeof val === 'object') {
-          merged[key] = val;
-        } else if ((key === 'entities' || key === 'entity_memory') && typeof val === 'object' && !Array.isArray(val)) {
-          if (!merged[key] || typeof merged[key] !== 'object' || Array.isArray(merged[key])) merged[key] = {};
-          for (const [k2, v2] of Object.entries(val)) {
-            if (Array.isArray(v2)) {
-              if (!Array.isArray(merged[key][k2])) merged[key][k2] = [];
-              merged[key][k2].push(...v2);
-            }
-          }
-        } else if (merged[key] === undefined || (Array.isArray(merged[key]) && !merged[key].length)) {
-          merged[key] = val;
-        } else {
-          merged[key] = val;
-        }
-      }
-    }
-    return merged;
-  }
-
-  function parseJsonPayload(raw) {
-    let text = clean(raw);
-    if (!text) throw new Error('API 返回中没有合法 JSON 对象或数组');
-    // 剔除思考模型常见 <think>/<thought>/<reasoning> 包装，避免其中方括号或花括号误导截取
-    text = text.replace(/<(?:think|thought|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
-    const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
-    const fencedObjects = [];
-    let match;
-    while ((match = fenceRe.exec(text)) !== null) {
-      const inner = clean(match[1]);
-      if (!inner) continue;
-      const direct = tryParseJsonWithRepair(inner);
-      if (direct) { fencedObjects.push(direct); continue; }
-      const spans = extractAllBalancedJsonSpans(inner);
-      if (spans.length) { fencedObjects.push(...spans); continue; }
-      try {
-        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(inner);
-        if (repaired && typeof repaired === 'object') fencedObjects.push(repaired);
-      } catch (_) {}
-    }
-    if (fencedObjects.length) {
-      const mergedFenced = mergeParsedPayloads(fencedObjects);
-      if (mergedFenced) return mergedFenced;
-    }
-
-    const strippedTop = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    if (strippedTop) {
-      const directTop = tryParseJsonWithRepair(strippedTop);
-      if (directTop) return unwrapPayloadObject(directTop);
-      const spans = extractAllBalancedJsonSpans(strippedTop);
-      if (spans.length) {
-        const mergedSpans = mergeParsedPayloads(spans);
-        if (mergedSpans) return mergedSpans;
-      }
-      try {
-        const repaired = window.WORLD_ENGINE_API?.parseJSON?.(strippedTop);
-        if (repaired && typeof repaired === 'object') return unwrapPayloadObject(repaired);
-      } catch (_) {}
-    }
-    throw new Error('API 返回中没有合法 JSON 对象或数组');
-  }
-
-  function normalizeEntityType(rawType) {
-    const key = clean(rawType).toLocaleLowerCase();
-    if (!key) return '';
-    if (ENTITY_TYPES.includes(key)) return key;
-    if (/(?:organization|organizations|\borg\b|\borgs\b|faction|group|clan|sect|guild|组织|势力|机构|门派|家族|帮派|政权|公司|军队|社团|公会|阵营)/.test(key)) return 'organization';
-    if (/(?:object|objects|\bitem\b|\bitems\b|artifact|weapon|gear|prop|tool|物品|物件|道具|装备|器物|载具|文书|装置|材料|宝物|信物)/.test(key)) return 'object';
-    if (/(?:ability|abilities|skill|power|magic|talent|technique|能力|技能|术法|天赋|权能|功法|法术|异能)/.test(key)) return 'ability';
-    if (/(?:location|locations|place|area|region|site|city|room|building|地点|场所|区域|城市|建筑|遗迹|房间|地名|空间|据点)/.test(key)) return 'location';
-    return '';
-  }
-
-  function collectEntityItems(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
-    const list = [];
-    const pushFromContainer = container => {
-      if (!container) return;
-      if (Array.isArray(container)) {
-        for (const item of container) if (item && typeof item === 'object') list.push(item);
-        return;
-      }
-      if (typeof container === 'object') {
-        const directType = normalizeEntityType(container.type || container.category || container['类型']);
-        if (directType && clean(container.name || container['名称'])) {
-          list.push(container);
-          return;
-        }
-        // 兼容按类型分组返回：{ organization: [...], object: [...], ability: [...], location: [...] }
-        for (const [groupKey, groupVal] of Object.entries(container)) {
-          const groupType = normalizeEntityType(groupKey);
-          if (!groupType || !Array.isArray(groupVal)) continue;
-          for (const item of groupVal) {
-            if (!item || typeof item !== 'object') continue;
-            list.push({ ...item, type: item.type || item['类型'] || groupType });
-          }
-        }
-      }
+      return null;
     };
-    pushFromContainer(value.entity_updates);
-    if (!list.length) pushFromContainer(value.entities);
-    if (!list.length) pushFromContainer(value.entity_memory);
-    if (!list.length) pushFromContainer(value['实体更新'] ?? value['实体'] ?? value['世界实体']);
-    // 兼容模型直接在顶层放 organization / organizations / object / ability / location 数组
-    if (!list.length) {
-      for (const [k, v] of Object.entries(value)) {
-        if (!Array.isArray(v)) continue;
-        const t = normalizeEntityType(k);
-        if (!t) continue;
-        for (const item of v) {
-          if (!item || typeof item !== 'object') continue;
-          list.push({ ...item, type: item.type || item['类型'] || t });
+    const direct = tryParse(text);
+    if (direct) return { ok: true, data: direct };
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+      const sliced = tryParse(text.slice(first, last + 1));
+      if (sliced) return { ok: true, data: sliced };
+    }
+    return { ok: false, error: '回复中没有合法 JSON 对象（请检查引号闭合与逗号语法）' };
+  }
+
+  function getNameBlacklistSet() {
+    const raw = clean(settings().nameBlacklist);
+    if (!raw) return new Set();
+    return new Set(raw.split(/\r?\n/).map(normalized).filter(Boolean));
+  }
+
+  // 兼容适配：若旧测试或老模型返回 legacy 键名（small_summary / personal_memory / entity_updates / ongoing_fact_updates），自动转为 7 表格式
+  function adaptLegacyPayload(obj, targetSheets) {
+    const adapted = { ...obj };
+    const hasModernKey = targetSheets.some(k => Object.prototype.hasOwnProperty.call(obj, k));
+    if (hasModernKey) return adapted;
+
+    const hasLegacy = Object.prototype.hasOwnProperty.call(obj, 'small_summary')
+      || Array.isArray(obj.personal_memory)
+      || Array.isArray(obj.character_profile_updates)
+      || Array.isArray(obj.entity_updates)
+      || Array.isArray(obj.ongoing_fact_updates);
+    if (!hasLegacy) return adapted;
+
+    if (targetSheets.includes('important_characters')) {
+      const upsert = [];
+      for (const upd of Array.isArray(obj.character_profile_updates) ? obj.character_profile_updates : []) {
+        const name = clean(Array.isArray(upd?.names) ? upd.names[0] : upd?.name);
+        if (!name) continue;
+        const b = upd?.basic_info || upd?.basicInfo || {};
+        upsert.push({
+          name,
+          brief_intro: clean(b.identity) || '重要角色',
+          appearance: clean(b.appearance),
+          relation_text: clean(b.relations),
+          past_experience: clean(upd?.experiences),
+          presence_status: '在场'
+        });
+      }
+      for (const pm of Array.isArray(obj.personal_memory) ? obj.personal_memory : []) {
+        const name = clean(Array.isArray(pm?.name) ? pm.name[0] : pm?.name);
+        if (!name) continue;
+        if (!upsert.some(item => normalized(item.name) === normalized(name))) {
+          upsert.push({ name, brief_intro: '重要角色', past_experience: clean(pm?.memory), presence_status: '在场' });
         }
       }
+      if (upsert.length) adapted.important_characters = { upsert, delete: [] };
     }
-    return list;
-  }
 
-  const BASIC_INFO_KEYS = ['identity', 'appearance', 'personality', 'abilities', 'relations'];
-  const BASIC_INFO_LABELS = {
-    identity: '身份',
-    appearance: '外貌',
-    personality: '性格',
-    abilities: '能力',
-    relations: '关系'
-  };
-
-  function emptyCharacterProfile() {
-    return {
-      basicInfo: { identity: '', appearance: '', personality: '', abilities: '', relations: '' },
-      experiences: ''
-    };
-  }
-
-  function ensureCharacterProfile(character) {
-    if (!character || typeof character !== 'object') return emptyCharacterProfile();
-    const raw = character.profile && typeof character.profile === 'object' ? character.profile : {};
-    const rawBasic = raw.basicInfo && typeof raw.basicInfo === 'object'
-      ? raw.basicInfo
-      : (raw.basic_info && typeof raw.basic_info === 'object' ? raw.basic_info : {});
-    character.profile = {
-      basicInfo: {
-        identity: clean(rawBasic.identity),
-        appearance: clean(rawBasic.appearance),
-        personality: clean(rawBasic.personality),
-        abilities: clean(rawBasic.abilities),
-        relations: clean(rawBasic.relations)
-      },
-      experiences: clean(raw.experiences)
-    };
-    return character.profile;
-  }
-
-  function parseBasicInfoInput(rawBasic, fallbackObj) {
-    const out = { identity: '', appearance: '', personality: '', abilities: '', relations: '' };
-    const fillFromObj = obj => {
-      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
-      const pick = (...keys) => {
-        for (const k of keys) {
-          const v = clean(obj[k]);
-          if (v) return Array.from(v).slice(0, 120).join('');
+    if (Array.isArray(obj.entity_updates)) {
+      const skills = [], items = [];
+      let latestLocation = '';
+      for (const ent of obj.entity_updates) {
+        const name = clean(ent?.name);
+        if (!name) continue;
+        if (ent.type === 'ability') {
+          skills.push({ skill_name: name, skill_type: '主动', effect_desc: clean(ent.description || ent.event) });
+        } else if (ent.type === 'object' || ent.type === 'item') {
+          items.push({ item_name: name, quantity: '1', description: clean(ent.description || ent.event), category: '物品' });
+        } else if (ent.type === 'location') {
+          latestLocation = name;
         }
-        return '';
+      }
+      if (skills.length && targetSheets.includes('protagonist_skills')) adapted.protagonist_skills = { upsert: skills, delete: [] };
+      if (items.length && targetSheets.includes('inventory')) adapted.inventory = { upsert: items, delete: [] };
+      if (latestLocation && targetSheets.includes('global_state') && !adapted.global_state) {
+        adapted.global_state = { current_location: latestLocation };
+      }
+    }
+
+    if (Array.isArray(obj.ongoing_fact_updates) && targetSheets.includes('quests_events')) {
+      const upsert = [], del = [];
+      for (const f of obj.ongoing_fact_updates) {
+        const text = clean(f?.fact);
+        if (!text) continue;
+        const title = clean(f?.subject) && clean(f.subject) !== '全局'
+          ? `${clean(f.subject)}：${Array.from(text).slice(0, 16).join('')}`
+          : Array.from(text).slice(0, 20).join('');
+        if (f.action === 'resolve') del.push(title);
+        else upsert.push({ quest_name: title, quest_type: '支线任务', issuer: clean(f?.subject), detail_desc: text, current_progress: clean(f?.category || '进行中') });
+      }
+      if (upsert.length || del.length) adapted.quests_events = { upsert, delete: del };
+    }
+
+    if (targetSheets.includes('chronicle') && clean(obj.small_summary)) {
+      adapted.chronicle = {
+        chronicle_text: clean(obj.small_summary),
+        keywords: unique(obj.small_summary_keywords),
+        entities: unique(obj.small_summary_entities),
+        impact: obj.small_summary_impact === 'key' ? 'key' : 'normal'
       };
-      if (!out.identity) out.identity = pick('identity', 'role', 'occupation', 'faction', 'background', '身份', '职业', '阵营', '背景');
-      if (!out.appearance) out.appearance = pick('appearance', 'looks', 'features', '外貌', '形象', '特征');
-      if (!out.personality) out.personality = pick('personality', 'traits', 'temperament', 'style', '性格', '性情', '特点', '风格');
-      if (!out.abilities) out.abilities = pick('abilities', 'ability', 'skills', 'strengths', 'items', '能力', '特长', '技能', '实力');
-      if (!out.relations) out.relations = pick('relations', 'relationship', 'relationships', 'ties', '关系', '人际关系', '立场');
-    };
-    if (typeof rawBasic === 'string' && clean(rawBasic)) {
-      const text = clean(rawBasic);
-      const labelMap = [
-        ['identity', /(?:身份|职业|阵营|背景)[：:]\s*([^｜|；;\n]+)/],
-        ['appearance', /(?:外貌|形象|特征)[：:]\s*([^｜|；;\n]+)/],
-        ['personality', /(?:性格|性情|特点|风格)[：:]\s*([^｜|；;\n]+)/],
-        ['abilities', /(?:能力|特长|技能|实力)[：:]\s*([^｜|；;\n]+)/],
-        ['relations', /(?:关系|人际关系)[：:]\s*([^｜|；;\n]+)/]
-      ];
-      let matchedAny = false;
-      for (const [k, re] of labelMap) {
-        const m = re.exec(text);
-        if (m && clean(m[1])) {
-          out[k] = Array.from(clean(m[1])).slice(0, 120).join('');
-          matchedAny = true;
-        }
-      }
-      if (!matchedAny) out.identity = Array.from(text).slice(0, 120).join('');
-    } else {
-      fillFromObj(rawBasic);
     }
-    fillFromObj(fallbackObj);
-    return out;
+
+    return adapted;
   }
 
-  function hasBasicInfoValue(basic) {
-    return Boolean(basic && BASIC_INFO_KEYS.some(k => clean(basic[k])));
-  }
-
-  function formatCharacterBasicInfoLine(profile) {
-    const basic = profile?.basicInfo || {};
-    return BASIC_INFO_KEYS
-      .map(k => (clean(basic[k]) ? `${BASIC_INFO_LABELS[k]}：${clean(basic[k])}` : ''))
-      .filter(Boolean)
-      .join('｜');
-  }
-
-  function parseResponse(raw, tasks) {
-    const value = parseJsonPayload(raw);
-    const nameBlacklist = configuredNameBlacklist(settings());
-    const hasMemoryPayload = Array.isArray(value) || Boolean(
-      value && typeof value === 'object' && [
-        'character_profile_updates', 'character_profiles', 'profiles', 'characters', '人物档案', '人物信息', '人物资料',
-        'personal_memory', 'memories', 'memory', '人物记忆', '人物',
-        'entity_updates', 'entities', 'entity_memory', '实体更新', '实体', '世界实体',
-        'organizations', 'organization', 'objects', 'object', 'abilities', 'ability', 'locations', 'location',
-        'ongoing_fact_updates', 'ongoing_facts', 'facts', '持续事实', '事实更新', '事实',
-        'character_arc_updates', 'character_arcs', 'arcs', '角色弧光', '人物弧光', '弧光更新'
-      ].some(key => Object.prototype.hasOwnProperty.call(value, key))
-    );
-    const profileUpdates = [];
-    const seenProfileKeys = new Map();
-    const pushProfileUpdate = (rawNames, rawBasic, rawExperiences, fallbackObj) => {
-      if (nameIsBlacklisted(rawNames, nameBlacklist)) return;
-      const names = unique(Array.isArray(rawNames) ? rawNames : [rawNames]);
-      if (!names.length) return;
-      const basicInfo = parseBasicInfoInput(rawBasic, fallbackObj);
-      const experiences = Array.from(clean(rawExperiences)).slice(0, 800).join('');
-      if (!hasBasicInfoValue(basicInfo) && !experiences) return;
-      const key = normalized(names[0]);
-      if (seenProfileKeys.has(key)) {
-        const existing = seenProfileKeys.get(key);
-        existing.name = unique([...existing.name, ...names]);
-        for (const k of BASIC_INFO_KEYS) {
-          if (basicInfo[k]) existing.basicInfo[k] = basicInfo[k];
-        }
-        if (experiences) existing.experiences = experiences;
-        return;
-      }
-      if (profileUpdates.length >= 12) return;
-      const entry = { name: names, basicInfo, experiences };
-      seenProfileKeys.set(key, entry);
-      profileUpdates.push(entry);
-    };
-    if (tasks.memory && !Array.isArray(value) && value && typeof value === 'object') {
-      const rawProfiles = value.character_profile_updates ?? value.character_profiles ?? value.profiles
-        ?? value.characters ?? value['人物档案'] ?? value['人物信息'] ?? value['人物资料'] ?? [];
-      const profileSource = Array.isArray(rawProfiles)
-        ? rawProfiles
-        : (rawProfiles && typeof rawProfiles === 'object' ? [rawProfiles] : []);
-      for (const item of profileSource) {
-        if (!item || typeof item !== 'object') continue;
-        const rawName = item.name ?? item.names ?? item.character ?? item.character_name ?? item.person ?? item['姓名'] ?? item['人物'];
-        const rawAliases = item.aliases ?? item.alias ?? item['别名'] ?? [];
-        const allNames = [...(Array.isArray(rawName) ? rawName : [rawName]), ...(Array.isArray(rawAliases) ? rawAliases : [rawAliases])];
-        const rawBasic = item.basic_info ?? item.basicInfo ?? item.info ?? item.profile ?? item['基本信息'] ?? item['基础信息'];
-        const rawExp = item.experiences ?? item.experience ?? item.biography ?? item.history ?? item.journey
-          ?? item['迄今经历'] ?? item['经历'] ?? item['履历'] ?? item['生平'];
-        pushProfileUpdate(allNames, rawBasic, rawExp, item);
-      }
+  function parseAndValidateTableResponse(rawText, targetSheets, options) {
+    const sheets = Array.isArray(targetSheets) && targetSheets.length ? targetSheets : tableKeys();
+    const extracted = extractJsonObject(rawText);
+    if (!extracted.ok) {
+      return { ok: false, errors: [extracted.error], tableOps: [], chronicleRows: [] };
     }
-    // 兼容 0.1.x：旧 API 只返回人物记忆数组。
-    const personalValue = tasks.memory ? (Array.isArray(value)
-      ? value
-      : (value?.personal_memory ?? value?.memories ?? value?.memory ?? value?.['人物记忆'] ?? value?.['人物'] ?? value?.data ?? [])) : [];
-    const personalSource = Array.isArray(personalValue)
-      ? personalValue
-      : (personalValue && typeof personalValue === 'object' ? [personalValue] : []);
-    const counts = new Map(), personal = [];
-    for (const item of personalSource) {
-      if (!item || typeof item !== 'object') continue;
-      const rawName = item.name ?? item.names ?? item.character ?? item.character_name ?? item.person ?? item.holder ?? item.who ?? item['姓名'] ?? item['人物'];
-      if (nameIsBlacklisted(rawName, nameBlacklist)) continue;
-      const names = unique(Array.isArray(rawName) ? rawName : [rawName]);
-      if (!names.length) continue;
-      // 容错：若模型把 basic_info / experiences 直接挂在 personal_memory 条目上，一并吸收进人物档案
-      const inlineBasic = item.basic_info ?? item.basicInfo ?? item['基本信息'];
-      const inlineExp = item.experiences ?? item.experience ?? item['迄今经历'] ?? item['经历'];
-      if (inlineBasic || inlineExp) pushProfileUpdate(names, inlineBasic, inlineExp, item);
-      const rawMemories = item.memory ?? item.memories ?? item.content ?? item.text ?? item.detail ?? item.summary ?? item['记忆'] ?? item['内容'];
-      const memoryTexts = Array.isArray(rawMemories)
-        ? rawMemories.map(m => clean(typeof m === 'object' ? (m?.memory ?? m?.content ?? m?.text) : m)).filter(Boolean)
-        : [clean(rawMemories)].filter(Boolean);
-      if (!memoryTexts.length) continue;
-      let time = clean(item.time ?? item['时间']);
-      if (/^(昨晚|昨天|三天前|刚才|不久前|宴会之后)$/.test(time)) time = '';
-      const rawKnown = item.known_by ?? item.knownBy ?? item.witnesses ?? item['知情人'] ?? [];
-      const knownBy = unique(Array.isArray(rawKnown) ? rawKnown : [rawKnown])
-        .filter(name => !names.some(holderName => normalized(holderName) === normalized(name)));
-      const holder = normalized(names[0]);
-      for (const memory of memoryTexts) {
-        const count = counts.get(holder) || 0;
-        if (count >= 3 || personal.length >= 8) break;
-        counts.set(holder, count + 1);
-        personal.push({ name: names, known_by: knownBy, memory, time });
-      }
-      if (personal.length >= 8) break;
-    }
-    const entitySource = tasks.memory && !Array.isArray(value) ? collectEntityItems(value) : [];
-    const entities = {};
-    for (const type of ENTITY_TYPES) entities[type] = [];
-    const perEntityCounts = new Map();
-    let entityUpdateCount = 0;
-    for (const item of entitySource) {
-      if (entityUpdateCount >= 8) break;
-      if (!item || typeof item !== 'object') continue;
-      const rawAliases = item.aliases ?? item.alias ?? item['别名'] ?? [];
-      const aliases = unique(Array.isArray(rawAliases) ? rawAliases : [rawAliases]);
-      const name = clean(item.name ?? item.entity_name ?? item.title ?? item['名称'] ?? item['实体名']);
-      if (nameIsBlacklisted([name, ...aliases], nameBlacklist)) continue;
-      const type = normalizeEntityType(item.type ?? item.category ?? item.entity_type ?? item['类型'] ?? item['分类']);
-      if (!type) continue;
-      const description = clean(item.description ?? item.desc ?? item.status ?? item['描述'] ?? item['简介'] ?? item['状态']);
-      const event = clean(item.event ?? item.change ?? item['事件'] ?? item['变化']);
-      if (!name) continue;
-      const cleanAliases = aliases.filter(alias => normalized(alias) !== normalized(name));
-      const key = `${type}:${normalized(name)}`, count = perEntityCounts.get(key) || 0;
-      if (count >= 3) continue;
-      perEntityCounts.set(key, count + 1);
-      entities[type].push({ name, aliases: cleanAliases, description, event, time: event ? sanitizeTime(item.time ?? item['时间']) : '' });
-      entityUpdateCount++;
-    }
-    let smallSummary = '';
-    let smallSummaryKeywords = [];
-    let smallSummaryEntities = [];
-    let smallSummaryImpact = 'normal';
-    if (tasks.small && !Array.isArray(value)) {
-      const rawSmall = value?.small_summary ?? value?.['阶段纪要'] ?? value?.['纪要'];
-      if (rawSmall && typeof rawSmall === 'object') {
-        smallSummary = clean(rawSmall.content || rawSmall.text);
-        smallSummaryKeywords = unique(rawSmall.keywords).slice(0, 8);
-        smallSummaryEntities = unique(rawSmall.entity_names || rawSmall.entityNames).slice(0, 12);
-        smallSummaryImpact = rawSmall.impact === 'key' ? 'key' : 'normal';
-      } else {
-        smallSummary = clean(rawSmall ?? value?.summary);
-      }
-      if (!smallSummaryKeywords.length) smallSummaryKeywords = unique(value?.small_summary_keywords ?? value?.keywords).slice(0, 8);
-      if (!smallSummaryEntities.length) smallSummaryEntities = unique(value?.small_summary_entities ?? value?.entity_names).slice(0, 12);
-      if ((value?.small_summary_impact ?? value?.impact) === 'key') smallSummaryImpact = 'key';
-    }
-    const factUpdates = [];
-    const rawFacts = tasks.memory && !Array.isArray(value)
-      ? (value?.ongoing_fact_updates ?? value?.ongoing_facts ?? value?.facts ?? value?.['持续事实'] ?? value?.['事实更新'] ?? value?.['事实'] ?? [])
-      : [];
-    const factSource = Array.isArray(rawFacts) ? rawFacts : (rawFacts && typeof rawFacts === 'object' ? [rawFacts] : []);
-    for (const item of factSource) {
-      if (!item || typeof item !== 'object') continue;
-      const action = clean(item.action) === 'resolve' ? 'resolve' : 'upsert';
-      const subject = clean(item.subject ?? item.owner ?? item.target ?? item['主体'] ?? item['对象']) || '全局';
-      const category = clean(item.category ?? item.type ?? item['分类'] ?? item['类别']) || '状态';
-      const fact = Array.from(clean(item.fact ?? item.content ?? item.description ?? item.detail ?? item.statement ?? item.text ?? item['事实'] ?? item['内容'])).slice(0, 120).join('');
-      const id = clean(item.id);
-      if (action === 'upsert' && !fact) continue;
-      if (action === 'resolve' && !id && !fact && !subject) continue;
-      if (nameIsBlacklisted([subject], nameBlacklist)) continue;
-      factUpdates.push({
-        action,
-        id,
-        category,
-        subject,
-        fact,
-        keywords: unique(item.keywords ?? item['关键词']).slice(0, 8)
-      });
-      if (factUpdates.length >= 10) break;
-    }
-    const arcUpdates = [];
-    const rawArcs = tasks.memory && !Array.isArray(value)
-      ? (value?.character_arc_updates ?? value?.character_arcs ?? value?.arcs ?? value?.['角色弧光'] ?? value?.['人物弧光'] ?? value?.['弧光更新'] ?? [])
-      : [];
-    const arcSource = Array.isArray(rawArcs) ? rawArcs : (rawArcs && typeof rawArcs === 'object' ? [rawArcs] : []);
-    for (const item of arcSource) {
-      if (!item || typeof item !== 'object') continue;
-      const rawArcName = item.name ?? item.character ?? item['角色'] ?? item['人物'] ?? item['姓名'] ?? (Array.isArray(item.names) ? item.names[0] : item.names);
-      const name = clean(rawArcName);
-      if (!name || nameIsBlacklisted([name], nameBlacklist)) continue;
-      const currentStance = Array.from(clean(item.current_stance ?? item.currentStance ?? item.stance ?? item['立场'] ?? item['态度'])).slice(0, 60).join('');
-      const arcSummary = Array.from(clean(item.arc_summary ?? item.arcSummary ?? item.summary ?? item['弧光'] ?? item['变化'] ?? item['摘要'])).slice(0, 120).join('');
-      const relationship = Array.from(clean(item.relationship ?? item.relation ?? item['关系'])).slice(0, 40).join('');
-      const pctNum = Number(item.progress_pct ?? item.progressPct ?? item.progress ?? item['进度']);
-      const progressPct = Number.isFinite(pctNum) ? Math.max(0, Math.min(100, Math.round(pctNum))) : null;
-      if (!currentStance && !arcSummary && !relationship && progressPct === null) continue;
-      arcUpdates.push({ name, currentStance, arcSummary, relationship, progressPct });
-      if (arcUpdates.length >= 6) break;
-    }
-    const memoryItemCount = personal.length + profileUpdates.length + entityUpdateCount + factUpdates.length + arcUpdates.length;
-    return {
-      personal, profileUpdates, entities, factUpdates, arcUpdates,
-      smallSummary, smallSummaryKeywords, smallSummaryEntities, smallSummaryImpact,
-      hasMemoryPayload, memoryItemCount,
-      rawKeys: value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : []
-    };
-  }
+    const schemas = tableSchemas();
+    const obj = adaptLegacyPayload(extracted.data, sheets);
+    const blacklist = getNameBlacklistSet();
+    const errors = [];
+    const tableOps = [];
+    const chronicleRows = [];
 
-  function sanitizeTime(value) {
-    const time = clean(value);
-    return /^(昨晚|昨天|三天前|刚才|不久前|宴会之后)$/.test(time) ? '' : time;
-  }
+    for (const sheetKey of sheets) {
+      const schema = schemas[sheetKey];
+      if (!schema) continue;
+      const val = obj[sheetKey];
 
-  function nextCharacterId(state) {
-    const max = (state.personal_memory || []).reduce((n, character) => {
-      const match = /^char_(\d+)$/.exec(clean(character.id));
-      return Math.max(n, match ? Number(match[1]) : 0);
-    }, 0);
-    return `char_${String(max + 1).padStart(6, '0')}`;
-  }
-
-  function findCharacter(state, names) {
-    const wanted = new Set(unique(names).map(normalized));
-    return (state.personal_memory || []).find(character =>
-      (character.names || []).some(name => wanted.has(normalized(name))));
-  }
-
-  function addKnowledge(index, names, record) {
-    for (const name of unique(names)) {
-      const key = normalized(name);
-      if (!Array.isArray(index[key])) index[key] = [];
-      if (!index[key].some(item => item.ownerId === record.ownerId && item.time === record.time && item.memory === record.memory)) {
-        index[key].push(clone(record));
-      }
-    }
-  }
-
-  function rebuildKnowledgeIndex(state) {
-    const index = {};
-    for (const character of state.personal_memory || []) {
-      for (const [time, memories] of Object.entries(character.memory || {})) {
-        for (const memory of Array.isArray(memories) ? memories : []) {
-          addKnowledge(index, character.names, { ownerId: character.id, time, memory });
-        }
-      }
-    }
-    state.knowledge_index = index;
-  }
-
-  function ensureEntityState(state) {
-    if (!state.entity_memory || typeof state.entity_memory !== 'object' || Array.isArray(state.entity_memory)) state.entity_memory = {};
-    for (const type of ENTITY_TYPES) {
-      if (!Array.isArray(state.entity_memory[type])) state.entity_memory[type] = [];
-      for (const entity of state.entity_memory[type]) {
-        const name = clean(entity?.name);
-        entity.aliases = unique(Array.isArray(entity?.aliases) ? entity.aliases : [entity?.aliases])
-          .filter(alias => normalized(alias) !== normalized(name));
-      }
-    }
-    if (!state.entity_index || typeof state.entity_index !== 'object' || Array.isArray(state.entity_index)) state.entity_index = {};
-  }
-
-  function nextEntityId(state, type) {
-    ensureEntityState(state);
-    const prefix = { organization: 'org', object: 'obj', ability: 'ability', location: 'location' }[type];
-    const pattern = new RegExp(`^${prefix}_(\\d+)$`);
-    const max = state.entity_memory[type].reduce((number, entity) => {
-      const match = pattern.exec(clean(entity.id));
-      return Math.max(number, match ? Number(match[1]) : 0);
-    }, 0);
-    return `${prefix}_${String(max + 1).padStart(6, '0')}`;
-  }
-
-  function rebuildEntityIndex(state) {
-    ensureEntityState(state);
-    const index = {};
-    for (const type of ENTITY_TYPES) {
-      for (const entity of state.entity_memory[type]) {
-        if (!clean(entity.id)) entity.id = nextEntityId(state, type);
-        const names = unique([entity.name, ...(entity.aliases || [])]);
-        for (const name of names) index[`${type}:${normalized(name)}`] = entity.id;
-      }
-    }
-    state.entity_index = index;
-  }
-
-  function repairStateIndexes(state, previousState) {
-    if (!state || typeof state !== 'object' || Array.isArray(state)) return state;
-    const oldState = previousState && typeof previousState === 'object' ? previousState : state;
-    const oldIndex = clone(oldState.knowledge_index || {});
-    const aliasTargets = {};
-    const removedAliases = new Set();
-    for (const oldPerson of oldState.personal_memory || []) {
-      const current = (state.personal_memory || []).find(person => person.id === oldPerson.id);
-      if (!current) {
-        for (const oldName of oldPerson.names || []) removedAliases.add(normalized(oldName));
-        continue;
-      }
-      for (const oldName of oldPerson.names || []) aliasTargets[normalized(oldName)] = unique(current.names || []);
-    }
-    rebuildKnowledgeIndex(state);
-    const validRecords = new Set();
-    for (const person of state.personal_memory || []) {
-      for (const [time, memories] of Object.entries(person.memory || {})) {
-        for (const memory of Array.isArray(memories) ? memories : []) validRecords.add(`${person.id}\u0000${time}\u0000${memory}`);
-      }
-    }
-    for (const [oldName, records] of Object.entries(oldIndex)) {
-      if (removedAliases.has(normalized(oldName))) continue;
-      const targets = aliasTargets[normalized(oldName)] || [oldName];
-      for (const record of Array.isArray(records) ? records : []) {
-        if (!validRecords.has(`${record.ownerId}\u0000${record.time}\u0000${record.memory}`)) continue;
-        addKnowledge(state.knowledge_index, targets, record);
-      }
-    }
-    rebuildEntityIndex(state);
-    return state;
-  }
-
-  function findEntity(state, type, name, aliases) {
-    ensureEntityState(state);
-    const names = unique([name, ...(aliases || [])]);
-    let id = names.map(item => state.entity_index[`${type}:${normalized(item)}`]).find(Boolean);
-    let entity = id && state.entity_memory[type].find(item => item.id === id);
-    if (!entity) entity = state.entity_memory[type].find(item => {
-      const existing = unique([item.name, ...(item.aliases || [])]).map(normalized);
-      return names.some(candidate => existing.includes(normalized(candidate)));
-    });
-    if (entity) {
-      if (!clean(entity.id)) entity.id = nextEntityId(state, type);
-      for (const candidate of names) state.entity_index[`${type}:${normalized(candidate)}`] = entity.id;
-    }
-    return entity;
-  }
-
-  function mergeEntityMemories(state, groups) {
-    ensureEntityState(state);
-    if (!Object.keys(state.entity_index).length) rebuildEntityIndex(state);
-    const result = { entities: 0, history: 0, descriptions: 0 };
-    for (const type of ENTITY_TYPES) {
-      for (const item of groups?.[type] || []) {
-        let entity = findEntity(state, type, item.name, item.aliases);
-        let isNew = false;
-        if (!entity) {
-          entity = { id: nextEntityId(state, type), name: item.name, aliases: unique(item.aliases), description: '', history: [] };
-          state.entity_memory[type].push(entity);
-          state.entity_index[`${type}:${normalized(item.name)}`] = entity.id;
-          result.entities++;
-          isNew = true;
-        }
-        entity.aliases = unique([...(entity.aliases || []), ...(item.aliases || []),
-          normalized(entity.name) === normalized(item.name) ? '' : item.name])
-          .filter(alias => normalized(alias) !== normalized(entity.name));
-        for (const candidate of [entity.name, ...entity.aliases]) {
-          state.entity_index[`${type}:${normalized(candidate)}`] = entity.id;
-        }
-        if (item.description && entity.description !== item.description) {
-          entity.description = item.description;
-          if (!isNew) result.descriptions++;
-        }
-        if (!Array.isArray(entity.history)) entity.history = [];
-        if (item.event && !entity.history.some(old => clean(old.time) === clean(item.time) && clean(old.event) === clean(item.event))) {
-          entity.history.push({ time: clean(item.time), event: clean(item.event) });
-          result.history++;
-        }
-      }
-    }
-    return result;
-  }
-
-  const MAX_STORED_MEMORIES_PER_CHAR = 30;
-  function trimCharacterMemories(character) {
-    if (!character?.memory || typeof character.memory !== 'object') return;
-    const keys = Object.keys(character.memory);
-    let total = keys.reduce((sum, k) => sum + (Array.isArray(character.memory[k]) ? character.memory[k].length : 0), 0);
-    while (total > MAX_STORED_MEMORIES_PER_CHAR) {
-      const firstNonEmpty = Object.keys(character.memory).find(k => Array.isArray(character.memory[k]) && character.memory[k].length > 0);
-      if (firstNonEmpty === undefined) break;
-      character.memory[firstNonEmpty].shift();
-      if (!character.memory[firstNonEmpty].length) delete character.memory[firstNonEmpty];
-      total--;
-    }
-  }
-
-  function mergeMemories(state, items) {
-    if (!state.knowledge_index || typeof state.knowledge_index !== 'object') rebuildKnowledgeIndex(state);
-    let added = 0;
-    for (const item of items) {
-      let character = findCharacter(state, item.name);
-      if (!character) {
-        character = { id: nextCharacterId(state), names: [], memory: {} };
-        state.personal_memory.push(character);
-      }
-      character.names = unique([...(character.names || []), ...item.name]);
-      if (!character.memory || typeof character.memory !== 'object' || Array.isArray(character.memory)) character.memory = {};
-      const time = item.time || '';
-      if (!Array.isArray(character.memory[time])) character.memory[time] = [];
-      const exists = Object.values(character.memory).some(list => Array.isArray(list) && list.includes(item.memory));
-      if (!exists) {
-        character.memory[time].push(item.memory);
-        trimCharacterMemories(character);
-        added++;
-      }
-      const record = { ownerId: character.id, time, memory: item.memory };
-      addKnowledge(state.knowledge_index, character.names, record); // 持有者本人自动补入
-      for (const knowerName of item.known_by) {
-        let knower = findCharacter(state, [knowerName]);
-        if (!knower) {
-          knower = { id: nextCharacterId(state), names: [knowerName], memory: {} };
-          state.personal_memory.push(knower);
-        }
-        addKnowledge(state.knowledge_index, knower.names, record);
-      }
-    }
-    return added;
-  }
-
-  function mergeCharacterProfiles(state, profileUpdates, layer) {
-    if (!Array.isArray(state.personal_memory)) state.personal_memory = [];
-    let updated = 0;
-    const targetLayer = Number.isFinite(Number(layer)) ? Number(layer) : currentLayer();
-    for (const item of Array.isArray(profileUpdates) ? profileUpdates : []) {
-      if (!item || typeof item !== 'object') continue;
-      const names = unique(Array.isArray(item.name) ? item.name : [item.name]);
-      if (!names.length) continue;
-      let character = findCharacter(state, names);
-      let isNew = false;
-      if (!character) {
-        character = { id: nextCharacterId(state), names: [], memory: {}, profile: emptyCharacterProfile() };
-        state.personal_memory.push(character);
-        isNew = true;
-      }
-      character.names = unique([...(character.names || []), ...names]);
-      const profile = ensureCharacterProfile(character);
-      let changed = isNew;
-      const incomingBasic = item.basicInfo || item.basic_info || {};
-      for (const key of BASIC_INFO_KEYS) {
-        const val = Array.from(clean(incomingBasic[key])).slice(0, 120).join('');
-        if (val && profile.basicInfo[key] !== val) {
-          profile.basicInfo[key] = val;
-          changed = true;
-        }
-      }
-      const exp = Array.from(clean(item.experiences)).slice(0, 800).join('');
-      if (exp && profile.experiences !== exp) {
-        profile.experiences = exp;
-        changed = true;
-      }
-      if (changed) {
-        profile.updatedLayer = targetLayer;
-        updated++;
-      }
-    }
-    return updated;
-  }
-
-  function replaceKnownByRecords(state, ownerId, records) {
-    if (!state || typeof state !== 'object') return state;
-    if (!state.knowledge_index || typeof state.knowledge_index !== 'object' || Array.isArray(state.knowledge_index)) state.knowledge_index = {};
-    const owner = (state.personal_memory || []).find(character => character.id === ownerId);
-    if (!owner) return state;
-    for (const [name, indexed] of Object.entries(state.knowledge_index)) {
-      state.knowledge_index[name] = (Array.isArray(indexed) ? indexed : []).filter(record => record.ownerId !== ownerId);
-      if (!state.knowledge_index[name].length) delete state.knowledge_index[name];
-    }
-    for (const item of records || []) {
-      const time = clean(item?.time), memory = clean(item?.memory ?? item?.content);
-      if (!memory) continue;
-      const record = { ownerId, time, memory };
-      addKnowledge(state.knowledge_index, owner.names, record);
-      for (const knowerName of unique(item?.known_by).filter(name => !(owner.names || []).some(alias => normalized(alias) === normalized(name)))) {
-        let knower = findCharacter(state, [knowerName]);
-        if (!knower) {
-          knower = { id: nextCharacterId(state), names: [knowerName], memory: {} };
-          state.personal_memory.push(knower);
-        }
-        addKnowledge(state.knowledge_index, knower.names, record);
-      }
-    }
-    return state;
-  }
-
-  function ensureStructuredMemoryState(state) {
-    if (!state || typeof state !== 'object') return state;
-    if (!Array.isArray(state.ongoing_facts)) state.ongoing_facts = [];
-    if (!Array.isArray(state.character_arcs)) state.character_arcs = [];
-    return state;
-  }
-
-  function nextOngoingFactId(state) {
-    const max = (state.ongoing_facts || []).reduce((n, item) => {
-      const match = /^fact_(\d+)$/.exec(clean(item?.id));
-      return Math.max(n, match ? Number(match[1]) : 0);
-    }, 0);
-    return `fact_${String(max + 1).padStart(6, '0')}`;
-  }
-
-  function nextCharacterArcId(state) {
-    const max = (state.character_arcs || []).reduce((n, item) => {
-      const match = /^arc_(\d+)$/.exec(clean(item?.id));
-      return Math.max(n, match ? Number(match[1]) : 0);
-    }, 0);
-    return `arc_${String(max + 1).padStart(6, '0')}`;
-  }
-
-  function clampProgressPct(value, fallback = 0) {
-    const num = Number(value);
-    if (!Number.isFinite(num)) return fallback;
-    return Math.max(0, Math.min(100, Math.round(num)));
-  }
-
-  function mergeOngoingFacts(state, factUpdates, layer, sourceRefs, worldCommitId) {
-    ensureStructuredMemoryState(state);
-    let changed = 0;
-    const targetLayer = Number.isFinite(Number(layer)) ? Number(layer) : currentLayer();
-    const originChatId = data()?.getChatId?.() || 'default';
-    for (const item of Array.isArray(factUpdates) ? factUpdates : []) {
-      if (!item || typeof item !== 'object') continue;
-      const action = clean(item.action) === 'resolve' ? 'resolve' : 'upsert';
-      const itemId = clean(item.id);
-      const subject = clean(item.subject) || '全局';
-      const category = clean(item.category) || '状态';
-      const factText = Array.from(clean(item.fact || item.content)).slice(0, 120).join('');
-      const keywords = unique(item.keywords);
-      if (action === 'resolve') {
-        if (itemId) {
-          const target = state.ongoing_facts.find(existing => existing.status !== 'resolved' && existing.id === itemId);
-          if (target) {
-            target.status = 'resolved';
-            target.updatedLayer = targetLayer;
-            changed++;
-          }
+      if (schema.mode === 'singleton') {
+        if (val == null) continue;
+        if (typeof val !== 'object' || Array.isArray(val)) {
+          errors.push(`${schema.name} (${sheetKey}) 必须为 JSON 对象或 null`);
           continue;
         }
-        // 缺少 id 时禁止空文本或过短片段通配完结同一主体下的多条事实，且最多完结最匹配的一条
-        const factNorm = normalized(factText);
-        if (factNorm.length < 4) continue;
-        const candidates = state.ongoing_facts.filter(existing =>
-          existing.status !== 'resolved'
-          && normalized(existing.subject) === normalized(subject)
-          && normalized(existing.category) === normalized(category)
-        );
-        const matched = candidates.find(existing => normalized(existing.fact) === factNorm)
-          || candidates.find(existing => {
-            const existingNorm = normalized(existing.fact);
-            return existingNorm.includes(factNorm) || factNorm.includes(existingNorm);
-          });
-        if (matched) {
-          matched.status = 'resolved';
-          matched.updatedLayer = targetLayer;
-          changed++;
+        const hasAnyValue = schema.columns.some(col => !col.readonly && clean(val[col.key]) !== '');
+        if (hasAnyValue) {
+          tableOps.push({ sheet: sheetKey, op: 'upsert', data: clone(val) });
         }
         continue;
       }
-      if (!factText) continue;
-      const byId = itemId ? state.ongoing_facts.find(entry => entry.id === itemId) : null;
-      const exactSame = state.ongoing_facts.find(entry =>
-        entry.status === 'active'
-        && normalized(entry.category) === normalized(category)
-        && normalized(entry.subject) === normalized(subject)
-        && normalized(entry.fact) === normalized(factText)
-      );
-      if (byId) {
-        byId.category = category;
-        byId.subject = subject;
-        byId.fact = factText;
-        byId.keywords = unique([...(byId.keywords || []), ...keywords]);
-        byId.status = 'active';
-        byId.updatedLayer = targetLayer;
-        changed++;
-      } else if (exactSame) {
-        exactSame.keywords = unique([...(exactSame.keywords || []), ...keywords]);
-        exactSame.updatedLayer = targetLayer;
-      } else {
-        state.ongoing_facts.push({
-          id: nextOngoingFactId(state),
-          category,
-          subject,
-          fact: factText,
-          keywords,
-          status: 'active',
-          startLayer: targetLayer,
-          updatedLayer: targetLayer,
-          ...(worldCommitId ? { worldCommitId: clean(worldCommitId), source: 'world_engine' } : {}),
-          sourceRefs: Array.isArray(sourceRefs) ? clone(sourceRefs) : [],
-          originChatId
+
+      if (schema.mode === 'keyed') {
+        if (val == null) continue;
+        let upsertList = [], deleteList = [];
+        if (Array.isArray(val)) {
+          upsertList = val;
+        } else if (typeof val === 'object') {
+          if (val.upsert !== undefined && !Array.isArray(val.upsert)) {
+            errors.push(`${schema.name} (${sheetKey}).upsert 必须为数组`);
+            continue;
+          }
+          if (val.delete !== undefined && !Array.isArray(val.delete)) {
+            errors.push(`${schema.name} (${sheetKey}).delete 必须为数组`);
+            continue;
+          }
+          upsertList = Array.isArray(val.upsert) ? val.upsert : [];
+          deleteList = Array.isArray(val.delete) ? val.delete : [];
+        } else {
+          errors.push(`${schema.name} (${sheetKey}) 必须为 { upsert: [], delete: [] } 对象`);
+          continue;
+        }
+        const pk = schema.primaryKey;
+        upsertList.forEach((row, idx) => {
+          if (!row || typeof row !== 'object' || Array.isArray(row)) {
+            errors.push(`${schema.name} (${sheetKey}).upsert[${idx}] 必须为对象`);
+            return;
+          }
+          const pkVal = clean(row[pk] ?? row.name);
+          if (!pkVal) {
+            errors.push(`${schema.name} (${sheetKey}).upsert[${idx}] 缺少必填主键字段 ${pk}`);
+            return;
+          }
+          if (blacklist.size && blacklist.has(normalized(pkVal))) return;
+          const payload = { ...row, [pk]: pkVal };
+          tableOps.push({ sheet: sheetKey, op: 'upsert', key: pkVal, data: payload });
         });
-        changed++;
+        for (const item of deleteList) {
+          const delKey = clean(typeof item === 'object' ? (item?.[pk] ?? item?.key ?? item?.name) : item);
+          if (delKey) tableOps.push({ sheet: sheetKey, op: 'delete', key: delKey });
+        }
+        continue;
+      }
+
+      if (schema.mode === 'append' && sheetKey === 'chronicle') {
+        const list = Array.isArray(val) ? val : (val && typeof val === 'object' ? [val] : []);
+        if (!list.length) {
+          errors.push('纪要表 (chronicle) 缺少必填记录对象，必须提供 chronicle_text');
+          continue;
+        }
+        list.forEach((entry, idx) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            errors.push(`纪要表 chronicle[${idx}] 必须为对象`);
+            return;
+          }
+          const text = clean(entry.chronicle_text ?? entry.content);
+          if (!text) {
+            errors.push(`纪要表 chronicle[${idx}] 缺少非空 chronicle_text 正文`);
+            return;
+          }
+          chronicleRows.push({
+            code_index: clean(entry.code_index ?? entry.codeIndex),
+            time_span: clean(entry.time_span ?? entry.timeSpan),
+            summary: clean(entry.summary),
+            chronicle_text: text,
+            key_dialogue: clean(entry.key_dialogue ?? entry.keyDialogue),
+            keywords: unique(entry.keywords),
+            entityNames: unique(entry.entities ?? entry.entityNames),
+            impactLevel: entry.impact === 'key' || entry.impactLevel === 'key' ? 'key' : 'normal'
+          });
+        });
       }
     }
-    return changed;
-  }
 
-  function mergeCharacterArcs(state, arcUpdates, layer) {
-    ensureStructuredMemoryState(state);
-    if (!Array.isArray(state.personal_memory)) state.personal_memory = [];
-    let updated = 0;
-    const targetLayer = Number.isFinite(Number(layer)) ? Number(layer) : currentLayer();
-    const originChatId = data()?.getChatId?.() || 'default';
-    for (const item of Array.isArray(arcUpdates) ? arcUpdates : []) {
-      if (!item || typeof item !== 'object') continue;
-      const name = clean(item.name);
-      if (!name) continue;
-      let character = findCharacter(state, [name]);
-      if (!character) {
-        character = { id: nextCharacterId(state), names: [name], memory: {} };
-        state.personal_memory.push(character);
-      }
-      let arc = state.character_arcs.find(entry =>
-        (entry.characterId && entry.characterId === character.id)
-        || (entry.names || []).some(n => (character.names || []).some(cn => normalized(cn) === normalized(n)))
-      );
-      if (!arc) {
-        arc = {
-          id: nextCharacterArcId(state),
-          characterId: character.id,
-          names: unique(character.names),
-          currentStance: '',
-          arcSummary: '',
-          relationship: '',
-          progressPct: 0,
-          updatedLayer: targetLayer,
-          originChatId
-        };
-        state.character_arcs.push(arc);
-      }
-      arc.characterId = character.id;
-      arc.names = unique([...(arc.names || []), ...(character.names || []), name]);
-      const stance = clean(item.currentStance ?? item.current_stance);
-      const summary = clean(item.arcSummary ?? item.arc_summary);
-      const relation = clean(item.relationship);
-      if (stance) arc.currentStance = Array.from(stance).slice(0, 60).join('');
-      if (summary) arc.arcSummary = Array.from(summary).slice(0, 120).join('');
-      if (relation) arc.relationship = Array.from(relation).slice(0, 40).join('');
-      if (item.progressPct != null || item.progress_pct != null) {
-        arc.progressPct = clampProgressPct(item.progressPct ?? item.progress_pct, arc.progressPct);
-      }
-      arc.updatedLayer = targetLayer;
-      updated++;
+    if (errors.length) {
+      return { ok: false, errors, tableOps, chronicleRows, rawParsed: obj };
     }
-    return updated;
+    return { ok: true, errors: [], tableOps, chronicleRows, rawParsed: obj };
   }
 
-  function ensureEventState(state) {
-    if (!state.event_memory || typeof state.event_memory !== 'object' || Array.isArray(state.event_memory)) state.event_memory = {};
-    if (!Array.isArray(state.event_memory.small_summaries)) state.event_memory.small_summaries = [];
-    delete state.event_memory.big_summary;
-    delete state.event_memory.big_summaries;
-    delete state.event_memory.big_summary_cursor;
-    return state.event_memory;
-  }
-
-  function isDialogueSummary(item) {
-    return Boolean(item && item.source !== 'world_engine');
-  }
-
-  function isCurrentChatRecord(item) {
-    const origin = clean(item?.originChatId);
-    const cur = clean(data()?.getChatId?.());
-    return !origin || !cur || origin === cur;
-  }
-
-  function sortSmallSummaries(items) {
-    const source = Array.isArray(items) ? items : [];
-    const inherited = [];
-    const current = [];
-    for (const item of source) {
-      if (!isCurrentChatRecord(item)) inherited.push(item);
-      else current.push(item);
-    }
-    current.sort((a, b) => {
-      const sa = Number(a?.startLayer) || 0;
-      const sb = Number(b?.startLayer) || 0;
-      if (sa !== sb) return sa - sb;
-      const ea = Number(a?.endLayer) || 0;
-      const eb = Number(b?.endLayer) || 0;
-      if (ea !== eb) return ea - eb;
-      const wa = a?.source === 'world_engine' ? 1 : 0;
-      const wb = b?.source === 'world_engine' ? 1 : 0;
-      if (wa !== wb) return wa - wb;
-      return clean(a?.id).localeCompare(clean(b?.id));
-    });
-    return [...inherited, ...current];
-  }
-
-  function sortTimelineNodes(nodes) {
-    const source = Array.isArray(nodes) ? nodes : [];
-    const inherited = [];
-    const current = [];
-    for (const node of source) {
-      if (!isCurrentChatRecord(node)) inherited.push(node);
-      else current.push(node);
-    }
-    current.sort((a, b) => {
-      const sa = Number(a?.startLayer) || 0;
-      const sb = Number(b?.startLayer) || 0;
-      if (sa !== sb) return sa - sb;
-      const ea = Number(a?.endLayer) || 0;
-      const eb = Number(b?.endLayer) || 0;
-      if (ea !== eb) return ea - eb;
-      const ka = a?.kind === 'manual_snapshot' ? 2 : (a?.kind === 'world_link' ? 1 : 0);
-      const kb = b?.kind === 'manual_snapshot' ? 2 : (b?.kind === 'world_link' ? 1 : 0);
-      if (ka !== kb) return ka - kb;
-      return clean(a?.id).localeCompare(clean(b?.id));
-    });
-    return [...inherited, ...current];
-  }
-
-  function hasSealedBaseline(state) {
-    if (!state || typeof state !== 'object') return false;
-    if (state.rebaseLayer !== null && state.rebaseLayer !== '' && Number.isFinite(Number(state.rebaseLayer))) {
-      return true;
-    }
-    const eventMemory = ensureEventState(state);
-    return eventMemory.small_summaries.some(item =>
-      isDialogueSummary(item) && (!Array.isArray(item.sourceRefs) || !item.sourceRefs.length)
-    );
-  }
+  // ==================== 时间线重放、水位线与覆盖统计 ====================
 
   function ensureTimelineState(state) {
-    if (!state.timeline || typeof state.timeline !== 'object' || Array.isArray(state.timeline)) {
-      // MEMORY_ENGINE_DATA.normalizeState normally creates this; the fallback protects tests and partial imports.
-      const originChatId = data()?.getChatId?.() || 'default';
-      state.timeline = {
-        version: 1,
-        originChatId,
-        root: {
-          id: `root:${originChatId}`,
-          originChatId,
-          createdAt: Date.now(),
-          base: {
-            personal_memory: clone(state.personal_memory || []),
-            knowledge_index: clone(state.knowledge_index || {}),
-            entity_memory: clone(state.entity_memory || {}),
-            entity_index: clone(state.entity_index || {}),
-            ongoing_facts: clone(state.ongoing_facts || []),
-            character_arcs: clone(state.character_arcs || []),
-            round: Math.max(0, Number(state.round) || 0),
-            chatLayer: state.chatLayer ?? null
-          }
-        },
-        nodes: []
-      };
+    if (!state.timeline || typeof state.timeline !== 'object') {
+      state.timeline = data().normalizeState(state).timeline;
     }
     if (!Array.isArray(state.timeline.nodes)) state.timeline.nodes = [];
     return state.timeline;
   }
 
-  function nextTimelineNodeId(timeline) {
-    const max = (timeline.nodes || []).reduce((number, node) => {
-      const match = /^memory_(\d+)$/.exec(clean(node?.id));
-      return Math.max(number, match ? Number(match[1]) : 0);
-    }, 0);
-    return `memory_${String(max + 1).padStart(6, '0')}`;
+  function sortChronicleRows(rows) {
+    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
+      const aEnd = Number.isFinite(Number(a?.endLayer)) ? Number(a.endLayer) : 0;
+      const bEnd = Number.isFinite(Number(b?.endLayer)) ? Number(b.endLayer) : 0;
+      if (aEnd !== bEnd) return aEnd - bEnd;
+      const aStart = Number.isFinite(Number(a?.startLayer)) ? Number(a.startLayer) : 0;
+      const bStart = Number.isFinite(Number(b?.startLayer)) ? Number(b.startLayer) : 0;
+      if (aStart !== bStart) return aStart - bStart;
+      return String(a?.id || '').localeCompare(String(b?.id || ''));
+    });
   }
 
-  function sourceBounds(refs, fallbackLayer) {
-    const list = Array.isArray(refs) ? refs : [];
-    const all = chat();
-    // 楼层记录只看 AI 实际楼层号（例如第 13 层是 AI 回复，直接记为 startLayer=13, endLayer=13，不把前置用户输入层算入范围）
-    const aiLayers = list
-      .filter(ref => {
-        if (!ref || ref.synthetic) return false;
-        if (ref.role === 'assistant') return true;
-        if (ref.role === 'user') return false;
-        const l = Number(ref.layer);
-        return Number.isFinite(l) && all[l] && !all[l].is_user;
-      })
-      .map(ref => Number(ref.layer))
-      .filter(Number.isFinite);
-    const layers = aiLayers.length
-      ? aiLayers
-      : list.map(ref => Number(ref?.layer)).filter(Number.isFinite);
-    const fallback = Number.isFinite(Number(fallbackLayer)) ? Number(fallbackLayer) : currentLayer();
-    return {
-      startLayer: layers.length ? Math.min(...layers) : fallback,
-      endLayer: layers.length ? Math.max(...layers) : fallback
+  function isCurrentChatRecord(item) {
+    const cid = clean(data()?.getChatId?.() || 'default');
+    const recCid = clean(item?.originChatId);
+    return !recCid || recCid === cid;
+  }
+
+  function aiLayersCoveredByRecord(record) {
+    const out = [];
+    const refs = Array.isArray(record?.sourceRefs) ? record.sourceRefs : [];
+    const assistantRefs = refs.filter(r => r && !r.synthetic && r.role === 'assistant' && Number.isFinite(Number(r.layer)));
+    if (assistantRefs.length) {
+      for (const r of assistantRefs) out.push(Number(r.layer));
+      return unique(out).map(Number);
+    }
+    if (record?.source !== 'world_engine' && Number.isFinite(Number(record?.startLayer)) && Number.isFinite(Number(record?.endLayer))) {
+      const s = Number(record.startLayer), e = Number(record.endLayer);
+      if (e >= s && (s > 0 || e > 0)) {
+        for (const l of collectEligibleAiLayers(settings(), s, e)) out.push(l);
+      }
+    }
+    return out;
+  }
+
+  function hasSealedBaseline(state) {
+    return state?.rebaseLayer !== null && state?.rebaseLayer !== undefined && Number.isFinite(Number(state.rebaseLayer));
+  }
+
+  function recomputeWatermarks(state) {
+    const tl = ensureTimelineState(state);
+    const wm = data().emptyWatermarks();
+    const rebase = hasSealedBaseline(state) ? Number(state.rebaseLayer) : null;
+    for (const k of tableKeys()) wm[k] = rebase;
+
+    for (const node of tl.nodes) {
+      if (!node || node.status !== 'valid' || node.kind === 'world_link' || node.kind === 'manual_snapshot') continue;
+      if (!isCurrentChatRecord(node)) continue;
+      const end = Number.isFinite(Number(node.endLayer)) ? Number(node.endLayer) : null;
+      if (end === null) continue;
+      const targets = Array.isArray(node.targetSheets) && node.targetSheets.length
+        ? node.targetSheets
+        : tableKeys().filter(k => k !== 'chronicle');
+      for (const k of targets) {
+        if (wm[k] === null || end > wm[k]) wm[k] = end;
+      }
+    }
+
+    for (const row of state.tables?.chronicle || []) {
+      if (!row || row.status === 'stale' || row.status === 'failed' || row.source === 'world_engine') continue;
+      if (!isCurrentChatRecord(row)) continue;
+      const end = Number.isFinite(Number(row.endLayer)) ? Number(row.endLayer) : null;
+      if (end !== null && (wm.chronicle === null || end > wm.chronicle)) wm.chronicle = end;
+    }
+
+    state.tableWatermarks = wm;
+    const nonChron = tableKeys().filter(k => k !== 'chronicle').map(k => wm[k]).filter(v => v !== null);
+    state.chatLayer = nonChron.length ? Math.max(...nonChron) : (wm.chronicle !== null ? wm.chronicle : rebase);
+    if (!state.event_memory) state.event_memory = { small_summaries: [], small_summary_layer: null };
+    state.event_memory.small_summary_layer = wm.chronicle;
+    return wm;
+  }
+
+  function sortTimelineNodesPreservingSnapshots(nodes) {
+    const list = Array.isArray(nodes) ? nodes : [];
+    const out = [];
+    let segment = [];
+    const flushSegment = () => {
+      if (!segment.length) return;
+      segment.sort((a, b) => {
+        const aEnd = Number.isFinite(Number(a?.endLayer)) ? Number(a.endLayer) : 0;
+        const bEnd = Number.isFinite(Number(b?.endLayer)) ? Number(b.endLayer) : 0;
+        if (aEnd !== bEnd) return aEnd - bEnd;
+        const aStart = Number.isFinite(Number(a?.startLayer)) ? Number(a.startLayer) : 0;
+        const bStart = Number.isFinite(Number(b?.startLayer)) ? Number(b.startLayer) : 0;
+        if (aStart !== bStart) return aStart - bStart;
+        return (Number(a?.createdAt) || 0) - (Number(b?.createdAt) || 0);
+      });
+      out.push(...segment);
+      segment = [];
     };
-  }
-
-  function nodeHasMemoryContent(node) {
-    if (!node || typeof node !== 'object') return false;
-    if (Array.isArray(node.personal) && node.personal.length > 0) return true;
-    if (Array.isArray(node.profileUpdates) && node.profileUpdates.length > 0) return true;
-    if (Array.isArray(node.factUpdates) && node.factUpdates.length > 0) return true;
-    if (Array.isArray(node.arcUpdates) && node.arcUpdates.length > 0) return true;
-    if (node.entities && typeof node.entities === 'object') {
-      for (const type of ENTITY_TYPES) {
-        if (Array.isArray(node.entities[type]) && node.entities[type].length > 0) return true;
-      }
-    }
-    return false;
-  }
-
-  function snapshotHasMemory(snap) {
-    if (!snap || typeof snap !== 'object') return false;
-    return Boolean(
-      (snap.personal_memory?.length || 0) > 0
-      || (snap.ongoing_facts?.length || 0) > 0
-      || (snap.character_arcs?.length || 0) > 0
-      || ENTITY_TYPES.some(type => (snap.entity_memory?.[type]?.length || 0) > 0)
-    );
-  }
-
-  function mergeExtractedIntoNode(node, extracted) {
-    if (!node || !extracted) return false;
-    let mergedAny = false;
-    if (!Array.isArray(node.personal)) node.personal = [];
-    for (const item of extracted.personal || []) {
-      const key = JSON.stringify([unique(item?.name), clean(item?.time), clean(item?.memory)]);
-      if (!node.personal.some(old => JSON.stringify([unique(old?.name), clean(old?.time), clean(old?.memory)]) === key)) {
-        node.personal.push(clone(item));
-        mergedAny = true;
-      }
-    }
-    if (!Array.isArray(node.profileUpdates)) node.profileUpdates = [];
-    for (const item of extracted.profileUpdates || []) {
-      const names = unique(Array.isArray(item?.name) ? item.name : [item?.name]);
-      if (!names.length) continue;
-      const existing = node.profileUpdates.find(old =>
-        unique(Array.isArray(old?.name) ? old.name : [old?.name]).some(n => names.some(c => normalized(c) === normalized(n)))
-      );
-      if (existing) {
-        existing.name = unique([...(Array.isArray(existing.name) ? existing.name : [existing.name]), ...names]);
-        existing.basicInfo = { ...(existing.basicInfo || {}) };
-        for (const k of BASIC_INFO_KEYS) {
-          if (clean(item?.basicInfo?.[k])) existing.basicInfo[k] = clean(item.basicInfo[k]);
-        }
-        if (clean(item?.experiences)) existing.experiences = clean(item.experiences);
+    for (const node of list) {
+      if (node?.kind === 'manual_snapshot') {
+        flushSegment();
+        out.push(node);
       } else {
-        node.profileUpdates.push(clone(item));
-      }
-      mergedAny = true;
-    }
-    if (!node.entities || typeof node.entities !== 'object') node.entities = {};
-    for (const type of ENTITY_TYPES) {
-      if (!Array.isArray(node.entities[type])) node.entities[type] = [];
-      for (const item of extracted.entities?.[type] || []) {
-        const key = JSON.stringify([normalized(item?.name), clean(item?.description), clean(item?.event), clean(item?.time)]);
-        if (!node.entities[type].some(old => JSON.stringify([normalized(old?.name), clean(old?.description), clean(old?.event), clean(old?.time)]) === key)) {
-          node.entities[type].push(clone(item));
-          mergedAny = true;
-        }
+        segment.push(node);
       }
     }
-    if (!Array.isArray(node.factUpdates)) node.factUpdates = [];
-    for (const item of extracted.factUpdates || []) {
-      const key = JSON.stringify([clean(item?.action), clean(item?.id), normalized(item?.subject), normalized(item?.category), clean(item?.fact)]);
-      if (!node.factUpdates.some(old => JSON.stringify([clean(old?.action), clean(old?.id), normalized(old?.subject), normalized(old?.category), clean(old?.fact)]) === key)) {
-        node.factUpdates.push(clone(item));
-        mergedAny = true;
-      }
-    }
-    if (!Array.isArray(node.arcUpdates)) node.arcUpdates = [];
-    for (const item of extracted.arcUpdates || []) {
-      const name = clean(item?.name);
-      if (!name) continue;
-      const idx = node.arcUpdates.findIndex(old => normalized(old?.name) === normalized(name));
-      if (idx >= 0) node.arcUpdates[idx] = clone(item);
-      else node.arcUpdates.push(clone(item));
-      mergedAny = true;
-    }
-    if (mergedAny) {
-      node.memoryExtracted = true;
-      node.revision = Math.max(1, Number(node.revision) || 1) + 1;
-      node.updatedAt = Date.now();
-    }
-    return mergedAny;
+    flushSegment();
+    return out;
   }
 
-  function appendTimelineNode(state, extracted, task, options) {
-    const timeline = ensureTimelineState(state), api = timelineApi();
-    let refs = Array.isArray(task?.sourceRefs) ? clone(task.sourceRefs) : [];
-    if (!refs.length && task?.kind !== 'world_link' && Number.isFinite(Number(task?.startLayer)) && Number.isFinite(Number(task?.endLayer))) {
-      const rawStart = Number(task.startLayer);
-      const captureStart = Number.isFinite(Number(task?.dialogueStart))
-        ? Number(task.dialogueStart)
-        : (rawStart > 0 && chat()[rawStart - 1]?.is_user ? rawStart - 1 : rawStart);
-      refs = api?.captureRange?.(captureStart, Number(task.endLayer)) || [];
-    }
-    // 世界引擎联动等合成输入没有真实聊天正文，用跨聊天唯一的合成来源记录身份。
-    if (!refs.length) {
-      const originChatId = data()?.getChatId?.() || 'default';
-      const layer = Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer();
-      const sourceText = clean(task?.conversation);
-      refs = [{
-        chatId: originChatId,
-        messageId: clean(task?.sourceKey) || `synthetic:${originChatId}:${layer}:${api?.hashText?.(sourceText) || sourceText.length}`,
-        layer,
-        role: 'synthetic',
-        swipeId: 0,
-        hash: api?.hashText?.(sourceText) || String(sourceText.length),
-        synthetic: true
-      }];
-    }
-    const digest = api?.digestRefs?.(refs) || '';
-    const bounds = sourceBounds(refs, options?.layer);
-    const candidateNode = {
-      id: nextTimelineNodeId(timeline),
-      kind: task?.kind || 'memory',
-      source: task?.kind === 'world_link' ? 'world_engine' : undefined,
-      sourceKey: task?.kind === 'world_link' ? clean(task?.sourceKey) : undefined,
-      worldCommitId: task?.kind === 'world_link' ? clean(task?.worldCommitId) : undefined,
-      originChatId: data()?.getChatId?.() || 'default',
-      startLayer: bounds.startLayer,
-      endLayer: bounds.endLayer,
-      sourceRefs: refs,
-      sourceDigest: digest,
-      personal: clone(extracted?.personal || []),
-      profileUpdates: clone(extracted?.profileUpdates || []),
-      entities: clone(extracted?.entities || {}),
-      factUpdates: clone(extracted?.factUpdates || []),
-      arcUpdates: clone(extracted?.arcUpdates || []),
-      memoryExtracted: Boolean(
-        extracted?.hasMemoryPayload !== false && (
-          nodeHasMemoryContent({
-            personal: extracted?.personal,
-            profileUpdates: extracted?.profileUpdates,
-            entities: extracted?.entities,
-            factUpdates: extracted?.factUpdates,
-            arcUpdates: extracted?.arcUpdates
-          })
-          || options?._confirmedEmptyMemory === true
-          || !options?._hadCombinedSmallTask
-          || clean(task?.conversation).length < 60
-        )
-      ),
-      status: 'valid',
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-    const existingIdx = timeline.nodes.findIndex(node => node.sourceDigest && node.sourceDigest === digest && node.status !== 'stale');
-    if (existingIdx >= 0) {
-      const existing = timeline.nodes[existingIdx];
-      // 若旧同源节点实际有记忆内容，或新节点本身也为空且旧节点已确认提取过，则保留旧节点；若旧节点全空而新节点有内容，则用新节点替换空壳
-      if (nodeHasMemoryContent(existing) || (existing.memoryExtracted === true && !nodeHasMemoryContent(candidateNode))) {
-        return existing;
-      }
-      timeline.nodes.splice(existingIdx, 1);
-    }
-    timeline.nodes.push(candidateNode);
-    return candidateNode;
-  }
+  function replayTimeline(inputState) {
+    const state = data().normalizeState(inputState);
+    const tl = ensureTimelineState(state);
+    tl.nodes = sortTimelineNodesPreservingSnapshots(tl.nodes);
+    const chronicleBackup = clone(state.tables.chronicle || []);
+    let tables = data().normalizeTables(tl.root?.base?.tables || data().emptyTables());
+    let round = Math.max(0, parseInt(tl.root?.base?.round, 10) || 0);
 
-  // 世界联动是一笔带来源标记的独立事务。重 roll 只撤销当前楼层的联动节点与
-  // 世界摘要纪要；普通对话记忆和普通纪要始终保留。
-  function removeLinkedLayerFromState(state, layer) {
-    const numericLayer = Number(layer);
-    if (!Number.isFinite(numericLayer)) return { removed: false, sourceKey: '', removedSmallIds: [] };
-    const sourceKey = `${data()?.getChatId?.() || 'default'}:${numericLayer}`;
-    const timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
-    const matchesNode = node => {
-      if (node?.kind !== 'world_link') return false;
-      if (clean(node?.sourceKey) === sourceKey) return true;
-      if ((node?.sourceRefs || []).some(ref => clean(ref?.messageId) === sourceKey)) return true;
-      return !clean(node?.sourceKey) && Number(node?.startLayer) === numericLayer
-        && Number(node?.endLayer) === numericLayer;
-    };
-    const matchesSmall = item => item?.source === 'world_engine' && (
-      clean(item?.sourceKey) === sourceKey
-      || (!clean(item?.sourceKey) && Number(item?.startLayer) === numericLayer && Number(item?.endLayer) === numericLayer)
-    );
-
-    const removedNodes = timeline.nodes.filter(matchesNode);
-    const removedSmall = eventMemory.small_summaries.filter(matchesSmall);
-    if (!removedNodes.length && !removedSmall.length) {
-      return { removed: false, sourceKey, removedSmallIds: [] };
-    }
-
-    const removedSmallIds = new Set(removedSmall.map(item => clean(item?.id)).filter(Boolean));
-    timeline.nodes = timeline.nodes.filter(node => !matchesNode(node));
-    eventMemory.small_summaries = eventMemory.small_summaries.filter(item => !matchesSmall(item));
-    return {
-      removed: true,
-      sourceKey,
-      removedNodeIds: removedNodes.map(node => node.id),
-      removedSmallIds: [...removedSmallIds]
-    };
-  }
-
-  function replayTimeline(state, stopBeforeId) {
-    const timeline = ensureTimelineState(state), root = clone(timeline.root?.base || {});
-    timeline.nodes = sortTimelineNodes(timeline.nodes);
-    const derived = {
-      personal_memory: clone(root.personal_memory || []),
-      knowledge_index: clone(root.knowledge_index || {}),
-      entity_memory: clone(root.entity_memory || {}),
-      entity_index: clone(root.entity_index || {}),
-      ongoing_facts: clone(root.ongoing_facts || []),
-      character_arcs: clone(root.character_arcs || []),
-      round: Math.max(0, Number(root.round) || 0),
-      chatLayer: root.chatLayer ?? null,
-      rebaseLayer: state.rebaseLayer ?? null,
-      event_memory: clone(state.event_memory || {}),
-      ...(state.world_commit_archive ? { world_commit_archive: clone(state.world_commit_archive) } : {}),
-      timeline: clone(timeline)
-    };
-    ensureEntityState(derived);
-    ensureStructuredMemoryState(derived);
-    for (const node of timeline.nodes) {
-      if (stopBeforeId && node.id === stopBeforeId) break;
-      if (node.status !== 'valid') continue;
-      if (node.kind === 'manual_snapshot' && node.snapshot) {
-        derived.personal_memory = clone(node.snapshot.personal_memory || []);
-        derived.knowledge_index = clone(node.snapshot.knowledge_index || {});
-        derived.entity_memory = clone(node.snapshot.entity_memory || {});
-        derived.entity_index = clone(node.snapshot.entity_index || {});
-        if (Array.isArray(node.snapshot.ongoing_facts)) derived.ongoing_facts = clone(node.snapshot.ongoing_facts);
-        if (Array.isArray(node.snapshot.character_arcs)) derived.character_arcs = clone(node.snapshot.character_arcs);
-        derived.round = Math.max(derived.round, Number(node.snapshot.round) || 0);
-        derived.chatLayer = node.snapshot.chatLayer ?? derived.chatLayer;
-        ensureEntityState(derived);
-        ensureStructuredMemoryState(derived);
+    for (const node of tl.nodes) {
+      if (!node || node.status !== 'valid') continue;
+      if (node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false) continue;
+      if (node.kind === 'manual_snapshot' && node.snapshot?.tables) {
+        tables = data().normalizeTables(node.snapshot.tables);
+        // 保留最新的 chronicle 列表（手动快照若也改了 chronicle 则以快照为准）
         continue;
       }
-      mergeMemories(derived, clone(node.personal || []));
-      if (Array.isArray(node.profileUpdates) && node.profileUpdates.length) {
-        mergeCharacterProfiles(derived, clone(node.profileUpdates), node.endLayer);
+      if (Array.isArray(node.tableOps) && node.tableOps.length) {
+        const nonChronOps = node.tableOps.filter(op => op && op.sheet !== 'chronicle');
+        if (nonChronOps.length) tables = data().applyTableOps(tables, nonChronOps);
       }
-      mergeEntityMemories(derived, clone(node.entities || {}));
-      if (Array.isArray(node.factUpdates) && node.factUpdates.length) {
-        mergeOngoingFacts(derived, clone(node.factUpdates), node.endLayer, node.sourceRefs, node.worldCommitId);
-      }
-      if (Array.isArray(node.arcUpdates) && node.arcUpdates.length) {
-        mergeCharacterArcs(derived, clone(node.arcUpdates), node.endLayer);
-      }
-      derived.round += 1;
-      if (Number.isFinite(Number(node.endLayer))) {
-        const nodeEnd = Number(node.endLayer);
-        derived.chatLayer = derived.chatLayer !== null && Number.isFinite(Number(derived.chatLayer))
-          ? Math.max(Number(derived.chatLayer), nodeEnd)
-          : nodeEnd;
-      }
+      if (node.kind !== 'world_link') round++;
     }
-    const maxChatLayer = chat().length - 1;
-    if (maxChatLayer >= 0 && derived.chatLayer !== null && Number.isFinite(Number(derived.chatLayer)) && Number(derived.chatLayer) > maxChatLayer) {
-      derived.chatLayer = maxChatLayer;
-    }
-    repairStateIndexes(derived, derived);
-    return derived;
-  }
 
-  function commitManualState(nextState, previousState) {
-    if (!nextState || !previousState) return nextState;
-    const memoryView = state => JSON.stringify({
-      personal_memory: state.personal_memory || [],
-      knowledge_index: state.knowledge_index || {},
-      entity_memory: state.entity_memory || {},
-      entity_index: state.entity_index || {},
-      ongoing_facts: state.ongoing_facts || [],
-      character_arcs: state.character_arcs || []
-    });
-    if (memoryView(nextState) === memoryView(previousState)) return nextState;
-    const timeline = ensureTimelineState(previousState), api = timelineApi();
-    const layer = currentLayer(), originChatId = data()?.getChatId?.() || 'default';
-    const snapshot = {
-      personal_memory: clone(nextState.personal_memory || []),
-      knowledge_index: clone(nextState.knowledge_index || {}),
-      entity_memory: clone(nextState.entity_memory || {}),
-      entity_index: clone(nextState.entity_index || {}),
-      ongoing_facts: clone(nextState.ongoing_facts || []),
-      character_arcs: clone(nextState.character_arcs || []),
-      round: Math.max(0, Number(nextState.round) || 0),
-      chatLayer: nextState.chatLayer ?? layer
+    // 保留 chronicle（除非最新的有效 manual_snapshot 明确覆写了 chronicle）
+    const lastValidManual = [...tl.nodes].reverse().find(n => n && n.status === 'valid' && n.kind === 'manual_snapshot' && n.snapshot?.tables);
+    const hasLaterChronicle = chronicleBackup.some(row => Number(row?.revision) > 0 && row.sourceRefs?.length);
+    if (!lastValidManual || hasLaterChronicle) {
+      tables.chronicle = sortChronicleRows(chronicleBackup);
+    }
+    tables = data().normalizeTables(tables);
+    state.tables = tables;
+    state.round = round;
+    recomputeWatermarks(state);
+    state.event_memory = {
+      small_summaries: data().projectChronicleToSmallSummaries(state.tables.chronicle),
+      small_summary_layer: state.tableWatermarks.chronicle
     };
-    const hash = api?.hashText?.(memoryView(nextState)) || String(Date.now());
-    timeline.nodes.push({
-      id: nextTimelineNodeId(timeline),
-      kind: 'manual_snapshot',
-      originChatId,
-      startLayer: layer,
-      endLayer: layer,
-      sourceRefs: [{ chatId: originChatId, messageId: `manual:${Date.now()}`, layer, role: 'synthetic', swipeId: 0, hash, synthetic: true }],
-      sourceDigest: hash,
-      personal: [],
-      entities: {},
-      snapshot,
-      status: 'valid',
-      revision: 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    });
-    nextState.timeline = clone(timeline);
-    return nextState;
+    return data().normalizeState(state);
   }
 
-  // 自动纪要只处理进入当前聊天之后新增的对话。首次见到一个聊天时仅落下
-  // 当前楼层基线，不调用 API；从头整理历史记录只允许由批量重填显式触发。
-  function initializeSummaryBaseline() {
-    const memoryData = data();
-    if (!memoryData) return null;
-    const state = memoryData.loadState();
-    const eventMemory = ensureEventState(state);
-    if (eventMemory.small_summary_layer !== null
-      && eventMemory.small_summary_layer !== ''
-      && Number.isFinite(Number(eventMemory.small_summary_layer))) return state;
-    eventMemory.small_summary_layer = chat().length - 1;
-    return memoryData.saveState(state);
-  }
-
-  function nextSmallSummaryId(eventMemory) {
-    const max = (eventMemory.small_summaries || []).reduce((number, item) => {
-      const match = /^small_(\d+)$/.exec(clean(item?.id));
-      return Math.max(number, match ? Number(match[1]) : 0);
-    }, 0);
-    return `small_${String(max + 1).padStart(6, '0')}`;
-  }
-
-  async function requestTasks(tasks, options) {
-    const st = settings(), state = options?.baseState ? clone(options.baseState) : data().loadState();
-    const prompt = await buildRequestPrompt(tasks, state, st);
-    lastDebug = { prompt, requestPrompt: prompt, rawResult: '', apiResponse: '', parsed: null, error: '' };
-    const retries = Math.max(0, Number(options?.retries ?? st.apiAutoRetries) || 0);
-    const purpose = tasks.memory && tasks.small
-      ? '人物、实体与纪要'
-      : (tasks.memory ? '人物与实体提取' : '阶段纪要');
-    const runAttempt = async ({ attempt, maxAttempts }) => {
-      let logId = null;
-      try {
-        window.WORLD_ENGINE_API?.setNextRequestMeta?.({
-          module: 'memory',
-          purpose,
-          attempt: attempt + 1,
-          maxAttempts,
-          onLogId: id => { logId = id; }
-        });
-        const raw = await window.WORLD_ENGINE_API.callApi(
-          prompt, st.maxTokens, st.temperature, abortController?.signal, st
-        );
-        lastDebug.rawResult = lastDebug.apiResponse = raw;
-        let parsed;
-        try {
-          parsed = parseResponse(raw, tasks);
-        } catch (parseErr) {
-          window.WORLD_ENGINE_API?.updateRequestLog?.(logId, {
-            status: 'error',
-            phase: '解析失败',
-            error: String(parseErr?.message || parseErr)
-          });
-          throw parseErr;
-        }
-        lastDebug.parsed = clone(parsed);
-        const parsedEntCount = ENTITY_TYPES.reduce((sum, type) => sum + (parsed.entities?.[type]?.length || 0), 0);
-        const parseSummaryParts = [];
-        if (tasks.memory) {
-          parseSummaryParts.push(`档${parsed.profileUpdates.length} 人${parsed.personal.length} 实${parsedEntCount} 事${parsed.factUpdates.length} 弧${parsed.arcUpdates.length}`);
-        }
-        if (tasks.small) {
-          parseSummaryParts.push(`纪${Array.from(clean(parsed.smallSummary)).length}字`);
-        }
-        if (logId && parseSummaryParts.length) {
-          window.WORLD_ENGINE_API?.updateRequestLog?.(logId, { phase: `完成（${parseSummaryParts.join(' · ')}）` });
-        }
-        if (tasks.memory && parsed.memoryItemCount === 0) {
-          console.warn('[记忆引擎] 本次记忆提取解析结果为空（0条人物/实体/事实/弧光）', { rawKeys: parsed.rawKeys });
-        }
-        return parsed;
-      } catch (error) {
-        lastDebug.error = String(error?.message || error);
-        throw error;
-      }
-    };
-
-    if (typeof window.WORLD_ENGINE_API?.executeWithRetry === 'function') {
-      return window.WORLD_ENGINE_API.executeWithRetry(runAttempt, {
-        retries,
-        signal: abortController?.signal,
-        shouldContinue: () => !abortController?.signal?.aborted,
-        onRetry: ({ attempt, maxRetries }) => {
-          window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, `重试提取 ${attempt}/${maxRetries}`);
-        }
-      });
-    }
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        return await runAttempt({ attempt, maxAttempts: retries + 1 });
-      } catch (error) {
-        if (abortController?.signal?.aborted || attempt >= retries) throw error;
+  function coveredLayersBySheet(state) {
+    const sets = {};
+    for (const k of tableKeys()) sets[k] = new Set();
+    const tl = ensureTimelineState(state);
+    for (const node of tl.nodes) {
+      if (!node || node.status !== 'valid' || node.kind === 'world_link' || node.kind === 'manual_snapshot') continue;
+      if (!isCurrentChatRecord(node)) continue;
+      const layers = aiLayersCoveredByRecord(node);
+      if (!layers.length) continue;
+      const targets = Array.isArray(node.targetSheets) && node.targetSheets.length
+        ? node.targetSheets
+        : tableKeys().filter(k => k !== 'chronicle');
+      for (const k of targets) {
+        if (!sets[k]) continue;
+        for (const l of layers) sets[k].add(l);
       }
     }
-    throw new Error('记忆 API 请求失败');
-  }
-
-  async function runTasks(tasks, options) {
-    if (running && !options?.allowWhileBackfill) return { skipped: true, reason: 'running' };
-    if (!tasks?.memory && !tasks?.small) return { skipped: true, reason: 'no_tasks' };
-    running = true;
-    runningLabel = tasks.memory && tasks.small ? '人物、实体与纪要'
-      : (tasks.memory ? '人物与实体提取' : '纪要');
-    const taskLabel = runningLabel;
-    abortController = new AbortController();
-    setExternalStatus(`正在进行${taskLabel}…`);
-    // 顶部状态机会先清理悬浮球运行类，因此最后再按当前引擎面刷新动画状态。
-    window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, runningLabel);
-    try {
-      const requestChatId = data().getChatId();
-      const before = options?.baseState ? clone(options.baseState) : data().loadState();
-      const extracted = await requestTasks(tasks, { ...options, baseState: before });
-      if (requestChatId !== data().getChatId() || abortController?.signal?.aborted ||
-          (tasks.memory?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(tasks.memory.worldCommitId) === false)) {
-        const error = new Error('记忆来源或聊天已变化，旧结果已丢弃'); error.name = 'AbortError'; throw error;
-      }
-      // 兜底保护：若联合请求中模型漏填了人物/实体/事实/弧光字段（或对较长对话全部返回空数组），
-      // 自动补发一次独立的人物/实体/事实/弧光提取请求，避免只写了纪要而丢失结构化记忆。
-      const shouldFallbackMemory = Boolean(
-        tasks.memory && tasks.small && options?.skipMemoryFallback !== true
-        && (
-          extracted.hasMemoryPayload === false
-          || (options?.retryEmptyMemory === true && Number(extracted.memoryItemCount) === 0 && clean(tasks.memory.conversation).length >= 40)
-        )
-      );
-      let fallbackConfirmedEmpty = false;
-      if (shouldFallbackMemory) {
-        try {
-          const fallbackMem = await requestTasks({ memory: tasks.memory }, { ...options, baseState: before });
-          if (fallbackMem) {
-            fallbackConfirmedEmpty = true;
-            if (fallbackMem.hasMemoryPayload || Number(fallbackMem.memoryItemCount) > 0) {
-              extracted.personal = fallbackMem.personal || [];
-              extracted.profileUpdates = fallbackMem.profileUpdates || [];
-              extracted.entities = fallbackMem.entities || extracted.entities;
-              extracted.factUpdates = fallbackMem.factUpdates || [];
-              extracted.arcUpdates = fallbackMem.arcUpdates || [];
-              extracted.hasMemoryPayload = Boolean(fallbackMem.hasMemoryPayload);
-              extracted.memoryItemCount = Number(fallbackMem.memoryItemCount) || 0;
-            }
-          }
-        } catch (fallbackErr) {
-          console.warn('[记忆引擎] 联合请求人物/实体兜底补提失败（已保留本批纪要）', fallbackErr);
-        }
-      }
-      for (const task of Object.values(tasks)) {
-        if (Array.isArray(task?.sourceRefs) && task.sourceRefs.length && timelineApi()?.auditRefs?.(task.sourceRefs)?.valid === false) {
-          const error = new Error('正文已变化，记忆结果未写入'); error.name = 'AbortError'; throw error;
-        }
-      }
-      if (options?.saveCheckpoint !== false) data().saveCheckpoint(before);
-      const next = clone(before);
-      const tlBefore = ensureTimelineState(next);
-      if (!tlBefore.nodes.length) {
-        tlBefore.root.base = {
-          personal_memory: clone(before.personal_memory || []),
-          knowledge_index: clone(before.knowledge_index || {}),
-          entity_memory: clone(before.entity_memory || {}),
-          entity_index: clone(before.entity_index || {}),
-          ongoing_facts: clone(before.ongoing_facts || []),
-          character_arcs: clone(before.character_arcs || []),
-          round: Math.max(0, Number(before.round) || 0),
-          chatLayer: before.chatLayer ?? null
-        };
-      }
-      const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
-        ? timelineApi()?.digestRefs?.(tasks.memory.sourceRefs) || '' : '';
-      const hasVisibleBefore = Boolean(
-        (before?.personal_memory?.length || 0) > 0
-        || (before?.ongoing_facts?.length || 0) > 0
-        || (before?.character_arcs?.length || 0) > 0
-        || ENTITY_TYPES.some(t => (before?.entity_memory?.[t]?.length || 0) > 0)
-      );
-      const hasBlockingEmptyManualSnapshot = !hasVisibleBefore
-        && tlBefore.nodes.some(node => isCurrentChatRecord(node) && node.kind === 'manual_snapshot');
-      const allChatMsgs = chat();
-      const recordAiLayersOf = record => {
-        const layers = [];
-        if (Array.isArray(record?.sourceRefs) && record.sourceRefs.length) {
-          for (const ref of record.sourceRefs) {
-            const idx = Number(ref?.layer);
-            if (Number.isFinite(idx) && ((allChatMsgs[idx] && !allChatMsgs[idx].is_user) || ref?.role === 'assistant')) {
-              layers.push(idx);
-            }
-          }
-        }
-        if (!layers.length) {
-          const s = Math.max(0, Number(record?.startLayer) || 0);
-          const e = Math.max(s, Number(record?.endLayer) || s);
-          for (let idx = s; idx <= e; idx++) {
-            if (allChatMsgs[idx] && !allChatMsgs[idx].is_user) layers.push(idx);
-          }
-        }
-        return layers;
-      };
-      const isContainedInBounds = (record, boundStart, boundEnd) => {
-        const aiLayers = recordAiLayersOf(record);
-        if (aiLayers.length) return aiLayers.every(idx => idx >= boundStart && idx <= boundEnd);
-        return Number(record?.startLayer) >= boundStart && Number(record?.endLayer) <= boundEnd;
-      };
-
-      // 与自动填表保持同一套纯增量写入原则：
-      // 1) 一键追平 / 非覆盖范围填表 / 自动填表：绝不删除任何跨楼层或不同来源的已有记忆节点；
-      //    若精确同批（相同 sourceDigest）旧节点为空/未提取或被空 manual_snapshot 清空，则替换该精确同批节点；
-      //    若精确同批旧节点已有内容且本次 API 又提取到新内容，则增量合并进该节点，绝不静默丢弃新请求结果；
-      // 2) 仅当用户显式勾选「覆盖重填」（overwriteRangeBounds）时，才替换完全落在覆盖范围内的旧节点，绝不误删跨区间旧节点；
-      // 3) 位于当前写入起点及之后的 manual_snapshot：空快照或覆盖模式下直接清理；非空快照在纯增量模式下前移到 mStart - 1 作为前置基底，
-      //    确保手工修改不丢失的同时，本次新提取的人物/档案/实体/事实/弧光绝不会被末尾旧快照在 replayTimeline 时抹掉。
-      const mStartLayer = tasks.memory && Number.isFinite(Number(tasks.memory.startLayer))
-        ? Number(tasks.memory.startLayer) : 0;
-      const mEndLayer = tasks.memory && Number.isFinite(Number(tasks.memory.endLayer))
-        ? Number(tasks.memory.endLayer) : mStartLayer;
-      if (tasks.memory && (options?.overwriteRangeBounds || options?.replaceExactSameBatch === true || hasBlockingEmptyManualSnapshot)) {
-        const ovStart = options?.overwriteRangeBounds ? Number(options.overwriteRangeBounds.start) : null;
-        const ovEnd = options?.overwriteRangeBounds ? Number(options.overwriteRangeBounds.end) : null;
-        tlBefore.nodes = tlBefore.nodes.filter(node => {
-          if (!isCurrentChatRecord(node)) return true;
-          if (node.kind === 'manual_snapshot') {
-            if (options?.overwriteRangeBounds || !snapshotHasMemory(node.snapshot)) {
-              return Number(node.endLayer) < mStartLayer;
-            }
-            return true;
-          }
-          if (node.kind !== 'memory') return true;
-          const sameDigest = Boolean(memorySourceDigest && clean(node.sourceDigest) === memorySourceDigest);
-          if (options?.overwriteRangeBounds) {
-            const overlapsCurrentBatch = Number(node.startLayer) <= mEndLayer && Number(node.endLayer) >= mStartLayer;
-            const containedInBatch = isContainedInBounds(node, mStartLayer, mEndLayer);
-            const containedInOverwrite = ovStart !== null && ovEnd !== null
-              && overlapsCurrentBatch && isContainedInBounds(node, ovStart, ovEnd);
-            return !(sameDigest || containedInBatch || containedInOverwrite);
-          }
-          if (sameDigest && (!nodeHasMemoryContent(node) || node.memoryExtracted !== true || hasBlockingEmptyManualSnapshot)) {
-            return false;
-          }
-          return true;
-        });
-      }
-      const existingStoredNode = memorySourceDigest ? ensureTimelineState(next).nodes.find(node =>
-        node.kind === 'memory' && node.status === 'valid' && clean(node.sourceDigest) === memorySourceDigest
-      ) : null;
-      const memoryAlreadyStored = Boolean(
-        existingStoredNode && (nodeHasMemoryContent(existingStoredNode) || existingStoredNode.memoryExtracted === true)
-      );
-      const canMergeIntoSameBatch = Boolean(
-        tasks.memory && existingStoredNode && options?.replaceExactSameBatch === true
-        && !options?.overwriteRangeBounds && extracted.hasMemoryPayload !== false
-        && Number(extracted.memoryItemCount) > 0
-      );
-      const applyMemory = Boolean(tasks.memory && !memoryAlreadyStored && extracted.hasMemoryPayload !== false);
-      const targetLayer = Number.isFinite(Number(tasks.memory?.endLayer))
-        ? Number(tasks.memory.endLayer)
-        : (Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer());
-      let mergedIntoExisting = false;
-      if (canMergeIntoSameBatch) {
-        mergedIntoExisting = mergeExtractedIntoNode(existingStoredNode, extracted);
-      }
-      const shouldMergeState = applyMemory || mergedIntoExisting;
-      const addedPersonal = shouldMergeState ? mergeMemories(next, extracted.personal) : 0;
-      const profileChanges = shouldMergeState && Array.isArray(extracted.profileUpdates) && extracted.profileUpdates.length
-        ? mergeCharacterProfiles(next, extracted.profileUpdates, targetLayer)
-        : 0;
-      const entityChanges = shouldMergeState
-        ? mergeEntityMemories(next, extracted.entities)
-        : { entities: 0, history: 0, descriptions: 0 };
-      const factChanges = shouldMergeState && Array.isArray(extracted.factUpdates) && extracted.factUpdates.length
-        ? mergeOngoingFacts(next, extracted.factUpdates, targetLayer, tasks.memory?.sourceRefs, tasks.memory?.worldCommitId)
-        : 0;
-      const arcChanges = shouldMergeState && Array.isArray(extracted.arcUpdates) && extracted.arcUpdates.length
-        ? mergeCharacterArcs(next, extracted.arcUpdates, targetLayer)
-        : 0;
-      if (shouldMergeState) {
-        // 清理或前移位于当前写入起点及之后的 manual_snapshot，彻底杜绝 replayTimeline 时旧快照抹掉新入表数据
-        tlBefore.nodes = tlBefore.nodes.filter(node => {
-          if (!(isCurrentChatRecord(node) && node.kind === 'manual_snapshot' && Number(node.endLayer) >= mStartLayer)) {
-            return true;
-          }
-          if (options?.overwriteRangeBounds || !snapshotHasMemory(node.snapshot)) {
-            return false;
-          }
-          const rebasedLayer = mStartLayer - 1;
-          node.endLayer = rebasedLayer;
-          node.startLayer = Math.min(Number(node.startLayer) || 0, rebasedLayer);
-          return true;
-        });
-        if (applyMemory) {
-          appendTimelineNode(next, extracted, tasks.memory, {
-            ...options,
-            layer: targetLayer,
-            _confirmedEmptyMemory: fallbackConfirmedEmpty,
-            _hadCombinedSmallTask: Boolean(tasks.small)
-          });
-        }
-        next.timeline.nodes = sortTimelineNodes(next.timeline.nodes);
-      }
-      const eventMemory = ensureEventState(next);
-      const outlineHints = tasks.small ? buildRequestPrompt_hints() : {};
-      let addedSmall = 0;
-      if (tasks.small && extracted.smallSummary) {
-        const startLayer = Number(tasks.small.startLayer) || 0;
-        const endLayer = Number(tasks.small.endLayer) || startLayer;
-        const sourceRefs = clone(tasks.small.sourceRefs || timelineApi()?.captureRange?.(startLayer, endLayer) || []);
-        const sourceDigest = timelineApi()?.digestRefs?.(sourceRefs) || '';
-        if (options?.overwriteRangeBounds) {
-          const ovStart = Number(options.overwriteRangeBounds.start);
-          const ovEnd = Number(options.overwriteRangeBounds.end);
-          eventMemory.small_summaries = eventMemory.small_summaries.filter(item => {
-            if (!isDialogueSummary(item) || !isCurrentChatRecord(item)) return true;
-            const sameDigest = Boolean(sourceDigest && clean(item.sourceDigest) === sourceDigest);
-            const overlapsCurrentBatch = Number(item.startLayer) <= endLayer && Number(item.endLayer) >= startLayer;
-            const containedInBatch = isContainedInBounds(item, startLayer, endLayer);
-            const containedInOverwrite = overlapsCurrentBatch && isContainedInBounds(item, ovStart, ovEnd);
-            return !(sameDigest || containedInBatch || containedInOverwrite);
-          });
-        }
-        const existingSummary = sourceDigest ? eventMemory.small_summaries.find(item =>
-          item.status !== 'stale' && clean(item.sourceDigest) === sourceDigest
-        ) : null;
-        if (!existingSummary) {
-          eventMemory.small_summaries.push({
-            id: nextSmallSummaryId(eventMemory),
-            startLayer,
-            endLayer,
-            content: extracted.smallSummary,
-            keywords: unique(extracted.smallSummaryKeywords),
-            entityNames: unique(extracted.smallSummaryEntities),
-            impactLevel: extracted.smallSummaryImpact === 'key' ? 'key' : 'normal',
-            ...(clean(outlineHints.outlineChapterTitle) ? { outlineChapterTitle: clean(outlineHints.outlineChapterTitle) } : {}),
-            sourceRefs,
-            sourceDigest,
-            originChatId: data()?.getChatId?.() || 'default',
-            status: 'valid',
-            revision: 1
-          });
-          addedSmall = 1;
-        }
-        eventMemory.small_summaries = sortSmallSummaries(eventMemory.small_summaries);
-        const prevCursor = eventMemory.small_summary_layer !== null && eventMemory.small_summary_layer !== ''
-          && Number.isFinite(Number(eventMemory.small_summary_layer)) ? Number(eventMemory.small_summary_layer) : -1;
-        eventMemory.small_summary_layer = Math.min(currentLayer(), Math.max(prevCursor, endLayer));
-      }
-      if (options?.worldDigestMinute?.content) {
-        const linked = options.worldDigestMinute;
-        eventMemory.small_summaries.push({
-          id: nextSmallSummaryId(eventMemory),
-          startLayer: Number(linked.layer) || 0,
-          endLayer: Number(linked.layer) || 0,
-          content: Array.from(clean(linked.content)).slice(0, 200).join(''),
-          keywords: unique(linked.keywords),
-          entityNames: unique(linked.entityNames),
-          impactLevel: linked.impactLevel === 'key' ? 'key' : 'normal',
-          source: 'world_engine',
-          sourceKey: clean(linked.sourceKey),
-          ...(linked.worldCommitId ? { worldCommitId: clean(linked.worldCommitId) } : {}),
-          originChatId: data()?.getChatId?.() || 'default',
-          status: 'valid',
-          revision: 1
-        });
-        eventMemory.small_summaries = sortSmallSummaries(eventMemory.small_summaries);
-        addedSmall += 1;
-      }
-      const added = addedPersonal + profileChanges + entityChanges.entities + entityChanges.history + entityChanges.descriptions + factChanges + arcChanges;
-      let finalState = next;
-      if (tasks.memory) {
-        if (shouldMergeState || options?.overwriteRangeBounds) {
-          finalState = replayTimeline(next);
-        }
-        const prevChatLayer = finalState.chatLayer !== null && finalState.chatLayer !== '' && Number.isFinite(Number(finalState.chatLayer))
-          ? Number(finalState.chatLayer) : -1;
-        const nextLayerCandidate = Number.isFinite(Number(tasks.memory?.endLayer))
-          ? Number(tasks.memory.endLayer)
-          : (Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer());
-        finalState.chatLayer = Math.min(currentLayer(), Math.max(prevChatLayer, nextLayerCandidate));
-      }
-      data().saveState(finalState);
-      window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
-      applyInjection();
-      refreshMemoryPanel();
-      if (!options?.allowWhileBackfill && !backfillRunning) {
-        refreshVectorRecallAsync(finalState);
-      }
-      setExternalStatus(`${taskLabel}完成`);
-      return {
-        added: added + addedSmall,
-        extracted: extracted.personal.length + (extracted.profileUpdates?.length || 0) + ENTITY_TYPES.reduce((sum, type) => sum + extracted.entities[type].length, 0),
-        addedPersonal,
-        profileChanges,
-        entityChanges,
-        factChanges,
-        arcChanges,
-        addedSmall,
-        state: finalState
-      };
-    } catch (error) {
-      const stopped = abortController?.signal?.aborted || error?.name === 'AbortError';
-      setExternalStatus(stopped ? `${taskLabel}已停止` : `${taskLabel}失败：${error?.message || error}`, !stopped);
-      throw error;
-    } finally {
-      running = false;
-      runningLabel = '';
-      abortController = null;
-      window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(false, '');
+    for (const row of state.tables?.chronicle || []) {
+      if (!row || row.status === 'stale' || row.status === 'failed' || row.source === 'world_engine') continue;
+      if (!isCurrentChatRecord(row) || !clean(row.chronicle_text)) continue;
+      for (const l of aiLayersCoveredByRecord(row)) sets.chronicle.add(l);
     }
-  }
-
-  async function extractConversation(conversation, options) {
-    return runTasks({ memory: {
-      conversation,
-      sourceRefs: clone(options?.sourceRefs || []),
-      startLayer: options?.startLayer,
-      endLayer: options?.endLayer,
-      sourceKey: options?.sourceKey
-    } }, options);
-  }
-
-  function countAiSince(layer, st, endLayer) {
-    const anchor = layer !== null && layer !== '' && Number.isFinite(Number(layer)) ? Number(layer) : -1;
-    const all = chat(), skipOpening = anchor < 0 && ignoreFirstLayer(st || settings());
-    const end = endLayer !== undefined && Number.isFinite(Number(endLayer)) ? Number(endLayer) : all.length - 1;
-    return all.reduce((count, message, index) => count + (
-      index > anchor && index <= end && !(skipOpening && index === 0) && message && !message.is_user ? 1 : 0
-    ), 0);
-  }
-
-  function getEffectiveSummaryDelay(st) {
-    const cfg = st || settings();
-    const delayFloors = Math.max(0, parseInt(cfg?.summaryDelayFloors) || 0);
-    return Math.max(cfg?.skipCurrentFloorSummary === true ? 1 : 0, delayFloors);
-  }
-
-  function stableAutoEndLayer(st) {
-    const cfg = st || settings();
-    const delayFloors = getEffectiveSummaryDelay(cfg);
-    if (!delayFloors) return undefined;
-    const all = chat(), skipOpening = ignoreFirstLayer(cfg);
-    const aiLayers = all.map((message, index) => (
-      !(skipOpening && index === 0) && message && !message.is_user ? index : -1
-    )).filter(index => index >= 0);
-    if (aiLayers.length <= delayFloors) return -1;
-    return aiLayers[aiLayers.length - 1 - delayFloors];
-  }
-
-  function getAiBatchAfter(layer, maxAi, endLayer, settingsOverride) {
-    const all = chat();
-    const anchor = layer !== null && layer !== '' && Number.isFinite(Number(layer)) ? Number(layer) : -1;
-    const skipOpening = anchor < 0 && ignoreFirstLayer(settingsOverride || settings());
-    const end = endLayer !== undefined && Number.isFinite(Number(endLayer)) ? Number(endLayer) : all.length - 1;
-    const aiLayers = all.map((message, index) => (index > anchor && index <= end && !(skipOpening && index === 0) && message && !message.is_user ? index : -1))
-      .filter(index => index >= 0).slice(0, Math.max(1, parseInt(maxAi) || 1));
-    if (!aiLayers.length) return null;
-    const firstAi = aiLayers[0], finish = aiLayers.at(-1);
-    const dialogueStart = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
-    return {
-      startLayer: firstAi,
-      endLayer: finish,
-      dialogueStart,
-      aiLayers,
-      aiCount: aiLayers.length,
-      conversation: formatMessages(all.slice(dialogueStart, finish + 1), dialogueStart),
-      sourceRefs: timelineApi()?.captureRange?.(dialogueStart, finish) || []
-    };
-  }
-
-  // 手动向前提取与重新推演共用：读取轮数 = min(配置上限, 基底状态至今的实际 AI 轮数)。
-  function getElapsedReadRounds(baseState, maxRounds) {
-    const limit = Math.max(1, parseInt(maxRounds) || 1);
-    const anchor = baseState?.chatLayer !== null && baseState?.chatLayer !== '' && Number.isFinite(Number(baseState?.chatLayer))
-      ? Number(baseState.chatLayer) : -1;
-    return Math.max(1, Math.min(countAiSince(anchor), limit));
-  }
-
-  async function autoExtract() {
-    const st = settings();
-    if (st.engineEnabled === false || running || backfillRunning || reconciling) return;
-    // 历史正文修复必须等本轮 AI 回复完成后才请求 API；手动提取模式也照常修复历史。
-    await reconcileHistory({
-      respectDelay: true,
-      refillUncovered: st.evolveMode === 'auto' && st.autoRefillOnHistoryChange !== false
-    });
-    if (st.evolveMode !== 'auto') return;
-    const state = data().loadState();
-    const eventMemory = ensureEventState(state);
-    const rawAnchor = state.chatLayer !== null && state.chatLayer !== '' && Number.isFinite(Number(state.chatLayer))
-      ? Number(state.chatLayer) : null;
-    const anchor = rawAnchor !== null ? rawAnchor : (
-      eventMemory.small_summary_layer !== null && eventMemory.small_summary_layer !== ''
-      && Number.isFinite(Number(eventMemory.small_summary_layer)) && !ensureTimelineState(state).nodes.length
-        ? Number(eventMemory.small_summary_layer) : -1
-    );
-    const stableEnd = stableAutoEndLayer(st);
-    const tasks = {};
-    if (stableEnd !== -1 && countAiSince(anchor, st, stableEnd) >= Math.max(1, parseInt(st.evolveEveryX) || 1)) {
-      tasks.memory = getAiBatchAfter(anchor, st.evolveReadRounds, stableEnd, st);
-    }
-    const smallEvery = Math.max(1, parseInt(st.smallSummaryEveryX) || 1);
-    const smallBatch = stableEnd !== -1 && countAiSince(eventMemory.small_summary_layer, st, stableEnd) >= smallEvery
-      ? getAiBatchAfter(eventMemory.small_summary_layer, smallEvery, stableEnd, st) : null;
-    if (smallBatch) tasks.small = smallBatch;
-    if (!tasks.memory && !tasks.small) return;
-    const targetLayer = Number(tasks.memory?.endLayer ?? tasks.small?.endLayer ?? (stableEnd !== undefined ? stableEnd : currentLayer()));
-    const result = await runTasks(tasks, { layer: targetLayer, baseState: state });
-    const after = data().loadState(), afterEvent = ensureEventState(after);
-    const afterAnchor = after.chatLayer !== null && after.chatLayer !== '' && Number.isFinite(Number(after.chatLayer))
-      ? Number(after.chatLayer) : anchor;
-    const nextStableEnd = stableAutoEndLayer(st);
-    if (nextStableEnd !== -1 && (
-      countAiSince(afterEvent.small_summary_layer, st, nextStableEnd) >= smallEvery ||
-      countAiSince(afterAnchor, st, nextStableEnd) >= Math.max(1, parseInt(st.evolveEveryX) || 1)
-    )) {
-      clearTimeout(autoTimer);
-      autoTimer = setTimeout(() => autoExtract().catch(error => console.error('[记忆引擎] 自动纪要补进度失败', error)), 0);
-    }
-    return result;
-  }
-
-  async function manualExtract() {
-    const st = settings();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    const state = data().loadState();
-    const timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
-    const memoryLayer = state.chatLayer !== null && state.chatLayer !== '' && Number.isFinite(Number(state.chatLayer))
-      ? Number(state.chatLayer) : null;
-    const summaryLayer = eventMemory.small_summary_layer !== null && eventMemory.small_summary_layer !== ''
-      && Number.isFinite(Number(eventMemory.small_summary_layer)) ? Number(eventMemory.small_summary_layer) : null;
-    const hasTrackedSummaries = eventMemory.small_summaries.some(summary =>
-      isDialogueSummary(summary) && Array.isArray(summary.sourceRefs) && summary.sourceRefs.length
-    );
-    // 新聊天首次建立纪要基线时，人物游标尚为空；此时沿用纪要基线，避免误把整段旧聊天当成待处理。
-    // 若已经存在带正文来源的纪要，则从头寻找尚缺人物实体的最早一轮，补齐两条链。
-    let anchor = memoryLayer === null ? (hasTrackedSummaries ? -1 : (summaryLayer ?? -1))
-      : (summaryLayer === null ? memoryLayer : Math.min(memoryLayer, summaryLayer));
-    let batch = null;
-    while (true) {
-      const candidate = getAiBatchAfter(anchor, 1);
-      if (!candidate) break;
-      const digest = timelineApi()?.digestRefs?.(candidate.sourceRefs || []) || '';
-      const hasNode = digest && timeline.nodes.some(node =>
-        node.kind === 'memory' && node.status === 'valid' && clean(node.sourceDigest) === digest
-      );
-      const hasSummary = digest && eventMemory.small_summaries.some(summary =>
-        summary.status !== 'stale' && clean(summary.sourceDigest) === digest
-      );
-      if (hasNode && hasSummary) {
-        anchor = candidate.endLayer;
-        continue;
-      }
-      batch = candidate;
-      break;
-    }
-    if (!batch) throw new Error('当前没有尚未提取的新一轮正文');
-    return runTasks({ memory: batch, small: batch }, {
-      ...batch, layer: batch.endLayer, baseState: state
-    });
-  }
-
-  async function manualReextract() {
-    const st = settings();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
-    const current = data().loadState();
-    const timeline = ensureTimelineState(current);
-    const latestNode = timeline.nodes.slice().reverse().find(node => node.kind === 'memory' && node.status === 'valid');
-    if (latestNode) {
-      const eventMemory = ensureEventState(current);
-      const sourceDigest = clean(latestNode.sourceDigest)
-        || timelineApi()?.digestRefs?.(latestNode.sourceRefs || []) || '';
-      const pairedSummary = sourceDigest ? eventMemory.small_summaries.find(summary => {
-        const digest = clean(summary.sourceDigest)
-          || timelineApi()?.digestRefs?.(summary.sourceRefs || []) || '';
-        return summary.status === 'valid' && digest === sourceDigest;
-      }) : null;
-      const taskLabel = '人物、实体与纪要重新推演';
-      running = true;
-      runningLabel = taskLabel;
-      abortController = new AbortController();
-      setExternalStatus(`正在进行${taskLabel}…`);
-      window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, runningLabel);
-      let repaired;
-      try {
-        latestNode.status = 'stale';
-        if (pairedSummary) pairedSummary.status = 'stale';
-        data().saveState(current);
-        repaired = await repairMemoryAndSmall(latestNode.id, pairedSummary?.id);
-        if (!repaired) throw new Error('最新一轮人物、实体与纪要未能重新提取');
-        setExternalStatus(`${taskLabel}完成`);
-      } catch (error) {
-        // 请求失败或用户停止时恢复旧节点，不能把一次未完成的重新推演留成 stale。
-        const rollback = data().loadState();
-        const rollbackNode = ensureTimelineState(rollback).nodes.find(node => node.id === latestNode.id);
-        const rollbackSummary = pairedSummary
-          ? ensureEventState(rollback).small_summaries.find(summary => summary.id === pairedSummary.id)
-          : null;
-        if (rollbackNode?.status === 'stale') rollbackNode.status = 'valid';
-        if (rollbackSummary?.status === 'stale') rollbackSummary.status = 'valid';
-        data().saveState(rollback);
-        applyInjection();
-        const stopped = abortController?.signal?.aborted || error?.name === 'AbortError';
-        setExternalStatus(stopped ? `${taskLabel}已停止` : `${taskLabel}失败：${error?.message || error}`, !stopped);
-        throw error;
-      } finally {
-        running = false;
-        runningLabel = '';
-        abortController = null;
-        window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(false, '');
-      }
-
-      const reconciliation = await reconcileHistory();
-      const updated = Math.max(1, Number(repaired?.updated || 0));
-      return {
-        added: updated + Number(reconciliation?.repairedCount || 0),
-        extracted: Number(repaired?.extracted || 0),
-        replacedNodeId: latestNode.id,
-        replacedSummaryId: pairedSummary?.id || null,
-        state: data().loadState()
-      };
-    }
-    // 旧数据尚未产生时间链节点时，保留一次兼容回退；新节点产生后不再依赖 checkpoint。
-    const checkpoint = data().loadCheckpoint();
-    if (!checkpoint) throw new Error('没有可用于重新推演的记忆存档点');
-    const readRounds = getElapsedReadRounds(checkpoint, st.manualReadRounds);
-    const batch = recentConversationBatch(readRounds);
-    return runTasks({ memory: batch, small: batch }, {
-      ...batch, layer: currentLayer(), baseState: checkpoint
-    });
-  }
-
-  async function manualSmallSummary() {
-    const st = settings();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    const state = data().loadState(), eventMemory = ensureEventState(state);
-    const batch = getAiBatchAfter(eventMemory.small_summary_layer, Math.max(1, parseInt(st.smallSummaryEveryX) || 1));
-    if (!batch) throw new Error('当前状态之后没有可总结的新对话');
-    return runTasks({ small: batch }, { baseState: state });
-  }
-
-  function newHistoryAuditReport() {
-    return { changedLayers: new Set(), deletedLayers: new Set() };
-  }
-
-  function collectHistoryAudit(report, audit) {
-    if (!report || !audit) return;
-    for (const item of audit.changed || []) {
-      const layer = Number(item?.before?.layer ?? item?.after?.layer);
-      if (Number.isFinite(layer)) report.changedLayers.add(layer);
-    }
-    for (const ref of audit.missing || []) {
-      const layer = Number(ref?.layer);
-      if (Number.isFinite(layer)) report.deletedLayers.add(layer);
-    }
-  }
-
-  // 楼层数字会在删楼后整体前移。来源引用可以用稳定消息 ID 判断哪些旧楼
-  // 消失了，但纪要进度仍是数字游标，必须同步减去游标之前被删的楼层数。
-  // 否则新对话要先“追平”删除前的楼层号，期间不会再生成纪要。
-  function rewindSummaryCursorForDeletedLayers(state, report) {
-    const deleted = [...(report?.deletedLayers || [])].filter(Number.isFinite);
-    if (!deleted.length) return false;
-    const eventMemory = ensureEventState(state);
-    if (eventMemory.small_summary_layer === null || eventMemory.small_summary_layer === ''
-      || !Number.isFinite(Number(eventMemory.small_summary_layer))) return false;
-    const anchor = Number(eventMemory.small_summary_layer);
-    const removedBeforeCursor = deleted.filter(layer => layer <= anchor).length;
-    if (!removedBeforeCursor) return false;
-    eventMemory.small_summary_layer = Math.max(-1, anchor - removedBeforeCursor);
-    return true;
-  }
-
-  function isAssistantRef(ref, st) {
-    if (!ref) return false;
-    const layer = Number(ref.layer);
-    if (ignoreFirstLayer(st || settings()) && layer === 0) return false;
-    if (ref.role === 'assistant') return true;
-    if (ref.role === 'user') return false;
-    const all = chat();
-    if (Number.isFinite(layer) && all[layer]) return !all[layer].is_user;
-    return true;
-  }
-
-  function trimRefsToCompleteRounds(refs, st) {
-    const sorted = (Array.isArray(refs) ? refs : []).slice().sort((a, b) => (Number(a?.layer) || 0) - (Number(b?.layer) || 0));
-    if (!sorted.length) return [];
-    let lastAiIdx = -1;
-    for (let i = sorted.length - 1; i >= 0; i--) {
-      if (isAssistantRef(sorted[i], st)) { lastAiIdx = i; break; }
-    }
-    if (lastAiIdx < 0) return [];
-    return sorted.slice(0, lastAiIdx + 1);
-  }
-
-  function formatHistoryLayers(layers) {
-    const values = [...(layers || [])].filter(Number.isFinite).sort((a, b) => a - b);
-    return values.length ? `第 ${values.join('、')} 楼` : '';
-  }
-
-  function historyAuditMessage(report, phase, error) {
-    const changed = formatHistoryLayers(report?.changedLayers);
-    const deleted = formatHistoryLayers(report?.deletedLayers);
-    const subjects = [changed ? `${changed}正文已修改` : '', deleted ? `${deleted}已删除` : ''].filter(Boolean);
-    if (!subjects.length) {
-      if (phase === 'failed') return `历史记忆修复失败：旧记忆已停止注入，本次使用原始正文。原因：${error?.message || error}`;
-      return phase === 'success' ? '历史记忆对账完成' : '正在核对历史楼层与记忆链…';
-    }
-    const subject = subjects.join('；');
-    if (phase === 'detected') return `检测到${subject}，正在回退并重建相关记忆与纪要…`;
-    if (phase === 'success') return `${subject}：相关记忆与纪要已回退并更新，本次注入采用新正文。`;
-    return `${subject}：历史记忆修复失败，旧记忆已停止注入，本次使用原始正文。原因：${error?.message || error}`;
-  }
-
-  function auditStoredSources(state, report, options) {
-    const api = timelineApi(), timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
-    const st = settings();
-    const pruneDead = options?.pruneDead === true;
-    const respectDelay = options?.respectDelay === true;
-    const stableEnd = respectDelay ? stableAutoEndLayer(st) : undefined;
-    const maxChatLayer = chat().length - 1;
-    let changed = false;
-    let prunedDialogueCount = 0;
-    let earliestPrunedStartLayer = Infinity;
-    let prunedNodeCount = 0;
-    let earliestPrunedNodeStartLayer = Infinity;
-    const refreshValidRefs = (record, audit) => {
-      if (!audit?.valid || audit.inherited || audit.synthetic || !Array.isArray(audit.refs)) return;
-      const oldLayers = (record.sourceRefs || []).map(ref => Number(ref.layer)).join(',');
-      const newLayers = audit.refs.map(ref => Number(ref.layer)).join(',');
-      if (oldLayers === newLayers) return;
-      record.sourceRefs = clone(audit.refs);
-      const bounds = sourceBounds(audit.refs, record.endLayer);
-      record.startLayer = bounds.startLayer;
-      record.endLayer = bounds.endLayer;
-      changed = true;
-    };
-    const nextNodes = [];
-    for (const node of timeline.nodes) {
-      const hasOnlySyntheticRefs = Array.isArray(node.sourceRefs) && node.sourceRefs.length > 0
-        && node.sourceRefs.every(ref => ref?.synthetic === true);
-      if (!Array.isArray(node.sourceRefs) || !node.sourceRefs.length || hasOnlySyntheticRefs) {
-        if (pruneDead && !node.worldCommitId && isCurrentChatRecord(node) && Number(node.startLayer) > maxChatLayer) {
-          prunedNodeCount++;
-          const origStart = Number.isFinite(Number(node.startLayer)) ? Number(node.startLayer) : 0;
-          if (origStart < earliestPrunedNodeStartLayer) earliestPrunedNodeStartLayer = origStart;
-          changed = true;
-          continue;
-        }
-        if (!Array.isArray(node.sourceRefs) || !node.sourceRefs.length) {
-          nextNodes.push(node);
-          continue;
-        }
-      }
-      const audit = api?.auditRefs?.(node.sourceRefs);
-      collectHistoryAudit(report, audit);
-      refreshValidRefs(node, audit);
-      const commitInactive = Boolean(node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false);
-      const nextStatus = audit?.valid && !commitInactive ? 'valid' : 'stale';
-      if (pruneDead && nextStatus === 'stale' && !node.worldCommitId) {
-        if (!audit?.refs || !audit.refs.length) {
-          prunedNodeCount++;
-          const origStart = Number.isFinite(Number(node.startLayer)) ? Number(node.startLayer) : 0;
-          if (origStart < earliestPrunedNodeStartLayer) earliestPrunedNodeStartLayer = origStart;
-          changed = true;
-          continue;
-        }
-        if (isCurrentChatRecord(node)) {
-          const surviving = trimRefsToCompleteRounds(audit?.refs, st);
-          const survivingMaxLayer = surviving.length ? Math.max(...surviving.map(ref => Number(ref.layer) || 0)) : -1;
-          const inDelayedTail = respectDelay && stableEnd !== undefined && (stableEnd === -1 || survivingMaxLayer > stableEnd);
-          if (!surviving.length || inDelayedTail) {
-            prunedNodeCount++;
-            const origStart = Number.isFinite(Number(node.startLayer)) ? Number(node.startLayer) : 0;
-            if (origStart < earliestPrunedNodeStartLayer) earliestPrunedNodeStartLayer = origStart;
-            changed = true;
-            continue;
-          }
-        }
-      }
-      if (node.status !== nextStatus) { node.status = nextStatus; changed = true; }
-      nextNodes.push(node);
-    }
-    timeline.nodes = sortTimelineNodes(nextNodes);
-
-    const nextSummaries = [];
-    for (const summary of eventMemory.small_summaries) {
-      if (summary.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(summary.worldCommitId) === false) {
-        if (summary.status !== 'stale') { summary.status = 'stale'; changed = true; }
-        nextSummaries.push(summary);
-        continue;
-      }
-      if (!Array.isArray(summary.sourceRefs) || !summary.sourceRefs.length) {
-        if (pruneDead && !summary.worldCommitId && summary.source === 'world_engine' && isCurrentChatRecord(summary) && Number(summary.startLayer) > maxChatLayer) {
-          changed = true;
-          continue;
-        }
-        nextSummaries.push(summary);
-        continue; // 旧版手工/迁移/世界联动纪要保持封存。
-      }
-      const audit = api?.auditRefs?.(summary.sourceRefs);
-      collectHistoryAudit(report, audit);
-      refreshValidRefs(summary, audit);
-      const nextStatus = audit?.valid ? 'valid' : 'stale';
-      if (pruneDead && nextStatus === 'stale' && isDialogueSummary(summary) && isCurrentChatRecord(summary)) {
-        const surviving = trimRefsToCompleteRounds(audit?.refs, st);
-        const survivingMaxLayer = surviving.length ? Math.max(...surviving.map(ref => Number(ref.layer) || 0)) : -1;
-        const inDelayedTail = respectDelay && stableEnd !== undefined && (stableEnd === -1 || survivingMaxLayer > stableEnd);
-        if (!surviving.length || inDelayedTail) {
-          prunedDialogueCount++;
-          const origStart = Number.isFinite(Number(summary.startLayer)) ? Number(summary.startLayer) : 0;
-          if (origStart < earliestPrunedStartLayer) earliestPrunedStartLayer = origStart;
-          changed = true;
-          continue;
-        }
-      }
-      if (summary.status !== nextStatus) { summary.status = nextStatus; changed = true; }
-      nextSummaries.push(summary);
-    }
-    eventMemory.small_summaries = sortSmallSummaries(nextSummaries);
-    if (options && typeof options === 'object') {
-      options._auditMeta = {
-        prunedDialogueCount,
-        earliestPrunedStartLayer: Number.isFinite(earliestPrunedStartLayer) ? earliestPrunedStartLayer : null,
-        prunedNodeCount,
-        earliestPrunedNodeStartLayer: Number.isFinite(earliestPrunedNodeStartLayer) ? earliestPrunedNodeStartLayer : null
-      };
-    }
-    return changed;
-  }
-
-  function recomputeSummaryCursor(state, report, meta) {
-    const eventMemory = ensureEventState(state);
-    const timeline = ensureTimelineState(state);
-    let changed = rewindSummaryCursorForDeletedLayers(state, report);
-    const maxLayer = chat().length - 1;
-    const prev = eventMemory.small_summary_layer;
-    const hasNumeric = prev !== null && prev !== '' && Number.isFinite(Number(prev));
-    let nextCursor = hasNumeric ? Number(prev) : null;
-    if (nextCursor !== null && nextCursor > maxLayer) {
-      nextCursor = maxLayer;
-      changed = true;
-    }
-    if (meta?.prunedDialogueCount > 0) {
-      const trackedDialogue = eventMemory.small_summaries.filter(item =>
-        isDialogueSummary(item) && isCurrentChatRecord(item) && Array.isArray(item.sourceRefs) && item.sourceRefs.length > 0
-      );
-      if (trackedDialogue.length) {
-        const maxRemainingEnd = Math.max(...trackedDialogue.map(item => Number(item.endLayer) || 0));
-        if (nextCursor === null || nextCursor > maxRemainingEnd) {
-          nextCursor = Math.min(maxLayer, maxRemainingEnd);
-          changed = true;
-        }
-      } else if (Number.isFinite(Number(meta.earliestPrunedStartLayer))) {
-        const rewound = Math.min(maxLayer, Math.max(-1, Number(meta.earliestPrunedStartLayer) - 1));
-        if (nextCursor === null || nextCursor > rewound) {
-          nextCursor = rewound;
-          changed = true;
-        }
-      }
-    }
-    if (nextCursor !== null && nextCursor !== prev) {
-      eventMemory.small_summary_layer = nextCursor;
-      changed = true;
-    }
-    if (meta?.prunedNodeCount > 0) {
-      const remainingNodes = timeline.nodes.filter(node =>
-        isCurrentChatRecord(node) && node.status !== 'stale'
-      );
-      if (remainingNodes.length) {
-        const maxNodeEnd = Math.max(...remainingNodes.map(node => Number(node.endLayer) || 0));
-        const clamped = Math.min(maxLayer, maxNodeEnd);
-        if (state.chatLayer === null || Number(state.chatLayer) > clamped) {
-          state.chatLayer = clamped;
-          changed = true;
-        }
-      } else if (Number.isFinite(Number(meta.earliestPrunedNodeStartLayer))) {
-        const firstEligible = ignoreFirstLayer(settings()) ? 1 : 0;
-        const rewound = Math.min(maxLayer, Math.max(-1, Number(meta.earliestPrunedNodeStartLayer) - 1));
-        const nextChatLayer = rewound < firstEligible ? (hasSealedBaseline(state) ? Math.max(0, rewound) : null) : rewound;
-        if (state.chatLayer !== nextChatLayer) {
-          state.chatLayer = nextChatLayer;
-          changed = true;
-        }
-        if (timeline.root?.base && timeline.root.base.chatLayer !== null && Number(timeline.root.base.chatLayer) > rewound) {
-          timeline.root.base.chatLayer = nextChatLayer;
-          changed = true;
-        }
-      }
-    }
-    if (state.chatLayer !== null && state.chatLayer !== '' && Number.isFinite(Number(state.chatLayer)) && Number(state.chatLayer) > maxLayer) {
-      state.chatLayer = maxLayer >= 0 ? maxLayer : null;
-      changed = true;
-    }
-    if (state.rebaseLayer !== null && state.rebaseLayer !== undefined && Number.isFinite(Number(state.rebaseLayer)) && maxLayer >= 0 && Number(state.rebaseLayer) > maxLayer) {
-      state.rebaseLayer = maxLayer;
-      changed = true;
-    }
-    return changed;
-  }
-
-  async function repairMemoryNode(nodeId) {
-    let state = data().loadState(), timeline = ensureTimelineState(state);
-    let node = timeline.nodes.find(item => item.id === nodeId);
-    if (!node || node.status !== 'stale') return false;
-    if (node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false) return false;
-    const api = timelineApi(), st = settings(), audit = api?.auditRefs?.(node.sourceRefs);
-    const trimmedRefs = trimRefsToCompleteRounds(audit?.refs, st);
-    if (!trimmedRefs.length) {
-      const origStart = Number.isFinite(Number(node.startLayer)) ? Number(node.startLayer) : 0;
-      timeline.nodes = timeline.nodes.filter(item => item.id !== nodeId);
-      recomputeSummaryCursor(state, null, {
-        prunedDialogueCount: 0,
-        earliestPrunedStartLayer: null,
-        prunedNodeCount: 1,
-        earliestPrunedNodeStartLayer: origStart
-      });
-      const next = replayTimeline(state);
-      data().saveState(next);
-      try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(next); } catch (_) {}
-      refreshMemoryPanel();
-      return true;
-    }
-    const base = replayTimeline(state, nodeId);
-    const conversation = api?.refsToConversation?.(trimmedRefs) || '';
-    if (!conversation) return false;
-    const repairBounds = sourceBounds(trimmedRefs, node.endLayer);
-    const extracted = await requestTasks({ memory: {
-      conversation,
-      startLayer: repairBounds.startLayer,
-      endLayer: repairBounds.endLayer
-    } }, { baseState: base });
-
-    state = data().loadState();
-    timeline = ensureTimelineState(state);
-    node = timeline.nodes.find(item => item.id === nodeId);
-    if (!node) return false;
-    const bounds = sourceBounds(trimmedRefs, node.endLayer);
-    node.sourceRefs = clone(trimmedRefs);
-    node.sourceDigest = api?.digestRefs?.(trimmedRefs) || '';
-    node.startLayer = bounds.startLayer;
-    node.endLayer = bounds.endLayer;
-    node.personal = clone(extracted.personal || []);
-    node.profileUpdates = clone(extracted.profileUpdates || []);
-    node.entities = clone(extracted.entities || {});
-    node.factUpdates = clone(extracted.factUpdates || []);
-    node.arcUpdates = clone(extracted.arcUpdates || []);
-    node.status = 'valid';
-    node.revision = Math.max(1, Number(node.revision) || 1) + 1;
-    node.updatedAt = Date.now();
-    const next = replayTimeline(state);
-    data().saveState(next);
-    try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(next); } catch (_) {}
-    refreshMemoryPanel();
-    return true;
-  }
-
-  // 日常提取固定为一轮后，同轮人物/实体节点与纪要拥有相同来源。
-  // 历史变化时也联合请求，保持新增与修复使用同一个最小事务单元。
-  async function repairMemoryAndSmall(nodeId, summaryId) {
-    let state = data().loadState(), timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
-    let node = timeline.nodes.find(item => item.id === nodeId);
-    let summary = summaryId ? eventMemory.small_summaries.find(item => item.id === summaryId) : null;
-    if (!node || node.status !== 'stale' || (summaryId && (!summary || summary.status !== 'stale'))) return false;
-
-    const api = timelineApi(), st = settings();
-    const nodeAudit = api?.auditRefs?.(node.sourceRefs);
-    const summaryAudit = summary ? api?.auditRefs?.(summary.sourceRefs) : nodeAudit;
-    const nodeRefs = trimRefsToCompleteRounds(nodeAudit?.refs, st);
-    const summaryRefs = trimRefsToCompleteRounds(summaryAudit?.refs, st);
-    if (!nodeRefs.length || !summaryRefs.length) return false;
-    const nodeDigest = api?.digestRefs?.(nodeRefs) || '';
-    const summaryDigest = api?.digestRefs?.(summaryRefs) || '';
-    if (!nodeDigest || nodeDigest !== summaryDigest) return false;
-
-    const conversation = api?.refsToConversation?.(nodeRefs) || '';
-    if (!conversation) return false;
-    const bounds = sourceBounds(nodeRefs, node.endLayer);
-    const base = replayTimeline(state, nodeId);
-    const extracted = await requestTasks({
-      memory: {
-        startLayer: bounds.startLayer,
-        endLayer: bounds.endLayer,
-        conversation
-      },
-      small: {
-        startLayer: bounds.startLayer,
-        endLayer: bounds.endLayer,
-        conversation
-      }
-    }, { baseState: base });
-    if (!clean(extracted.smallSummary)) {
-      throw new Error('API 未返回纪要，已保留重新推演前的记录');
-    }
-
-    state = data().loadState();
-    timeline = ensureTimelineState(state);
-    eventMemory = ensureEventState(state);
-    node = timeline.nodes.find(item => item.id === nodeId);
-    summary = summaryId ? eventMemory.small_summaries.find(item => item.id === summaryId) : null;
-    if (!node || (summaryId && !summary)) return false;
-
-    node.sourceRefs = clone(nodeRefs);
-    node.sourceDigest = nodeDigest;
-    node.startLayer = bounds.startLayer;
-    node.endLayer = bounds.endLayer;
-    node.personal = clone(extracted.personal || []);
-    node.profileUpdates = clone(extracted.profileUpdates || []);
-    node.entities = clone(extracted.entities || {});
-    node.factUpdates = clone(extracted.factUpdates || []);
-    node.arcUpdates = clone(extracted.arcUpdates || []);
-    node.status = 'valid';
-    node.revision = Math.max(1, Number(node.revision) || 1) + 1;
-    node.updatedAt = Date.now();
-
-    if (!summary) {
-      summary = {
-        id: nextSmallSummaryId(eventMemory),
-        startLayer: bounds.startLayer,
-        endLayer: bounds.endLayer,
-        sourceRefs: clone(summaryRefs),
-        sourceDigest: summaryDigest,
-        content: extracted.smallSummary,
-        keywords: unique(extracted.smallSummaryKeywords),
-        entityNames: unique(extracted.smallSummaryEntities),
-        impactLevel: extracted.smallSummaryImpact === 'key' ? 'key' : 'normal',
-        originChatId: data()?.getChatId?.() || 'default',
-        status: 'valid',
-        revision: 1
-      };
-      eventMemory.small_summaries.push(summary);
-      eventMemory.small_summary_layer = Math.min(currentLayer(), Math.max(Number(eventMemory.small_summary_layer ?? -1), bounds.endLayer));
-    } else {
-      summary.startLayer = bounds.startLayer;
-      summary.endLayer = bounds.endLayer;
-      summary.sourceRefs = clone(summaryRefs);
-      summary.sourceDigest = summaryDigest;
-      summary.content = extracted.smallSummary;
-      if (extracted.smallSummaryKeywords?.length) summary.keywords = unique(extracted.smallSummaryKeywords);
-      if (extracted.smallSummaryEntities?.length) summary.entityNames = unique(extracted.smallSummaryEntities);
-      summary.impactLevel = extracted.smallSummaryImpact === 'key' ? 'key' : (summary.impactLevel || 'normal');
-      summary.status = 'valid';
-      summary.revision = Math.max(1, Number(summary.revision) || 1) + 1;
-    }
-    eventMemory.small_summaries = sortSmallSummaries(eventMemory.small_summaries);
-    const next = replayTimeline(state);
-    data().saveState(next);
-    try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(next); } catch (_) {}
-    refreshMemoryPanel();
-    const extractedCount = (extracted.personal || []).length
-      + ENTITY_TYPES.reduce((sum, type) => sum + (extracted.entities?.[type] || []).length, 0);
-    return { repaired: true, extracted: extractedCount, updated: extractedCount + 1 };
-  }
-
-  async function repairSmallSummary(summaryId) {
-    let state = data().loadState(), eventMemory = ensureEventState(state);
-    let summary = eventMemory.small_summaries.find(item => item.id === summaryId);
-    if (!summary || summary.status !== 'stale') return false;
-    const api = timelineApi(), st = settings(), audit = api?.auditRefs?.(summary.sourceRefs);
-    const trimmedRefs = trimRefsToCompleteRounds(audit?.refs, st);
-    if (!trimmedRefs.length) {
-      const origStart = Number.isFinite(Number(summary.startLayer)) ? Number(summary.startLayer) : 0;
-      eventMemory.small_summaries = eventMemory.small_summaries.filter(item => item.id !== summaryId);
-      recomputeSummaryCursor(state, null, { prunedDialogueCount: 1, earliestPrunedStartLayer: origStart });
-      data().saveState(state);
-      try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(state); } catch (_) {}
-      refreshMemoryPanel();
-      return true;
-    }
-    const conversation = api?.refsToConversation?.(trimmedRefs) || '';
-    if (!conversation) return false;
-    const bounds = sourceBounds(trimmedRefs, summary.endLayer);
-    const extracted = await requestTasks({ small: {
-      startLayer: bounds.startLayer,
-      endLayer: bounds.endLayer,
-      conversation
-    } }, { baseState: state });
-    if (!clean(extracted.smallSummary)) return false;
-
-    state = data().loadState();
-    eventMemory = ensureEventState(state);
-    summary = eventMemory.small_summaries.find(item => item.id === summaryId);
-    if (!summary) return false;
-    summary.startLayer = bounds.startLayer;
-    summary.endLayer = bounds.endLayer;
-    summary.sourceRefs = clone(trimmedRefs);
-    summary.sourceDigest = api?.digestRefs?.(trimmedRefs) || '';
-    summary.content = extracted.smallSummary;
-    if (extracted.smallSummaryKeywords?.length) summary.keywords = unique(extracted.smallSummaryKeywords);
-    if (extracted.smallSummaryEntities?.length) summary.entityNames = unique(extracted.smallSummaryEntities);
-    summary.impactLevel = extracted.smallSummaryImpact === 'key' ? 'key' : (summary.impactLevel || 'normal');
-    summary.status = 'valid';
-    summary.revision = Math.max(1, Number(summary.revision) || 1) + 1;
-    eventMemory.small_summaries = sortSmallSummaries(eventMemory.small_summaries);
-    const prevCursor = eventMemory.small_summary_layer !== null && eventMemory.small_summary_layer !== ''
-      && Number.isFinite(Number(eventMemory.small_summary_layer)) ? Number(eventMemory.small_summary_layer) : -1;
-    eventMemory.small_summary_layer = Math.min(currentLayer(), Math.max(prevCursor, bounds.endLayer));
-    data().saveState(state);
-    try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(state); } catch (_) {}
-    refreshMemoryPanel();
-    return true;
-  }
-
-  function collectEligibleAiLayers(stOverride, startBound, endBound) {
-    const st = stOverride || settings();
-    const all = chat();
-    if (!all.length) return [];
-    const skipOpening = ignoreFirstLayer(st);
-    const minLayer = Math.max(skipOpening ? 1 : 0, Number.isFinite(Number(startBound)) ? Number(startBound) : 0);
-    const maxLayer = Math.min(all.length - 1, Number.isFinite(Number(endBound)) ? Number(endBound) : all.length - 1);
-    const layers = [];
-    for (let i = minLayer; i <= maxLayer; i++) {
-      if (all[i] && !all[i].is_user) layers.push(i);
-    }
-    return layers;
-  }
-
-  function coveredDialogueAiLayersSet(state) {
-    const eventMemory = ensureEventState(state);
-    const all = chat();
-    const covered = new Set();
-    const api = timelineApi();
-    const idToLayer = new Map();
-    if (api?.ensureMessageId) {
-      all.forEach((msg, idx) => {
-        const id = clean(msg?.extra?.[api.SOURCE_ID_KEY]);
-        if (id) idToLayer.set(id, idx);
-      });
-    }
-    for (const item of eventMemory.small_summaries) {
-      if (!isDialogueSummary(item) || !isCurrentChatRecord(item)) continue;
-      if (item.status === 'stale' || item.status === 'failed' || !clean(item.content)) continue;
-      if (Array.isArray(item.sourceRefs) && item.sourceRefs.length) {
-        for (const ref of item.sourceRefs) {
-          const mappedLayer = clean(ref?.messageId) && idToLayer.has(clean(ref.messageId))
-            ? idToLayer.get(clean(ref.messageId))
-            : Number(ref?.layer);
-          if (Number.isFinite(mappedLayer) && all[mappedLayer] && !all[mappedLayer].is_user) {
-            covered.add(mappedLayer);
-          }
-        }
-      } else if (Number(item.endLayer) > 0 || Number(item.startLayer) > 0) {
-        const s = Math.max(0, Number(item.startLayer) || 0);
-        const e = Math.min(all.length - 1, Math.max(s, Number(item.endLayer) || s));
-        for (let i = s; i <= e; i++) {
-          if (all[i] && !all[i].is_user) covered.add(i);
-        }
-      }
-    }
-    return covered;
-  }
-
-  function coveredMemoryAiLayersSet(state, options = {}) {
-    const timeline = ensureTimelineState(state);
-    const all = chat();
-    const covered = new Set();
-    const hasVisibleMemory = Boolean(
-      (state?.personal_memory?.length || 0) > 0
-      || (state?.ongoing_facts?.length || 0) > 0
-      || (state?.character_arcs?.length || 0) > 0
-      || ENTITY_TYPES.some(t => (state?.entity_memory?.[t]?.length || 0) > 0)
-    );
-    // 若当前表内人物/实体/事实/弧光全部为空（例如曾被旧手动快照清空或全部提取为空），不把任何楼层视为已覆盖记忆，确保一键追平一定会重新提取全要素
-    if (!hasVisibleMemory) return covered;
-    const api = timelineApi();
-    const idToLayer = new Map();
-    if (api?.ensureMessageId) {
-      all.forEach((msg, idx) => {
-        const id = clean(msg?.extra?.[api.SOURCE_ID_KEY]);
-        if (id) idToLayer.set(id, idx);
-      });
-    }
-    const validMemNodes = timeline.nodes.filter(node =>
-      (!node.kind || node.kind === 'memory') && isCurrentChatRecord(node) && node.status !== 'stale' && node.status !== 'failed'
-    );
-    for (const node of validMemNodes) {
-      if (node.memoryExtracted === false) continue;
-      if (options?.requireContent === true && !nodeHasMemoryContent(node)) continue;
-      // 仅当节点确实提取到了记忆数据，或已被新版解析器确认过结构化记忆字段时，才视为已覆盖；
-      // 旧版/异常产生的无记忆内容空节点一律视为未覆盖，允许一键追平自动补提。
-      if (!nodeHasMemoryContent(node) && node.memoryExtracted !== true) continue;
-      if (Array.isArray(node.sourceRefs) && node.sourceRefs.length) {
-        for (const ref of node.sourceRefs) {
-          const mappedLayer = clean(ref?.messageId) && idToLayer.has(clean(ref.messageId))
-            ? idToLayer.get(clean(ref.messageId))
-            : Number(ref?.layer);
-          if (Number.isFinite(mappedLayer) && all[mappedLayer] && !all[mappedLayer].is_user) {
-            covered.add(mappedLayer);
-          }
-        }
-      } else if (Number(node.endLayer) > 0 || Number(node.startLayer) > 0) {
-        const s = Math.max(0, Number(node.startLayer) || 0);
-        const e = Math.min(all.length - 1, Math.max(s, Number(node.endLayer) || s));
-        for (let i = s; i <= e; i++) {
-          if (all[i] && !all[i].is_user) covered.add(i);
-        }
-      }
-    }
-    return covered;
-  }
-
-  function buildContiguousAiBatches(aiLayers, batchSize, minStartBound) {
-    const all = chat();
-    const size = Math.max(1, parseInt(batchSize) || 1);
-    const sorted = [...new Set(aiLayers)].filter(Number.isFinite).sort((a, b) => a - b);
-    if (!sorted.length) return [];
-    // 按相邻 AI 楼层连续性分段（跳过已被覆盖的中间区间，绝不跨越已有有效纪要拼接）
-    const runs = [];
-    for (const layer of sorted) {
-      const lastRun = runs[runs.length - 1];
-      if (!lastRun) { runs.push([layer]); continue; }
-      const prevLayer = lastRun[lastRun.length - 1];
-      let hasOtherAiBetween = false;
-      for (let i = prevLayer + 1; i < layer; i++) {
-        if (all[i] && !all[i].is_user) { hasOtherAiBetween = true; break; }
-      }
-      if (hasOtherAiBetween) runs.push([layer]);
-      else lastRun.push(layer);
-    }
-    const batches = [];
-    for (const run of runs) {
-      for (let i = 0; i < run.length; i += size) {
-        const chunk = run.slice(i, i + size);
-        const firstAi = chunk[0], finish = chunk[chunk.length - 1];
-        const dialogueStart = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
-        batches.push({
-          startLayer: firstAi,
-          endLayer: finish,
-          dialogueStart,
-          aiLayers: chunk,
-          aiCount: chunk.length,
-          conversation: formatMessages(all.slice(dialogueStart, finish + 1), dialogueStart),
-          sourceRefs: timelineApi()?.captureRange?.(dialogueStart, finish) || []
-        });
-      }
-    }
-    return batches;
+    return sets;
   }
 
   function getSummaryCoverageStatus(stOverride) {
     const st = stOverride || settings();
     const all = chat();
-    const state = data()?.loadState?.() || { event_memory: { small_summaries: [], small_summary_layer: null } };
-    const eventMemory = ensureEventState(state);
+    const state = data()?.loadState?.() || data().defaultState();
     const firstEligibleLayer = ignoreFirstLayer(st) ? 1 : 0;
     const latestLayer = all.length - 1;
     const allAi = collectEligibleAiLayers(st, firstEligibleLayer, latestLayer);
     const latestAiLayer = allAi.length ? allAi[allAi.length - 1] : -1;
     const effectiveDelayFloors = getEffectiveSummaryDelay(st);
-    const stableEnd = stableAutoEndLayer(st);
-    const latestAutoTargetLayer = stableEnd === undefined ? latestAiLayer : stableEnd;
-    const coveredSet = coveredDialogueAiLayersSet(state);
-    const coveredMemSet = coveredMemoryAiLayersSet(state);
-    const dialogueSummaries = eventMemory.small_summaries.filter(item => isDialogueSummary(item) && isCurrentChatRecord(item));
-    const validDialogue = dialogueSummaries.filter(item => item.status !== 'stale' && item.status !== 'failed' && clean(item.content));
-    const staleCount = eventMemory.small_summaries.filter(item => item.status === 'stale').length;
-    const trackedDialogue = validDialogue.filter(item => Array.isArray(item.sourceRefs) && item.sourceRefs.length > 0);
-    const cursorLayer = eventMemory.small_summary_layer !== null && eventMemory.small_summary_layer !== ''
-      && Number.isFinite(Number(eventMemory.small_summary_layer)) ? Number(eventMemory.small_summary_layer) : null;
-    const coveredEndLayer = trackedDialogue.length
-      ? Math.max(...trackedDialogue.map(item => Number(item.endLayer) || 0))
-      : (cursorLayer !== null ? Math.min(latestLayer, cursorLayer) : -1);
+    const latestAutoTargetLayer = stableAutoEndLayer(st);
+    const coveredBySheet = coveredLayersBySheet(state);
+    const schemas = tableSchemas();
 
-    // 计算追平起点：
-    // 1. 仅当存在显式封存/导入基线（hasSealedBaseline）时，才跳过基线之前的旧楼层；
-    // 2. 普通空卡或旧卡首次开启（包括仅自动填了末尾几层的情况），追平起点始终从 firstEligibleLayer（第 1 个有效 AI 层）起算。
+    // 若存在封存/导入基线，跳过基线之前的历史楼层
     let catchUpStart = firstEligibleLayer;
     if (hasSealedBaseline(state)) {
-      const sealedCursor = state.rebaseLayer !== null && state.rebaseLayer !== undefined && Number.isFinite(Number(state.rebaseLayer))
-        ? Number(state.rebaseLayer)
-        : cursorLayer;
-      if (trackedDialogue.length) {
-        catchUpStart = Math.min(...trackedDialogue.map(item => Math.max(firstEligibleLayer, Number(item.startLayer) || 0)));
-        if (sealedCursor !== null) {
-          catchUpStart = Math.min(catchUpStart, Math.max(firstEligibleLayer, sealedCursor + 1));
-        }
-      } else if (sealedCursor !== null) {
-        catchUpStart = Math.max(firstEligibleLayer, sealedCursor + 1);
-      }
+      const sealed = Number(state.rebaseLayer);
+      catchUpStart = Math.max(firstEligibleLayer, sealed + 1);
     }
 
-    const uncoveredAll = allAi.filter(layer => layer >= catchUpStart && !coveredSet.has(layer));
-    const uncoveredAuto = latestAutoTargetLayer >= 0
-      ? uncoveredAll.filter(layer => layer <= latestAutoTargetLayer)
-      : [];
-    const uncoveredMemoryAll = allAi.filter(layer => layer >= catchUpStart && !coveredMemSet.has(layer));
-    const uncoveredCombinedAll = allAi.filter(layer => layer >= catchUpStart && (!coveredSet.has(layer) || !coveredMemSet.has(layer)));
-    const uncoveredCombinedAuto = latestAutoTargetLayer >= 0
-      ? uncoveredCombinedAll.filter(layer => layer <= latestAutoTargetLayer)
-      : [];
-    const totalCoveredCount = allAi.filter(layer => coveredSet.has(layer)).length;
-    const totalCoveredMemoryCount = allAi.filter(layer => coveredMemSet.has(layer)).length;
+    const perSheet = {};
+    const uncoveredUnionAll = new Set();
+    const uncoveredUnionAuto = new Set();
+
+    for (const key of tableKeys()) {
+      const cfg = st.tableConfigs?.[key] || { enabled: true, updateFrequency: 0 };
+      const coveredSet = coveredBySheet[key] || new Set();
+      const uncoveredAll = allAi.filter(l => l >= catchUpStart && !coveredSet.has(l));
+      const uncoveredAuto = latestAutoTargetLayer >= 0 ? uncoveredAll.filter(l => l <= latestAutoTargetLayer) : [];
+      if (cfg.enabled !== false) {
+        for (const l of uncoveredAll) uncoveredUnionAll.add(l);
+        for (const l of uncoveredAuto) uncoveredUnionAuto.add(l);
+      }
+      perSheet[key] = {
+        key,
+        name: schemas[key]?.name || key,
+        shortName: schemas[key]?.shortName || key,
+        watermark: state.tableWatermarks?.[key] ?? null,
+        coveredCount: allAi.filter(l => coveredSet.has(l)).length,
+        uncoveredLayers: uncoveredAll,
+        uncoveredCount: uncoveredAll.length,
+        uncoveredAutoLayers: uncoveredAuto,
+        uncoveredAutoCount: uncoveredAuto.length,
+        rowCount: Array.isArray(state.tables?.[key]) ? state.tables[key].length : 0,
+        enabled: cfg.enabled !== false,
+        updateFrequency: Number(cfg.updateFrequency) || 0
+      };
+    }
+
+    const chronInfo = perSheet.chronicle;
+    const uncoveredCombinedAll = Array.from(uncoveredUnionAll).sort((a, b) => a - b);
+    const uncoveredCombinedAuto = Array.from(uncoveredUnionAuto).sort((a, b) => a - b);
+    const staleCount = (state.tables?.chronicle || []).filter(r => r.status === 'stale').length
+      + (state.timeline?.nodes || []).filter(n => n.status === 'stale').length;
+    const validSummaryCount = (state.tables?.chronicle || []).filter(r => r.status !== 'stale' && r.status !== 'failed').length;
+    const cursorLayer = state.tableWatermarks?.chronicle ?? null;
+    const coveredEndLayer = chronInfo.watermark !== null ? chronInfo.watermark : -1;
 
     return {
       chatTotalLayers: all.length,
@@ -3041,309 +776,1251 @@ window.MEMORY_ENGINE = (function() {
       cursorLayer,
       coveredEndLayer,
       totalAiCount: allAi.length,
-      coveredAiCount: totalCoveredCount,
-      coveredMemoryAiCount: totalCoveredMemoryCount,
+      coveredAiCount: chronInfo.coveredCount,
+      coveredMemoryAiCount: allAi.length - uncoveredCombinedAll.length,
       staleCount,
-      validSummaryCount: eventMemory.small_summaries.filter(item => item.status !== 'stale' && item.status !== 'failed').length,
-      uncoveredAiLayers: uncoveredAll,
-      uncoveredCount: uncoveredAll.length,
-      uncoveredAutoAiLayers: uncoveredAuto,
-      uncoveredAutoCount: uncoveredAuto.length,
-      uncoveredMemoryAiLayers: uncoveredMemoryAll,
+      validSummaryCount,
+      uncoveredAiLayers: chronInfo.uncoveredLayers,
+      uncoveredCount: chronInfo.uncoveredCount,
+      uncoveredAutoAiLayers: chronInfo.uncoveredAutoLayers,
+      uncoveredAutoCount: chronInfo.uncoveredAutoCount,
       uncoveredCombinedAiLayers: uncoveredCombinedAll,
       uncoveredCombinedCount: uncoveredCombinedAll.length,
       uncoveredCombinedAutoAiLayers: uncoveredCombinedAuto,
-      uncoveredCombinedAutoCount: uncoveredCombinedAuto.length
+      uncoveredCombinedAutoCount: uncoveredCombinedAuto.length,
+      perSheet
     };
   }
 
-  async function reconcileHistory(options = {}) {
-    if (reconciling || running || backfillRunning || settings().engineEnabled === false) return { skipped: true };
-    reconciling = true;
-    let announced = false;
-    let repairedCount = 0;
-    const auditReport = newHistoryAuditReport();
-    const st = settings();
-    const respectDelay = options?.respectDelay === true;
-    try {
-      let state = data().loadState();
-      // 一旦来源失效，立即裁剪彻底失效记录、重算游标，并从 Root 重放排除 stale 节点；
-      // 即使后续 API 修复失败，旧人物/实体与失效纪要也不会继续进入注入。
-      const auditOpts = { pruneDead: true, respectDelay };
-      const sourcesChanged = auditStoredSources(state, auditReport, auditOpts);
-      const summaryCursorChanged = recomputeSummaryCursor(state, auditReport, auditOpts._auditMeta);
-      if (sourcesChanged || summaryCursorChanged) {
-        state = replayTimeline(state);
-        data().saveState(state);
-        try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(state); } catch (_) {}
-      }
-      const timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
-      const hasStale = timeline.nodes.some(node => node.status === 'stale')
-        || eventMemory.small_summaries.some(item => item.status === 'stale');
+  // ==================== shujuku 风格 Wave 波次规划器（零 Token 预检） ====================
 
-      // 删除多楼导致部分旧纪要/节点被回退删除后，检测已追踪区间内产生的新未覆盖完整楼层段
-      const computeRefillBatches = () => {
-        if (options?.refillUncovered !== true) return [];
-        const curState = data().loadState();
-        const curEvent = ensureEventState(curState);
-        const curTimeline = ensureTimelineState(curState);
-        const tracked = curEvent.small_summaries.filter(item =>
-          isDialogueSummary(item) && isCurrentChatRecord(item) && Array.isArray(item.sourceRefs) && item.sourceRefs.length > 0
-        );
-        const trackedNodes = curTimeline.nodes.filter(node =>
-          (!node.kind || node.kind === 'memory') && isCurrentChatRecord(node) && Array.isArray(node.sourceRefs) && node.sourceRefs.length > 0
-        );
-        const prunedSome = (auditOpts._auditMeta?.prunedDialogueCount || 0) > 0
-          || (auditOpts._auditMeta?.prunedNodeCount || 0) > 0;
-        if (!tracked.length && !trackedNodes.length && !prunedSome) return [];
-        const stableEnd = respectDelay ? stableAutoEndLayer(st) : undefined;
-        if (stableEnd === -1) return [];
-        const maxLayer = stableEnd !== undefined ? stableEnd : (chat().length - 1);
-        const firstEligible = ignoreFirstLayer(st) ? 1 : 0;
-        const startCandidates = [
-          ...tracked.map(item => Math.max(firstEligible, Number(item.startLayer) || 0)),
-          ...trackedNodes.map(node => Math.max(firstEligible, Number(node.startLayer) || 0))
-        ];
-        if (Number.isFinite(Number(auditOpts._auditMeta?.earliestPrunedStartLayer))) {
-          startCandidates.push(Math.max(firstEligible, Number(auditOpts._auditMeta.earliestPrunedStartLayer)));
-        }
-        if (Number.isFinite(Number(auditOpts._auditMeta?.earliestPrunedNodeStartLayer))) {
-          startCandidates.push(Math.max(firstEligible, Number(auditOpts._auditMeta.earliestPrunedNodeStartLayer)));
-        }
-        const startBound = startCandidates.length ? Math.min(...startCandidates) : firstEligible;
-        const coveredSet = coveredDialogueAiLayersSet(curState);
-        const coveredMemSet = coveredMemoryAiLayersSet(curState);
-        const checkMem = trackedNodes.length > 0 || (auditOpts._auditMeta?.prunedNodeCount || 0) > 0;
-        const missingAi = collectEligibleAiLayers(st, startBound, maxLayer).filter(layer =>
-          !coveredSet.has(layer) || (checkMem && !coveredMemSet.has(layer))
-        );
-        return buildContiguousAiBatches(missingAi, Math.max(1, parseInt(st.smallSummaryEveryX) || 1));
+  function resolveSelectedSheets(rawSelection, stOverride) {
+    const st = stOverride || settings();
+    const allKeys = tableKeys();
+    const source = Array.isArray(rawSelection) && rawSelection.length
+      ? rawSelection
+      : (Array.isArray(st.catchUpSelectedTables) && st.catchUpSelectedTables.length
+        ? st.catchUpSelectedTables
+        : allKeys.filter(k => st.tableConfigs?.[k]?.enabled !== false));
+    const filtered = Array.from(new Set(source.filter(k => allKeys.includes(k))));
+    return filtered.length ? filtered : [...allKeys];
+  }
+
+  function splitLayersIntoBatches(aiLayers, batchSize) {
+    const size = Math.max(1, parseInt(batchSize, 10) || 1);
+    const out = [];
+    for (let i = 0; i < aiLayers.length; i += size) {
+      const slice = aiLayers.slice(i, i + size);
+      out.push({
+        startLayer: slice[0],
+        endLayer: slice[slice.length - 1],
+        aiLayers: slice
+      });
+    }
+    return out;
+  }
+
+  function prepareCatchUpPlan(options = {}) {
+    const st = settings();
+    const coverage = getSummaryCoverageStatus(st);
+    const includeCurrentFloor = options.includeCurrentFloor === true;
+    const selectedSheets = resolveSelectedSheets(options.selectedSheets, st);
+    const batchSize = Math.max(1, parseInt(options.batchSize ?? st.catchUpBatchSize ?? 3, 10) || 3);
+    const targetEndLayer = includeCurrentFloor ? coverage.latestAiLayer : coverage.latestAutoTargetLayer;
+    const skippedLatestCount = !includeCurrentFloor && coverage.effectiveDelayFloors > 0
+      ? Math.min(coverage.effectiveDelayFloors, coverage.totalAiCount)
+      : 0;
+
+    if (targetEndLayer < 0) {
+      const msg = coverage.effectiveDelayFloors > 0 && !includeCurrentFloor
+        ? '当前楼层处于延迟区（当前层不填表），暂无可追平楼层'
+        : '当前聊天没有可填表的 AI 楼层';
+      return {
+        targetEndLayer: -1,
+        totalAiCount: coverage.totalAiCount,
+        skippedLatestCount,
+        selectedSheets,
+        batchSize,
+        waves: [],
+        totalBatches: 0,
+        totalUncoveredAiFloors: 0,
+        staleCount: coverage.staleCount,
+        alreadyCaughtUp: true,
+        summaryText: msg,
+        perSheet: coverage.perSheet
+      };
+    }
+
+    // 扫描所有目标 AI 楼层，按每层缺失表的精确集合切分连续 Wave（同集合连续楼层自动合流！）
+    const minLayer = Number.isFinite(Number(options.minLayer)) ? Number(options.minLayer) : -1;
+    const missingSets = {};
+    const unionLayers = new Set();
+    for (const k of selectedSheets) {
+      const rawList = includeCurrentFloor
+        ? (coverage.perSheet[k]?.uncoveredLayers || [])
+        : (coverage.perSheet[k]?.uncoveredAutoLayers || []);
+      const list = minLayer >= 0 ? rawList.filter(l => l >= minLayer) : rawList;
+      missingSets[k] = new Set(list);
+      for (const l of list) unionLayers.add(l);
+    }
+
+    const sortedLayers = Array.from(unionLayers).sort((a, b) => a - b);
+    const waves = [];
+    const schemas = tableSchemas();
+
+    for (const layer of sortedLayers) {
+      const needSheets = selectedSheets.filter(k => missingSets[k].has(layer));
+      if (!needSheets.length) continue;
+      const sig = needSheets.join(',');
+      const prev = waves[waves.length - 1];
+      if (prev && prev.signature === sig) {
+        prev.aiLayers.push(layer);
+        prev.endLayer = layer;
+      } else {
+        waves.push({
+          signature: sig,
+          startLayer: layer,
+          endLayer: layer,
+          aiLayers: [layer],
+          sheets: needSheets,
+          sheetNames: needSheets.map(k => schemas[k]?.shortName || k),
+          batches: []
+        });
+      }
+    }
+
+    let totalBatches = 0;
+    for (const wave of waves) {
+      const chunks = splitLayersIntoBatches(wave.aiLayers, batchSize);
+      wave.batches = chunks.map(c => ({
+        ...c,
+        sheets: [...wave.sheets],
+        sheetNames: [...wave.sheetNames]
+      }));
+      totalBatches += wave.batches.length;
+    }
+
+    const alreadyCaughtUp = totalBatches === 0;
+    const waveLines = waves.map((w, idx) =>
+      `第 ${idx + 1} 波：AI 楼层 ${formatLayerSpan(w.startLayer, w.endLayer, '–')}（${w.aiLayers.length} 层 · ${w.batches.length} 批）→ ${w.sheetNames.join('、')}`
+    );
+    const skipNote = skippedLatestCount > 0 ? `（已按延迟保护跳过最新 ${skippedLatestCount} 条 AI 回复）` : '';
+    const summaryText = alreadyCaughtUp
+      ? `所选 ${selectedSheets.length} 张表均已追平至第 ${targetEndLayer} 层${skipNote}，无需补填`
+      : `待补 ${sortedLayers.length} 条 AI 回复至第 ${targetEndLayer} 层${skipNote}，合并为 ${waves.length} 波 / ${totalBatches} 批（每批最多 ${batchSize} 层）`;
+
+    return {
+      targetEndLayer,
+      totalAiCount: coverage.totalAiCount,
+      skippedLatestCount,
+      selectedSheets,
+      batchSize,
+      waves,
+      waveLines,
+      totalBatches,
+      totalUncoveredAiFloors: sortedLayers.length,
+      staleCount: coverage.staleCount,
+      alreadyCaughtUp,
+      summaryText,
+      perSheet: coverage.perSheet
+    };
+  }
+
+  // ==================== API 调用 + 带错回灌纠错重试 ====================
+
+  async function callTableFillWithRetry(batch, targetSheets, baseState, options = {}) {
+    const st = settings();
+    const api = window.WORLD_ENGINE_API;
+    if (!api?.callApi) throw new Error('API 模块未就绪');
+    const cfg = {
+      apiUrl: st.apiUrl,
+      apiKey: st.apiKey,
+      model: st.model,
+      connectionMode: st.connectionMode,
+      temperature: st.temperature,
+      maxTokens: st.maxTokens,
+      apiTimeoutMs: st.apiTimeoutMs,
+      stream: st.stream,
+      streamIdleTimeoutMs: st.streamIdleTimeoutMs,
+      jsonMode: st.jsonMode,
+      topP: st.topP,
+      reasoningEffort: st.reasoningEffort
+    };
+
+    const hints = getBridgeHints();
+    const worldbook = await loadWorldbookContext(batch.conversation, st);
+    const refContext = options.skipReference ? '' : previousRawReference(batch.dialogueStart, st);
+    const nextCode = data().nextChronicleCode(baseState?.tables?.chronicle);
+    const baseMessages = promptApi().buildMessages({
+      targetSheets,
+      tables: baseState?.tables || data().emptyTables(),
+      currentStoryTime: currentStoryTimeFrom(baseState),
+      worldbook,
+      outlineFocusHint: hints.outlineFocusHint || '',
+      worldContextHint: hints.worldContextHint || '',
+      referenceContext: refContext,
+      referenceChronicleCount: st.referenceSmallSummaryCount,
+      beforeLayer: options.beforeLayer ?? batch.startLayer,
+      conversation: batch.conversation,
+      startLayer: batch.startLayer,
+      endLayer: batch.endLayer,
+      aiCount: batch.aiCount,
+      minChars: st.smallSummaryMinChars,
+      nextChronicleCode: nextCode,
+      tonePrompt: st.tonePrompt,
+      customSystemPrompt: st.tableFillSystemPrompt,
+      customSheetRules: st.tableFillSheetRules
+    });
+
+    const defaultFormatRetries = st.tableFillMaxRetries !== undefined && st.tableFillMaxRetries !== null
+      ? st.tableFillMaxRetries
+      : (st.apiAutoRetries ?? 2);
+    const maxFormatRetries = Math.max(0, parseInt(options.formatRetries ?? defaultFormatRetries, 10) || 0);
+    const retryHistory = [];
+    let lastRaw = '';
+    let lastParsed = null;
+
+    for (let attempt = 0; attempt <= maxFormatRetries; attempt++) {
+      if (abortController?.signal?.aborted) {
+        const abortErr = new Error('已取消');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+      const messages = retryHistory.length
+        ? promptApi().buildRetryCorrectionMessages(baseMessages, retryHistory, targetSheets)
+        : baseMessages;
+      const promptText = typeof promptApi().messagesToPromptString === 'function'
+        ? promptApi().messagesToPromptString(messages)
+        : messages.map(m => m.content).join('\n\n---\n\n');
+
+      const sheetLabel = targetSheets.map(k => tableSchemas()[k]?.shortName || k).join('/');
+      const purpose = `${options.purpose || '填表'} [${formatLayerSpan(batch.startLayer, batch.endLayer)}] (${sheetLabel})${attempt > 0 ? ` · 纠错重试${attempt}` : ''}`;
+
+      const invokeOnce = async () => {
+        let capturedLogId = null;
+        api.setNextRequestMeta?.({
+          module: 'memory',
+          purpose,
+          attempt: attempt + 1,
+          maxAttempts: maxFormatRetries + 1,
+          onLogId: id => { capturedLogId = id; }
+        });
+        const raw = await api.callApi(promptText, st.maxTokens, st.temperature, abortController?.signal, cfg);
+        return { raw, logId: capturedLogId };
       };
 
-      const initialRefillBatches = computeRefillBatches();
-      if (!hasStale && !initialRefillBatches.length) {
-        applyInjection();
-        if (sourcesChanged || summaryCursorChanged) refreshMemoryPanel();
-        return { repaired: false, rolledBack: sourcesChanged || summaryCursorChanged };
+      const { raw, logId } = typeof api.executeWithRetry === 'function'
+        ? await api.executeWithRetry(invokeOnce, {
+            retries: Math.max(0, parseInt(options.networkRetries ?? st.apiAutoRetries ?? 0, 10) || 0),
+            signal: abortController?.signal
+          })
+        : await invokeOnce();
+
+      lastRaw = raw;
+      const parsed = parseAndValidateTableResponse(raw, targetSheets, {
+        tables: baseState?.tables,
+        minChars: st.smallSummaryMinChars
+      });
+      lastParsed = parsed;
+
+      lastDebug = {
+        at: Date.now(),
+        targetSheets: [...targetSheets],
+        range: formatLayerSpan(batch.startLayer, batch.endLayer),
+        attempt: attempt + 1,
+        requestPrompt: promptText,
+        rawResult: raw,
+        ok: parsed.ok,
+        errors: parsed.errors
+      };
+
+      if (parsed.ok) {
+        const summaryParts = [];
+        if (parsed.tableOps.length) summaryParts.push(`表变更 ${parsed.tableOps.length} 项`);
+        if (parsed.chronicleRows.length) summaryParts.push(`纪要 +${parsed.chronicleRows.length}`);
+        if (logId) api.updateRequestLog?.(logId, { phase: `完成（${summaryParts.join(' · ') || '无变更'}）` });
+        return { ...parsed, raw, attempts: attempt + 1 };
       }
-      runningLabel = '历史记忆对账';
-      abortController = new AbortController();
-      setExternalStatus(historyAuditMessage(auditReport, 'detected'));
-      window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, runningLabel);
-      announced = true;
 
-      for (const node of ensureTimelineState(data().loadState()).nodes.slice()) {
-        if (node.status !== 'stale') continue;
-        const current = data().loadState();
-        const currentEvent = ensureEventState(current);
-        const nodeSourceDigest = clean(node.sourceDigest)
-          || timelineApi()?.digestRefs?.(node.sourceRefs || []) || '';
-        const pairedSummary = nodeSourceDigest ? currentEvent.small_summaries.find(summary => {
-          if (summary.status !== 'stale') return false;
-          const summaryDigest = clean(summary.sourceDigest)
-            || timelineApi()?.digestRefs?.(summary.sourceRefs || []) || '';
-          return summaryDigest === nodeSourceDigest;
-        }) : null;
-        const repairedTogether = pairedSummary
-          ? await repairMemoryAndSmall(node.id, pairedSummary.id)
-          : false;
-        if (repairedTogether) repairedCount += Math.max(1, Number(repairedTogether.updated || 0));
-        else if (await repairMemoryNode(node.id)) repairedCount += 1;
+      if (logId) {
+        api.updateRequestLog?.(logId, {
+          status: 'error',
+          phase: '解析失败',
+          error: parsed.errors.join('；')
+        });
       }
-      state = data().loadState();
-      const postNodeOpts = { pruneDead: true, respectDelay };
-      auditStoredSources(state, null, postNodeOpts);
-      recomputeSummaryCursor(state, null, postNodeOpts._auditMeta);
-      state = replayTimeline(state);
-      data().saveState(state);
-
-      for (const summary of ensureEventState(data().loadState()).small_summaries.slice()) {
-        if (summary.status === 'stale' && await repairSmallSummary(summary.id)) repairedCount += 1;
+      retryHistory.push({ response: raw, errors: parsed.errors });
+      if (attempt < maxFormatRetries) {
+        console.warn(`[记忆引擎] 填表输出校验失败，准备第 ${attempt + 1} 次带错回灌纠错重试：`, parsed.errors);
       }
-      state = data().loadState();
-      const postSmallOpts = { pruneDead: true, respectDelay };
-      auditStoredSources(state, null, postSmallOpts);
-      recomputeSummaryCursor(state, null, postSmallOpts._auditMeta);
-      state = replayTimeline(state);
-      data().saveState(state);
+    }
 
-      const finalTimeline = ensureTimelineState(state), finalEventMemory = ensureEventState(state);
-      const unresolved = finalTimeline.nodes.some(node => node.status === 'stale')
-        || finalEventMemory.small_summaries.some(item => item.status === 'stale');
-      if (unresolved) throw new Error('仍有相关记忆或纪要未能重建');
+    throw new Error(`填表解析失败（已纠错重试 ${maxFormatRetries} 次）：${(lastParsed?.errors || ['没有合法 JSON 对象']).join('；')}`);
+  }
 
-      // 若多楼删除回退后产生了未覆盖的完整楼层段，按纪要间隔重新填表
-      const refillBatches = computeRefillBatches();
-      for (const batch of refillBatches) {
-        if (abortController?.signal?.aborted) break;
-        const cur = data().loadState();
-        const curTimeline = ensureTimelineState(cur);
-        const hasMemoryTracking = curTimeline.nodes.some(n => (!n.kind || n.kind === 'memory') && isCurrentChatRecord(n))
-          || (auditOpts._auditMeta?.prunedNodeCount || 0) > 0;
-        const curCoveredSmall = coveredDialogueAiLayersSet(cur);
-        const curCoveredMem = coveredMemoryAiLayersSet(cur);
-        const needSmall = batch.aiLayers.some(layer => !curCoveredSmall.has(layer));
-        const needMemory = hasMemoryTracking && batch.aiLayers.some(layer => !curCoveredMem.has(layer));
-        if (!needSmall && !needMemory) continue;
-        const reqTasks = {
-          ...(needMemory ? { memory: batch } : {}),
-          ...(needSmall ? { small: batch } : {})
-        };
-        const extracted = await requestTasks(reqTasks, { baseState: cur });
-        let fallbackConfirmedEmpty = false;
-        if (needMemory && needSmall && extracted && (
-          extracted.hasMemoryPayload === false
-          || (Number(extracted.memoryItemCount) === 0 && clean(batch.conversation).length >= 40)
-        )) {
-          try {
-            const fallbackMem = await requestTasks({ memory: batch }, { baseState: cur });
-            if (fallbackMem) {
-              fallbackConfirmedEmpty = true;
-              if (fallbackMem.hasMemoryPayload || Number(fallbackMem.memoryItemCount) > 0) {
-                extracted.personal = fallbackMem.personal || [];
-                extracted.profileUpdates = fallbackMem.profileUpdates || [];
-                extracted.entities = fallbackMem.entities || extracted.entities;
-                extracted.factUpdates = fallbackMem.factUpdates || [];
-                extracted.arcUpdates = fallbackMem.arcUpdates || [];
-                extracted.hasMemoryPayload = Boolean(fallbackMem.hasMemoryPayload);
-                extracted.memoryItemCount = Number(fallbackMem.memoryItemCount) || 0;
-              }
-            }
-          } catch (_) {}
-        }
-        const afterReq = data().loadState();
-        let batchUpdated = false;
-        if (needMemory && extracted) {
-          const tl = ensureTimelineState(afterReq);
-          if (!tl.nodes.length) {
-            tl.root.base = {
-              personal_memory: clone(afterReq.personal_memory || []),
-              knowledge_index: clone(afterReq.knowledge_index || {}),
-              entity_memory: clone(afterReq.entity_memory || {}),
-              entity_index: clone(afterReq.entity_index || {}),
-              ongoing_facts: clone(afterReq.ongoing_facts || []),
-              character_arcs: clone(afterReq.character_arcs || []),
-              round: Math.max(0, Number(afterReq.round) || 0),
-              chatLayer: afterReq.chatLayer ?? null
-            };
+  // ==================== 单批执行与落盘 ====================
+
+  function nextNodeId(nodes) {
+    const max = (Array.isArray(nodes) ? nodes : []).reduce((acc, n) => {
+      const m = /^memory_(\d+)$/.exec(clean(n?.id));
+      return Math.max(acc, m ? Number(m[1]) : 0);
+    }, 0);
+    return `memory_${String(max + 1).padStart(6, '0')}`;
+  }
+
+  function nextChronicleId(rows) {
+    const max = (Array.isArray(rows) ? rows : []).reduce((acc, r) => {
+      const m = /^small_(\d+)$/.exec(clean(r?.id));
+      return Math.max(acc, m ? Number(m[1]) : 0);
+    }, 0);
+    return `small_${String(max + 1).padStart(6, '0')}`;
+  }
+
+  async function executeTableFillBatch(batch, options = {}) {
+    const originChatId = data().getChatId();
+    const targetSheets = Array.isArray(options.targetSheets) && options.targetSheets.length
+      ? Array.from(new Set(options.targetSheets))
+      : tableKeys();
+    const baseState = options.baseState ? clone(options.baseState) : data().loadState();
+
+    const result = await callTableFillWithRetry(batch, targetSheets, baseState, {
+      purpose: options.purpose || '结构化填表',
+      networkRetries: options.retries,
+      formatRetries: options.formatRetries
+    });
+
+    if (originChatId !== data().getChatId()) {
+      throw new Error('填表期间聊天已切换，本次结果未写入');
+    }
+    if (options.expectedEpoch !== undefined && options.expectedEpoch !== autoFillEpoch) {
+      return { skipped: true, reason: 'epoch_stale' };
+    }
+
+    const latest = data().loadState();
+    const tl = ensureTimelineState(latest);
+    const overwrite = options.overwrite === true;
+    const now = Date.now();
+    const aiLayerSet = new Set(batch.aiLayers || []);
+
+    // 若为覆盖模式或修复 stale，先移除同范围内冲突的旧节点/旧纪要（覆盖模式绝不误杀包含范围外楼层的跨区节点）
+    const nonChronTargets = targetSheets.filter(k => k !== 'chronicle');
+    if (nonChronTargets.length) {
+      if (overwrite || options.replaceStale) {
+        const rangeMin = Number.isFinite(Number(options.overwriteStartLayer)) ? Number(options.overwriteStartLayer) : batch.startLayer;
+        const rangeMax = Number.isFinite(Number(options.overwriteEndLayer)) ? Number(options.overwriteEndLayer) : batch.endLayer;
+        for (const node of tl.nodes) {
+          if (!node || node.kind === 'manual_snapshot' || node.kind === 'world_link') continue;
+          const nodeLayers = node.status === 'stale' ? survivingAiLayersForRecord(node) : aiLayersCoveredByRecord(node);
+          const overlaps = nodeLayers.some(l => aiLayerSet.has(l));
+          if (!overlaps) continue;
+          const containedInOverwrite = nodeLayers.length > 0 && nodeLayers.every(l => l >= rangeMin && l <= rangeMax);
+          if ((overwrite && containedInOverwrite) || (options.replaceStale && node.status === 'stale')) {
+            node.targetSheets = (node.targetSheets || []).filter(k => !nonChronTargets.includes(k));
+            node.tableOps = (node.tableOps || []).filter(op => !nonChronTargets.includes(op.sheet));
+            if (!node.targetSheets.length && !node.tableOps.length) node._drop = true;
           }
-          const bStart = Number(batch.startLayer) || 0;
-          tl.nodes = tl.nodes.filter(node => {
-            if (!(isCurrentChatRecord(node) && node.kind === 'manual_snapshot' && Number(node.endLayer) >= bStart)) {
-              return true;
-            }
-            if (!snapshotHasMemory(node.snapshot)) return false;
-            const rebased = bStart - 1;
-            node.endLayer = rebased;
-            node.startLayer = Math.min(Number(node.startLayer) || 0, rebased);
-            return true;
-          });
-          appendTimelineNode(afterReq, extracted, batch, {
-            layer: batch.endLayer,
-            _confirmedEmptyMemory: fallbackConfirmedEmpty,
-            _hadCombinedSmallTask: needSmall
-          });
-          tl.nodes = sortTimelineNodes(tl.nodes);
-          batchUpdated = true;
         }
-        if (needSmall && clean(extracted?.smallSummary)) {
-          const ev = ensureEventState(afterReq);
-          const sourceDigest = timelineApi()?.digestRefs?.(batch.sourceRefs || []) || '';
-          ev.small_summaries.push({
-            id: nextSmallSummaryId(ev),
-            startLayer: batch.startLayer,
-            endLayer: batch.endLayer,
-            content: extracted.smallSummary,
-            keywords: unique(extracted.smallSummaryKeywords),
-            entityNames: unique(extracted.smallSummaryEntities),
-            impactLevel: extracted.smallSummaryImpact === 'key' ? 'key' : 'normal',
-            sourceRefs: clone(batch.sourceRefs || []),
-            sourceDigest,
-            originChatId: data()?.getChatId?.() || 'default',
-            status: 'valid',
-            revision: 1
-          });
-          ev.small_summaries = sortSmallSummaries(ev.small_summaries);
-          const prevCur = ev.small_summary_layer !== null && ev.small_summary_layer !== ''
-            && Number.isFinite(Number(ev.small_summary_layer)) ? Number(ev.small_summary_layer) : -1;
-          ev.small_summary_layer = Math.min(currentLayer(), Math.max(prevCur, batch.endLayer));
-          batchUpdated = true;
-        }
-        if (batchUpdated) {
-          const saved = needMemory ? replayTimeline(afterReq) : afterReq;
-          data().saveState(saved);
-          repairedCount += 1;
-          refreshMemoryPanel();
-        }
+        tl.nodes = tl.nodes.filter(n => !n._drop);
       }
 
-      const finalSaved = data().loadState();
-      try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(finalSaved); } catch (_) {}
-      applyInjection();
-      refreshMemoryPanel();
-      refreshVectorRecallAsync(finalSaved);
-      setExternalStatus(historyAuditMessage(auditReport, 'success'));
-      return { repaired: true, repairedCount, rolledBack: sourcesChanged || summaryCursorChanged };
-    } catch (error) {
-      const state = data().loadState();
-      const errOpts = { pruneDead: true, respectDelay };
-      auditStoredSources(state, auditReport, errOpts);
-      recomputeSummaryCursor(state, auditReport, errOpts._auditMeta);
-      const rolled = replayTimeline(state);
-      data().saveState(rolled);
-      try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(rolled); } catch (_) {}
-      applyInjection(); // 失效摘要不注入，正文会恢复，避免信息洞。
-      refreshMemoryPanel();
-      setExternalStatus(historyAuditMessage(auditReport, 'failed', error), true);
-      throw error;
-    } finally {
-      reconciling = false;
-      runningLabel = '';
-      abortController = null;
-      if (announced) window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(false, '');
+      tl.nodes.push({
+        id: nextNodeId(tl.nodes),
+        kind: options.kind || 'table_ops',
+        ...(clean(options.sourceKey) ? { sourceKey: clean(options.sourceKey) } : {}),
+        ...(clean(options.worldCommitId) ? { worldCommitId: clean(options.worldCommitId) } : {}),
+        originChatId,
+        startLayer: batch.startLayer,
+        endLayer: batch.endLayer,
+        sourceRefs: clone(batch.sourceRefs || []),
+        sourceDigest: batch.sourceDigest || '',
+        targetSheets: [...nonChronTargets],
+        tableOps: clone(result.tableOps || []),
+        snapshot: null,
+        status: 'valid',
+        revision: 1,
+        createdAt: now,
+        updatedAt: now
+      });
     }
-  }
 
-  function abort() {
-    backfillRunning = false;
-    clearTimeout(historyRefillTimer);
-    abortController?.abort();
-    try { window.MEMORY_ENGINE_VECTOR?.abort?.(); } catch (_) {}
-  }
+    let addedChronicle = 0;
+    if (targetSheets.includes('chronicle') && result.chronicleRows.length) {
+      if (overwrite || options.replaceStale) {
+        const rangeMin = Number.isFinite(Number(options.overwriteStartLayer)) ? Number(options.overwriteStartLayer) : batch.startLayer;
+        const rangeMax = Number.isFinite(Number(options.overwriteEndLayer)) ? Number(options.overwriteEndLayer) : batch.endLayer;
+        latest.tables.chronicle = (latest.tables.chronicle || []).filter(row => {
+          if (row.source === 'world_engine') return true;
+          const rowLayers = row.status === 'stale' ? survivingAiLayersForRecord(row) : aiLayersCoveredByRecord(row);
+          const overlaps = rowLayers.some(l => aiLayerSet.has(l));
+          if (!overlaps) return true;
+          if (options.replaceStale && row.status === 'stale') return false;
+          if (overwrite && rowLayers.length > 0 && rowLayers.every(l => l >= rangeMin && l <= rangeMax)) return false;
+          return true;
+        });
+      }
+      const existingDigests = new Set((latest.tables.chronicle || []).filter(r => r.status === 'valid').map(r => r.sourceDigest).filter(Boolean));
+      const usedCodes = new Set((latest.tables.chronicle || []).map(r => r.code_index));
+      const outlineChapter = (() => {
+        try {
+          const os = window.OUTLINE_ENGINE_DATA?.loadState?.();
+          const ch = (os?.plan?.chapters || []).find(c => c.id === os?.currentChapterId);
+          return clean(ch?.title);
+        } catch (_) { return ''; }
+      })();
 
-  function clearInjection() {
-    const ctx = context();
-    if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, '', 1, 1);
-    else if (typeof ctx?.unregisterInjection === 'function') ctx.unregisterInjection(INJECTION_NAME);
-  }
-
-  function registerInjection(content) {
-    const ctx = context();
-    if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, content, 1, 1);
-    else if (typeof ctx?.registerInjection === 'function') {
-      ctx.unregisterInjection?.(INJECTION_NAME);
-      ctx.registerInjection(INJECTION_NAME, content, { position: 1, depth: 1, role: 'system' });
+      for (const entry of result.chronicleRows) {
+        if (!overwrite && batch.sourceDigest && existingDigests.has(batch.sourceDigest)) continue;
+        const row = data().normalizeTableRow('chronicle', {
+          ...entry,
+          id: nextChronicleId(latest.tables.chronicle),
+          startLayer: batch.startLayer,
+          endLayer: batch.endLayer,
+          sourceRefs: clone(batch.sourceRefs || []),
+          sourceDigest: batch.sourceDigest || '',
+          originChatId,
+          ...(outlineChapter ? { outlineChapterTitle: outlineChapter } : {}),
+          status: 'valid',
+          revision: 1
+        }, (latest.tables.chronicle?.length || 0) + 1, usedCodes);
+        if (row) {
+          latest.tables.chronicle.push(row);
+          addedChronicle++;
+        }
+      }
     }
+
+    const replayed = replayTimeline(latest);
+    if (options.saveCheckpoint !== false) data().saveCheckpoint(baseState);
+    const saved = data().saveState(replayed);
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+    return {
+      ok: true,
+      added: result.tableOps.length + addedChronicle,
+      opsCount: result.tableOps.length,
+      addedSmall: addedChronicle,
+      attempts: result.attempts,
+      state: saved
+    };
   }
 
-  async function prepareHistoryForGeneration(options = {}) {
-    if (settings().engineEnabled === false) return { invalidated: false };
+  // ==================== 审计、删楼同步回退与历史修复 ====================
+
+  function extractAiLayersFromRefs(refs) {
+    const all = chat();
+    const out = [];
+    for (const ref of Array.isArray(refs) ? refs : []) {
+      if (!ref || ref.synthetic === true) continue;
+      const layer = Number(ref.layer);
+      if (!Number.isFinite(layer) || layer < 0) continue;
+      const isAssistant = ref.role === 'assistant'
+        || (!ref.role && all[layer] && isFillEligibleAiMessage(all[layer]));
+      if (isAssistant) out.push(layer);
+    }
+    return unique(out).map(Number).sort((a, b) => a - b);
+  }
+
+  function sameRefLayers(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (Number(a[i]?.layer) !== Number(b[i]?.layer) || clean(a[i]?.messageId) !== clean(b[i]?.messageId)) return false;
+    }
+    return true;
+  }
+
+  function auditStoredSources(state, options = {}) {
+    const pruneDead = options.pruneDead !== false;
+    const tl = ensureTimelineState(state);
+    const auditFn = timelineApi()?.auditRefs;
+    const all = chat();
+    let changed = false;
+
+    const nextNodes = [];
+    for (const node of tl.nodes) {
+      if (!node || node.kind === 'manual_snapshot') { nextNodes.push(node); continue; }
+      if (node.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(node.worldCommitId) === false) {
+        changed = true;
+        continue;
+      }
+      if (!isCurrentChatRecord(node)) { nextNodes.push(node); continue; }
+      const refs = Array.isArray(node.sourceRefs) ? node.sourceRefs : [];
+      if (!refs.length || refs.every(r => r?.synthetic === true)) {
+        if (pruneDead && (node.kind === 'world_link' || node.source === 'world_engine')) {
+          const endL = Number(node.endLayer);
+          if (all.length === 0 || (Number.isFinite(endL) && endL >= all.length)) {
+            changed = true;
+            continue;
+          }
+        }
+        nextNodes.push(node);
+        continue;
+      }
+      if (typeof auditFn !== 'function') { nextNodes.push(node); continue; }
+
+      const check = auditFn(refs);
+      if (check?.valid) {
+        const updatedRefs = Array.isArray(check.refs) && check.refs.length ? clone(check.refs) : refs;
+        const aiLayers = extractAiLayersFromRefs(updatedRefs);
+        if (node.status === 'stale') { node.status = 'valid'; changed = true; }
+        if (!sameRefLayers(node.sourceRefs, updatedRefs)) {
+          node.sourceRefs = updatedRefs;
+          changed = true;
+        }
+        if (aiLayers.length) {
+          if (node.startLayer !== aiLayers[0] || node.endLayer !== aiLayers[aiLayers.length - 1]) {
+            node.startLayer = aiLayers[0];
+            node.endLayer = aiLayers[aiLayers.length - 1];
+            changed = true;
+          }
+        }
+        nextNodes.push(node);
+      } else {
+        const survivingRefs = Array.isArray(check?.refs) ? clone(check.refs) : [];
+        const survivingAi = extractAiLayersFromRefs(survivingRefs);
+        if (pruneDead && survivingAi.length === 0) {
+          changed = true; // 所覆盖 AI 楼层已全部删除或仅剩孤儿用户楼：彻底裁剪
+        } else {
+          if (node.status !== 'stale') { node.status = 'stale'; changed = true; }
+          nextNodes.push(node);
+        }
+      }
+    }
+    tl.nodes = nextNodes;
+
+    const nextChronicle = [];
+    for (const row of state.tables?.chronicle || []) {
+      if (!row) continue;
+      if (row.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(row.worldCommitId) === false) {
+        changed = true;
+        continue;
+      }
+      if (!isCurrentChatRecord(row)) { nextChronicle.push(row); continue; }
+      const refs = Array.isArray(row.sourceRefs) ? row.sourceRefs : [];
+      if (row.source === 'world_engine' || !refs.length || refs.every(r => r?.synthetic === true)) {
+        if (pruneDead && row.source === 'world_engine') {
+          const endL = Number(row.endLayer);
+          if (all.length === 0 || (Number.isFinite(endL) && endL >= all.length)) {
+            changed = true;
+            continue;
+          }
+        }
+        nextChronicle.push(row);
+        continue;
+      }
+      if (typeof auditFn !== 'function') { nextChronicle.push(row); continue; }
+
+      const check = auditFn(refs);
+      if (check?.valid) {
+        const updatedRefs = Array.isArray(check.refs) && check.refs.length ? clone(check.refs) : refs;
+        const aiLayers = extractAiLayersFromRefs(updatedRefs);
+        if (row.status === 'stale') { row.status = 'valid'; changed = true; }
+        if (!sameRefLayers(row.sourceRefs, updatedRefs)) {
+          row.sourceRefs = updatedRefs;
+          changed = true;
+        }
+        if (aiLayers.length) {
+          if (row.startLayer !== aiLayers[0] || row.endLayer !== aiLayers[aiLayers.length - 1]) {
+            row.startLayer = aiLayers[0];
+            row.endLayer = aiLayers[aiLayers.length - 1];
+            changed = true;
+          }
+        }
+        nextChronicle.push(row);
+      } else {
+        const survivingRefs = Array.isArray(check?.refs) ? clone(check.refs) : [];
+        const survivingAi = extractAiLayersFromRefs(survivingRefs);
+        if (pruneDead && survivingAi.length === 0) {
+          changed = true;
+        } else {
+          if (row.status !== 'stale') { row.status = 'stale'; changed = true; }
+          nextChronicle.push(row);
+        }
+      }
+    }
+    state.tables.chronicle = nextChronicle;
+    return changed;
+  }
+
+  function survivingAiLayersForRecord(record) {
+    const auditFn = timelineApi()?.auditRefs;
+    const refs = Array.isArray(record?.sourceRefs) ? record.sourceRefs : [];
+    if (typeof auditFn === 'function' && refs.length && !refs.every(r => r?.synthetic === true)) {
+      const check = auditFn(refs);
+      return extractAiLayersFromRefs(check?.refs || []);
+    }
+    return aiLayersCoveredByRecord(record);
+  }
+
+  function runLocalAuditAndReplay(options = {}) {
     restoreActiveWorldContributions();
-    const auditReport = newHistoryAuditReport();
     let state = data().loadState();
-    const auditOpts = { pruneDead: options?.pruneDead !== false, respectDelay: options?.respectDelay === true };
-    const sourcesChanged = auditStoredSources(state, auditReport, auditOpts);
-    const summaryCursorChanged = recomputeSummaryCursor(state, auditReport, auditOpts._auditMeta);
-    if (sourcesChanged || summaryCursorChanged) {
+    const changed = auditStoredSources(state, { pruneDead: options.pruneDead !== false });
+    if (changed) {
       state = replayTimeline(state);
       data().saveState(state);
       try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(state); } catch (_) {}
       refreshMemoryPanel();
     }
-    // stale 纪要不会再注入；其来源正文（例如第 3、4 楼）会从隐藏集合移除。
+    return { changed, state };
+  }
+
+  async function prepareHistoryForGeneration(options = {}) {
+    if (settings().engineEnabled === false) return { invalidated: false };
+    const { changed } = runLocalAuditAndReplay(options);
     applyInjection();
     await hiddenSyncPromise;
-    return { invalidated: sourcesChanged || summaryCursorChanged };
+    return { invalidated: changed };
+  }
+
+  async function reconcileHistory(options = {}) {
+    if (reconciling || running || backfillRunning || settings().engineEnabled === false) return { skipped: true };
+    reconciling = true;
+    let repairedCount = 0;
+    const st = settings();
+    const respectDelay = options?.respectDelay !== false;
+    try {
+      const { state } = runLocalAuditAndReplay({ pruneDead: true });
+      const stableEnd = respectDelay ? stableAutoEndLayer(st) : (collectEligibleAiLayers(st).at(-1) ?? -1);
+
+      // 收集需要重填的 stale 节点与纪要所对应的楼层和目标表；若处于延迟区且无稳态楼层可修，则直接裁剪 stale 尾项交由后续正常填表
+      const staleLayersBySheet = {};
+      for (const k of tableKeys()) staleLayersBySheet[k] = new Set();
+      let prunedDelayStale = false;
+      const keepNodes = [];
+      for (const node of state.timeline?.nodes || []) {
+        if (node?.status !== 'stale') { keepNodes.push(node); continue; }
+        const targets = Array.isArray(node.targetSheets) && node.targetSheets.length ? node.targetSheets : tableKeys().filter(k => k !== 'chronicle');
+        const eligible = survivingAiLayersForRecord(node).filter(l => stableEnd >= 0 && l <= stableEnd);
+        if (eligible.length) {
+          for (const l of eligible) for (const k of targets) staleLayersBySheet[k]?.add(l);
+          keepNodes.push(node);
+        } else if (respectDelay) {
+          prunedDelayStale = true;
+        } else {
+          keepNodes.push(node);
+        }
+      }
+      const keepChron = [];
+      for (const row of state.tables?.chronicle || []) {
+        if (row?.status !== 'stale' || row.source === 'world_engine') { keepChron.push(row); continue; }
+        const eligible = survivingAiLayersForRecord(row).filter(l => stableEnd >= 0 && l <= stableEnd);
+        if (eligible.length) {
+          for (const l of eligible) staleLayersBySheet.chronicle.add(l);
+          keepChron.push(row);
+        } else if (respectDelay) {
+          prunedDelayStale = true;
+        } else {
+          keepChron.push(row);
+        }
+      }
+      if (prunedDelayStale) {
+        state.timeline.nodes = keepNodes;
+        state.tables.chronicle = keepChron;
+        data().saveState(replayTimeline(state));
+      }
+
+      const staleUnion = new Set();
+      for (const k of tableKeys()) for (const l of staleLayersBySheet[k]) staleUnion.add(l);
+      const staleSorted = Array.from(staleUnion).sort((a, b) => a - b);
+
+      if (staleSorted.length) {
+        abortController = new AbortController();
+        setRunningUI(true, '历史记忆对账');
+        setExternalStatus('记忆引擎：修复已修改楼层…');
+        // 按连续同表集合分波修复
+        const waves = [];
+        for (const layer of staleSorted) {
+          const sheets = tableKeys().filter(k => staleLayersBySheet[k].has(layer));
+          const sig = sheets.join(',');
+          const prev = waves[waves.length - 1];
+          if (prev && prev.sig === sig) prev.layers.push(layer);
+          else waves.push({ sig, sheets, layers: [layer] });
+        }
+        for (const wave of waves) {
+          if (abortController.signal.aborted) break;
+          const batch = buildBatchFromAiLayers(wave.layers, st);
+          if (!batch || !batch.conversation) continue;
+          await executeTableFillBatch(batch, {
+            targetSheets: wave.sheets,
+            replaceStale: true,
+            purpose: '历史改写修复'
+          });
+          repairedCount++;
+        }
+      }
+
+      if (options.refillUncovered === true && st.evolveMode === 'auto' && st.autoRefillOnHistoryChange !== false) {
+        const curState = data().loadState();
+        const autoBase = curState.autoBaselineLayer !== null && curState.autoBaselineLayer !== undefined && Number.isFinite(Number(curState.autoBaselineLayer))
+          ? Number(curState.autoBaselineLayer) : -1;
+        const plan = prepareCatchUpPlan({
+          includeCurrentFloor: !respectDelay,
+          minLayer: autoBase >= 0 ? autoBase + 1 : undefined,
+          batchSize: st.catchUpBatchSize || 3
+        });
+        if (!plan.alreadyCaughtUp && plan.waves.length) {
+          if (!abortController) abortController = new AbortController();
+          setRunningUI(true, '补齐历史缺口');
+          for (const wave of plan.waves) {
+            for (const b of wave.batches) {
+              if (abortController.signal.aborted) break;
+              const batch = buildBatchFromAiLayers(b.aiLayers, st);
+              if (!batch || !batch.conversation) continue;
+              await executeTableFillBatch(batch, {
+                targetSheets: b.sheets,
+                overwrite: false,
+                purpose: '历史变动补漏'
+              });
+              repairedCount++;
+            }
+          }
+        }
+      }
+      return { repaired: repairedCount > 0 || prunedDelayStale, repairedCount };
+    } catch (error) {
+      lastError = clean(error?.message || error);
+      console.warn('[记忆引擎] 历史修复失败', error);
+      return { repaired: repairedCount > 0, repairedCount, error: lastError };
+    } finally {
+      reconciling = false;
+      abortController = null;
+      setRunningUI(false, '');
+      applyInjection();
+      refreshMemoryPanel();
+      if (repairedCount > 0) refreshVectorRecallAsync(data().loadState());
+    }
+  }
+
+  // ==================== 平时自动填表（分表独立频率 + 同批合流 + Epoch 保护） ====================
+
+  async function autoExtract(expectedEpoch) {
+    const st = settings();
+    if (st.engineEnabled === false || running || backfillRunning || reconciling) return;
+    if (expectedEpoch !== undefined && expectedEpoch !== autoFillEpoch) return;
+    const originChatId = data().getChatId();
+
+    await reconcileHistory({
+      respectDelay: true,
+      refillUncovered: false
+    });
+    if (st.evolveMode !== 'auto') return;
+    if (expectedEpoch !== undefined && expectedEpoch !== autoFillEpoch) return;
+    if (originChatId !== data().getChatId()) return;
+
+    const coverage = getSummaryCoverageStatus(st);
+    if (coverage.latestAutoTargetLayer < 0) return;
+
+    const currentState = data().loadState();
+    const autoBaseline = currentState.autoBaselineLayer !== null && currentState.autoBaselineLayer !== undefined && Number.isFinite(Number(currentState.autoBaselineLayer))
+      ? Number(currentState.autoBaselineLayer) : -1;
+
+    // 逐表判断到期条件（支持 per-sheet 独立频率，仅针对首次进聊基线之后的新楼层触发自动填表；历史补齐交由一键追平）
+    const dueSheets = [];
+    for (const key of tableKeys()) {
+      const info = coverage.perSheet[key];
+      if (!info || !info.enabled) continue;
+      const defaultFreq = key === 'chronicle'
+        ? Math.max(1, parseInt(st.smallSummaryEveryX, 10) || 1)
+        : Math.max(1, parseInt(st.evolveEveryX, 10) || 1);
+      const freq = info.updateFrequency > 0 ? info.updateFrequency : defaultFreq;
+      const autoNewLayers = autoBaseline >= 0
+        ? info.uncoveredAutoLayers.filter(l => l > autoBaseline)
+        : info.uncoveredAutoLayers;
+      if (autoNewLayers.length >= freq) dueSheets.push(key);
+    }
+    if (!dueSheets.length) return;
+
+    const plan = prepareCatchUpPlan({
+      selectedSheets: dueSheets,
+      includeCurrentFloor: false,
+      minLayer: autoBaseline >= 0 ? autoBaseline + 1 : undefined,
+      batchSize: Math.max(1, parseInt(st.smallSummaryEveryX, 10) || 1)
+    });
+    if (plan.alreadyCaughtUp || !plan.waves.length) return;
+
+    abortController = new AbortController();
+    setRunningUI(true, '自动填表');
+    setExternalStatus('记忆引擎：自动填表中…');
+    lastError = '';
+    let completed = 0;
+    try {
+      for (const wave of plan.waves) {
+        for (const b of wave.batches) {
+          if (abortController.signal.aborted) break;
+          if (expectedEpoch !== undefined && expectedEpoch !== autoFillEpoch) break;
+          if (originChatId !== data().getChatId()) break;
+          const batch = buildBatchFromAiLayers(b.aiLayers, st);
+          if (!batch || !batch.conversation) continue;
+          await executeTableFillBatch(batch, {
+            targetSheets: b.sheets,
+            overwrite: false,
+            expectedEpoch,
+            purpose: '自动填表'
+          });
+          completed++;
+        }
+      }
+      if (completed > 0) setExternalStatus('记忆引擎：自动填表完成');
+      return { ok: true, completedBatches: completed, state: data().loadState() };
+    } catch (error) {
+      lastError = clean(error?.message || error);
+      setExternalStatus(`记忆引擎填表失败：${lastError}`, true);
+      throw error;
+    } finally {
+      abortController = null;
+      setRunningUI(false, '');
+      applyInjection();
+      refreshMemoryPanel();
+      if (completed > 0) refreshVectorRecallAsync(data().loadState());
+    }
+  }
+
+  // ==================== 一键追平（Wave 波次智能合流）与范围填表 ====================
+
+  async function catchUpToLatest(options = {}) {
+    const st = settings(), all = chat();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (backfillRunning || running || reconciling) throw new Error('已有记忆任务正在运行');
+    if (!all.length) {
+      setSummaryBackfillStatus(0, 0, '当前聊天为空，无需追平');
+      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, repaired: 0, alreadyCaughtUp: true };
+    }
+
+    const includeCurrentFloor = options.includeCurrentFloor === true;
+    const respectDelay = includeCurrentFloor ? false : (options.respectDelay !== false);
+    const selectedSheets = resolveSelectedSheets(options.selectedSheets, st);
+    const batchSize = Math.max(1, parseInt(options.batchSize ?? st.catchUpBatchSize ?? 3, 10) || 3);
+
+    // 1. 零 Token 本地对账与死记录清理
+    runLocalAuditAndReplay({ pruneDead: true });
+
+    // 2. 修复目标边界之前的 stale 记录
+    let repaired = 0;
+    const preState = data().loadState();
+    const hasStale = (preState.timeline?.nodes || []).some(n => n.status === 'stale')
+      || (preState.tables?.chronicle || []).some(r => r.status === 'stale');
+    if (hasStale) {
+      const rec = await reconcileHistory({ respectDelay, refillUncovered: false });
+      repaired += Number(rec?.repairedCount || 0);
+    }
+
+    // 3. 重新规划 Wave 波次（吸收上述修复后的最新水位）
+    const plan = prepareCatchUpPlan({ selectedSheets, includeCurrentFloor, batchSize });
+    if (plan.alreadyCaughtUp || !plan.waves.length) {
+      const msg = repaired > 0
+        ? `已修复 ${repaired} 条历史记录并追平至第 ${plan.targetEndLayer} 层`
+        : plan.summaryText;
+      setSummaryBackfillStatus(0, 0, msg);
+      applyInjection();
+      refreshMemoryPanel();
+      refreshVectorRecallAsync(data().loadState());
+      return {
+        completedBatches: 0,
+        totalBatches: 0,
+        addedSmall: 0,
+        repaired,
+        targetEndLayer: plan.targetEndLayer,
+        alreadyCaughtUp: repaired === 0,
+        plan,
+        message: msg,
+        state: data().loadState()
+      };
+    }
+
+    backfillRunning = true;
+    abortController = new AbortController();
+    setRunningUI(true, '一键追平');
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('一键追平填表前自动备份');
+    data().saveCheckpoint(data().loadState());
+
+    let completedBatches = 0, addedSmall = 0;
+    const totalBatches = plan.totalBatches;
+    try {
+      for (const wave of plan.waves) {
+        if (!backfillRunning || abortController.signal.aborted) break;
+        for (const b of wave.batches) {
+          if (!backfillRunning || abortController.signal.aborted) break;
+          const label = `正在追平 ${completedBatches + 1}/${totalBatches} 批（楼层 ${formatLayerSpan(b.startLayer, b.endLayer, '–')} · ${b.sheetNames.join('/')}）`;
+          setSummaryBackfillStatus(completedBatches, totalBatches, label);
+          setExternalStatus(`记忆追平 ${completedBatches + 1}/${totalBatches}`);
+          const batch = buildBatchFromAiLayers(b.aiLayers, st);
+          if (!batch || !batch.conversation) continue;
+          const res = await executeTableFillBatch(batch, {
+            targetSheets: b.sheets,
+            overwrite: false,
+            retries: st.backfillRetries,
+            purpose: '一键追平'
+          });
+          if (res?.skipped) continue;
+          completedBatches++;
+          addedSmall += Number(res?.addedSmall || 0);
+        }
+      }
+      const stopped = !backfillRunning || abortController.signal.aborted;
+      const msg = stopped
+        ? `追平已停止（已完成 ${completedBatches}/${totalBatches} 批，已写内容已保留）`
+        : `已追平至第 ${plan.targetEndLayer} 层（共 ${plan.waves.length} 波 ${completedBatches} 批${repaired > 0 ? `，修复 ${repaired} 条` : ''}）`;
+      setSummaryBackfillStatus(completedBatches, totalBatches, msg);
+      setExternalStatus(stopped ? '记忆追平已停止' : '记忆追平完成');
+      return {
+        completedBatches,
+        totalBatches,
+        addedSmall,
+        repaired,
+        targetEndLayer: plan.targetEndLayer,
+        stopped,
+        plan,
+        message: msg,
+        state: data().loadState()
+      };
+    } catch (error) {
+      lastError = clean(error?.message || error);
+      setSummaryBackfillStatus(completedBatches, totalBatches, `追平失败：${lastError}`);
+      setExternalStatus(`记忆追平失败：${lastError}`, true);
+      throw error;
+    } finally {
+      backfillRunning = false;
+      abortController = null;
+      summaryBackfillStatus.running = false;
+      setRunningUI(false, '');
+      const latestState = data().loadState();
+      applyInjection();
+      refreshMemoryPanel();
+      refreshVectorRecallAsync(latestState);
+    }
+  }
+
+  async function fillSummaryRange(options = {}) {
+    const st = settings(), all = chat();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (backfillRunning || running || reconciling) throw new Error('已有记忆任务正在运行');
+    if (!all.length) throw new Error('当前聊天为空');
+
+    const firstEligible = ignoreFirstLayer(st) ? 1 : 0;
+    const rawStart = Number.isFinite(Number(options.startLayer)) ? Math.max(0, Math.floor(Number(options.startLayer))) : firstEligible;
+    const startLayer = Math.max(firstEligible, rawStart);
+    const rawEnd = Number.isFinite(Number(options.endLayer)) ? Math.floor(Number(options.endLayer)) : (all.length - 1);
+    const endLayer = (rawEnd <= 0 && options.explicitZeroEnd !== true)
+      ? (all.length - 1)
+      : Math.min(all.length - 1, Math.max(startLayer, rawEnd));
+    const batchSize = Math.max(1, parseInt(options.batchSize ?? st.catchUpBatchSize ?? 3, 10) || 3);
+    const overwrite = options.overwrite === true;
+    const selectedSheets = options.includeMemory === false
+      ? ['chronicle']
+      : resolveSelectedSheets(options.selectedSheets, st);
+
+    const rangeAi = collectEligibleAiLayers(st, startLayer, endLayer);
+    if (!rangeAi.length) {
+      const msg = `楼层 ${formatLayerSpan(startLayer, endLayer, '–')} 内没有可填表的 AI 回复`;
+      setSummaryBackfillStatus(0, 0, msg);
+      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, message: msg, state: data().loadState() };
+    }
+
+    let planBatches = [];
+    if (overwrite) {
+      planBatches = splitLayersIntoBatches(rangeAi, batchSize).map(c => ({
+        ...c,
+        sheets: [...selectedSheets],
+        sheetNames: selectedSheets.map(k => tableSchemas()[k]?.shortName || k)
+      }));
+    } else {
+      const covered = coveredLayersBySheet(data().loadState());
+      const waves = [];
+      for (const layer of rangeAi) {
+        const need = selectedSheets.filter(k => !covered[k]?.has(layer));
+        if (!need.length) continue;
+        const sig = need.join(',');
+        const prev = waves[waves.length - 1];
+        if (prev && prev.sig === sig) prev.layers.push(layer);
+        else waves.push({ sig, sheets: need, layers: [layer] });
+      }
+      for (const w of waves) {
+        for (const c of splitLayersIntoBatches(w.layers, batchSize)) {
+          planBatches.push({
+            ...c,
+            sheets: [...w.sheets],
+            sheetNames: w.sheets.map(k => tableSchemas()[k]?.shortName || k)
+          });
+        }
+      }
+    }
+
+    if (!planBatches.length) {
+      const msg = `楼层 ${formatLayerSpan(startLayer, endLayer, '–')} 所选表均已覆盖，无需补填`;
+      setSummaryBackfillStatus(0, 0, msg);
+      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, alreadyCaughtUp: true, message: msg, state: data().loadState() };
+    }
+
+    backfillRunning = true;
+    abortController = new AbortController();
+    setRunningUI(true, '范围填表');
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.(`范围填表前自动备份（${startLayer}-${endLayer}）`);
+    data().saveCheckpoint(data().loadState());
+
+    let completedBatches = 0, addedSmall = 0, totalOps = 0;
+    try {
+      for (let i = 0; i < planBatches.length && backfillRunning; i++) {
+        if (abortController.signal.aborted) break;
+        const b = planBatches[i];
+        setSummaryBackfillStatus(i, planBatches.length, `正在范围填表 ${i + 1}/${planBatches.length}（楼层 ${formatLayerSpan(b.startLayer, b.endLayer, '–')} · ${b.sheetNames.join('/')}）`);
+        const batch = buildBatchFromAiLayers(b.aiLayers, st);
+        if (!batch || !batch.conversation) continue;
+        const res = await executeTableFillBatch(batch, {
+          targetSheets: b.sheets,
+          overwrite,
+          overwriteStartLayer: startLayer,
+          overwriteEndLayer: endLayer,
+          retries: st.backfillRetries,
+          purpose: overwrite ? '范围覆盖填表' : '范围增量填表'
+        });
+        completedBatches++;
+        addedSmall += Number(res?.addedSmall || 0);
+        totalOps += Number(res?.opsCount || 0);
+      }
+      const stopped = !backfillRunning || abortController.signal.aborted;
+      const msg = stopped
+        ? `范围填表已停止（已完成 ${completedBatches}/${planBatches.length} 批）`
+        : `范围填表完成（楼层 ${formatLayerSpan(startLayer, endLayer, '–')}，共 ${completedBatches} 批）`;
+      setSummaryBackfillStatus(completedBatches, planBatches.length, msg);
+      return {
+        completedBatches,
+        totalBatches: planBatches.length,
+        opsCount: totalOps,
+        addedSmall,
+        added: totalOps + addedSmall,
+        stopped,
+        message: msg,
+        state: data().loadState()
+      };
+    } catch (error) {
+      lastError = clean(error?.message || error);
+      setSummaryBackfillStatus(completedBatches, planBatches.length, `范围填表失败：${lastError}`);
+      throw error;
+    } finally {
+      backfillRunning = false;
+      abortController = null;
+      summaryBackfillStatus.running = false;
+      setRunningUI(false, '');
+      const latestState = data().loadState();
+      applyInjection();
+      refreshMemoryPanel();
+      refreshVectorRecallAsync(latestState);
+    }
+  }
+
+  async function manualExtract() {
+    const st = settings();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
+    const plan = prepareCatchUpPlan({ includeCurrentFloor: true, batchSize: 1 });
+    if (plan.alreadyCaughtUp || !plan.waves.length) {
+      return { skipped: true, message: '当前所有表格已是最新', state: data().loadState() };
+    }
+    const firstBatch = plan.waves[0].batches[0];
+    const batch = buildBatchFromAiLayers(firstBatch.aiLayers, st);
+    if (!batch || !batch.conversation) return { skipped: true, state: data().loadState() };
+    abortController = new AbortController();
+    setRunningUI(true, '手动填表');
+    try {
+      return await executeTableFillBatch(batch, {
+        targetSheets: firstBatch.sheets,
+        overwrite: false,
+        purpose: '手动填表'
+      });
+    } finally {
+      abortController = null;
+      setRunningUI(false, '');
+      applyInjection();
+      refreshMemoryPanel();
+      refreshVectorRecallAsync(data().loadState());
+    }
+  }
+
+  async function manualReextract() {
+    const st = settings();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
+    const allAi = collectEligibleAiLayers(st);
+    if (!allAi.length) throw new Error('当前聊天没有可重填的 AI 楼层');
+    const targetLayer = allAi[allAi.length - 1];
+    return fillSummaryRange({
+      startLayer: targetLayer,
+      endLayer: targetLayer,
+      batchSize: 1,
+      overwrite: true
+    });
+  }
+
+  async function manualSmallSummary() {
+    return catchUpToLatest({ selectedSheets: ['chronicle'], includeCurrentFloor: true, batchSize: settings().smallSummaryEveryX || 1 });
+  }
+
+  async function backfill(options = {}) {
+    const st = settings();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
+    const nonChronSheets = tableKeys().filter(k => k !== 'chronicle');
+    const prev = data().loadState();
+    data().saveCheckpoint(prev);
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('重填结构化 6 表前自动备份');
+    const wiped = clone(prev);
+    const tl = ensureTimelineState(wiped);
+    if (!tl.root) tl.root = { id: `root:${data().getChatId()}`, originChatId: data().getChatId(), createdAt: Date.now(), base: { tables: data().emptyTables(), round: 0, chatLayer: null } };
+    if (!tl.root.base) tl.root.base = { tables: data().emptyTables(), round: 0, chatLayer: null };
+    tl.root.base.tables = { ...data().emptyTables(), chronicle: clone(wiped.tables?.chronicle || []) };
+    tl.nodes = tl.nodes.filter(n => n?.kind === 'world_link');
+    for (const k of nonChronSheets) {
+      wiped.tables[k] = [];
+      if (wiped.tableWatermarks) wiped.tableWatermarks[k] = null;
+    }
+    wiped.rebaseLayer = null;
+    data().saveState(replayTimeline(wiped));
+    const endLayer = Math.max(0, parseInt(options.endLayer ?? st.backfillEndLayer ?? 0, 10) || 0);
+    return fillSummaryRange({
+      startLayer: Math.max(0, parseInt(options.startLayer ?? st.backfillStartLayer ?? 0, 10) || 0),
+      endLayer: endLayer > 0 ? endLayer : undefined,
+      selectedSheets: nonChronSheets,
+      batchSize: Math.max(1, parseInt(options.batchSize ?? st.backfillBatchSize ?? 5, 10) || 5),
+      overwrite: true
+    });
+  }
+
+  async function backfillSummaries(options = {}) {
+    const st = settings();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
+    const prev = data().loadState();
+    data().saveCheckpoint(prev);
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('重填全部纪要前自动备份');
+    const wiped = clone(prev);
+    wiped.tables.chronicle = (wiped.tables.chronicle || []).filter(r => r?.source === 'world_engine');
+    if (wiped.tableWatermarks) wiped.tableWatermarks.chronicle = null;
+    if (wiped.event_memory) {
+      wiped.event_memory.small_summaries = data().projectChronicleToSmallSummaries(wiped.tables.chronicle);
+      wiped.event_memory.small_summary_layer = null;
+    }
+    data().saveState(replayTimeline(wiped));
+    const endLayer = Math.max(0, parseInt(options.endLayer ?? st.backfillEndLayer ?? 0, 10) || 0);
+    return fillSummaryRange({
+      startLayer: Math.max(0, parseInt(options.startLayer ?? st.backfillStartLayer ?? 0, 10) || 0),
+      endLayer: endLayer > 0 ? endLayer : undefined,
+      selectedSheets: ['chronicle'],
+      batchSize: Math.max(1, parseInt(options.batchSize ?? st.summaryBackfillSmallEveryX ?? 5, 10) || 5),
+      overwrite: true
+    });
+  }
+
+  function stopBackfill() {
+    backfillRunning = false;
+    cancelMutationRefresh();
+    abortController?.abort();
+    setBackfillStatus(backfillStatus.current, backfillStatus.total, '正在停止…');
+    setSummaryBackfillStatus(summaryBackfillStatus.current, summaryBackfillStatus.total, '正在停止…');
+  }
+
+  function abort() {
+    backfillRunning = false;
+    bumpAutoFillEpoch();
+    clearTimeout(autoTimer);
+    cancelMutationRefresh();
+    abortController?.abort();
+    setRunningUI(false, '');
+  }
+
+  function commitManualState(nextState) {
+    const normalizedNext = data().normalizeState(nextState);
+    const tl = ensureTimelineState(normalizedNext);
+    const now = Date.now();
+    tl.nodes.push({
+      id: nextNodeId(tl.nodes),
+      kind: 'manual_snapshot',
+      originChatId: data().getChatId(),
+      startLayer: currentLayer(),
+      endLayer: currentLayer(),
+      sourceRefs: [],
+      sourceDigest: '',
+      targetSheets: [...tableKeys()],
+      tableOps: [],
+      snapshot: {
+        tables: clone(normalizedNext.tables),
+        round: normalizedNext.round,
+        chatLayer: normalizedNext.chatLayer
+      },
+      status: 'valid',
+      revision: 1,
+      createdAt: now,
+      updatedAt: now
+    });
+    const saved = data().saveState(replayTimeline(normalizedNext));
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+    applyInjection();
+    refreshMemoryPanel();
+    refreshVectorRecallAsync(saved);
+    return saved;
+  }
+
+  // ==================== 注入构建（对齐 shujuku 双层省 Token 注入） ====================
+
+  function tokenizeSearchText(text) {
+    const raw = clean(text).toLocaleLowerCase();
+    const tokens = new Set();
+    if (!raw) return tokens;
+    for (const w of raw.match(/[a-z0-9_]{2,}/g) || []) tokens.add(w);
+    for (const seg of raw.match(/[\u4e00-\u9fff]+/g) || []) {
+      if (seg.length === 1) { tokens.add(seg); continue; }
+      for (let i = 0; i < seg.length - 1; i++) tokens.add(seg.slice(i, i + 2));
+    }
+    return tokens;
+  }
+
+  function scoreArchivedChronicle(row, scanText, scanTokens) {
+    const lowerScan = clean(scanText).toLocaleLowerCase();
+    let score = 0;
+    if (clean(row.code_index) && lowerScan.includes(row.code_index.toLocaleLowerCase())) score += 10;
+    for (const kw of row.keywords || []) {
+      if (clean(kw) && lowerScan.includes(kw.toLocaleLowerCase())) score += 3;
+    }
+    for (const ent of row.entityNames || []) {
+      if (clean(ent) && lowerScan.includes(ent.toLocaleLowerCase())) score += 2.5;
+    }
+    const summaryTokens = tokenizeSearchText(`${row.summary || ''} ${row.chronicle_text || ''}`);
+    let hits = 0;
+    for (const t of summaryTokens) if (scanTokens.has(t)) hits++;
+    score += Math.min(4, hits * 0.25);
+    if (row.impactLevel === 'key') score += 0.8;
+    return score;
+  }
+
+  function recentRawRoundMessageIds(messagesOrCount, maybeCount, stOverride, timelineHelper) {
+    const hasExplicitMessages = Array.isArray(messagesOrCount);
+    const all = hasExplicitMessages ? messagesOrCount : chat();
+    const rounds = Math.max(0, parseInt(hasExplicitMessages ? maybeCount : messagesOrCount, 10) || 0);
+    if (!rounds || !all.length) return new Set();
+    const st = stOverride || settings();
+    const minIdx = ignoreFirstLayer(st) ? 1 : 0;
+    const tl = timelineHelper || timelineApi();
+    const getId = (msg, idx) => {
+      if (!msg) return '';
+      if (typeof tl?.ensureMessageId === 'function') return clean(tl.ensureMessageId(msg));
+      return clean(tl?.sourceRef?.(msg, idx)?.messageId);
+    };
+    const collected = [];
+    let aiSeen = 0;
+    for (let i = all.length - 1; i >= minIdx; i--) {
+      const msg = all[i];
+      const id = getId(msg, i);
+      if (id) collected.unshift(id);
+      if (isFillEligibleAiMessage(msg)) {
+        aiSeen++;
+        if (aiSeen >= rounds) {
+          if (i - 1 >= minIdx && all[i - 1]?.is_user) {
+            const uId = getId(all[i - 1], i - 1);
+            if (uId) collected.unshift(uId);
+          }
+          break;
+        }
+      }
+    }
+    return new Set(collected);
   }
 
   function selectHiddenMessageIds(coveredRefs, currentChatId, recentMessageIds) {
@@ -3354,127 +2031,16 @@ window.MEMORY_ENGINE = (function() {
       .filter(messageId => messageId && !recent.has(messageId)));
   }
 
-  function recentRawRoundMessageIds(messages, roundCount, st, api) {
-    const source = Array.isArray(messages) ? messages : [];
-    const take = Math.max(0, parseInt(roundCount) || 0);
-    if (!source.length || !take) return new Set();
-    const opening = ignoreFirstLayer(st);
-    const aiLayers = source.map((message, index) => (
-      !message?.is_user && !(opening && index === 0) ? index : -1
-    )).filter(index => index >= 0);
-    const start = aiLayers.length > take ? aiLayers[aiLayers.length - take - 1] + 1 : 0;
-    return new Set(source.slice(start)
-      .map(message => clean(api?.ensureMessageId?.(message)))
-      .filter(Boolean));
+  function syncHiddenMessages(hiddenIds, errorLabel) {
+    if (typeof timelineApi()?.syncHidden !== 'function') return;
+    const p = Promise.resolve(timelineApi().syncHidden(hiddenIds))
+      .catch(err => console.warn(`[记忆引擎] ${errorLabel || '同步隐藏楼层失败'}`, err));
+    hiddenSyncPromise = p;
   }
 
-  function syncHiddenMessages(messageIds, label) {
-    try {
-      hiddenSyncPromise = Promise.resolve(timelineApi()?.syncHidden?.(messageIds))
-        .catch(error => console.warn(`[记忆引擎] ${label}`, error));
-    } catch (error) {
-      console.warn(`[记忆引擎] ${label}`, error);
-      hiddenSyncPromise = Promise.resolve();
-    }
-    return hiddenSyncPromise;
-  }
-
-  function collectCharacterCandidates(state, character, globalSeen) {
-    const records = [];
-    for (const name of character?.names || []) records.push(...(state.knowledge_index?.[normalized(name)] || []));
-    return records.filter(record => {
-      const key = `${record.ownerId}\u0000${record.time}\u0000${record.memory}`;
-      return !globalSeen.has(key);
-    }).filter((record, index, list) => list.findIndex(other =>
-      other.ownerId === record.ownerId && other.time === record.time && other.memory === record.memory
-    ) === index);
-  }
-
-  function tokenizeSearchText(text) {
-    const raw = clean(text).toLocaleLowerCase();
-    const tokens = new Set();
-    if (!raw) return tokens;
-    for (const word of raw.match(/[a-z0-9_]{2,}/g) || []) tokens.add(word);
-    for (const seg of raw.match(/[\u4e00-\u9fff]+/g) || []) {
-      if (seg.length === 1) { tokens.add(seg); continue; }
-      for (let i = 0; i < seg.length - 1; i++) tokens.add(seg.slice(i, i + 2));
-    }
-    return tokens;
-  }
-
-  function scoreArchivedSmallSummary(item, queryTokens, scanLower, index, total) {
-    if (!item || item.status === 'stale' || item.status === 'failed' || !clean(item.content)) return 0;
-    let score = 0;
-    for (const kw of Array.isArray(item.keywords) ? item.keywords : []) {
-      const low = clean(kw).toLocaleLowerCase();
-      if (!low) continue;
-      if (scanLower.includes(low)) score += 12;
-      else {
-        for (const t of tokenizeSearchText(low)) if (queryTokens.has(t)) score += 4;
-      }
-    }
-    for (const ent of Array.isArray(item.entityNames) ? item.entityNames : []) {
-      const low = clean(ent).toLocaleLowerCase();
-      if (low && scanLower.includes(low)) score += 8;
-    }
-    const contentTokens = tokenizeSearchText(item.content);
-    let overlap = 0;
-    for (const token of contentTokens) if (queryTokens.has(token)) overlap++;
-    if (contentTokens.size > 0 && overlap > 0) {
-      score += Math.min(8, overlap * 1.5);
-    }
-    if (score <= 0) return 0;
-    if (item.impactLevel === 'key') score += 2;
-    score += total > 1 ? (index / total) * 2 : 0;
-    return score;
-  }
-
-  function buildBudgetedSections(blocks, maxChars) {
-    const budget = Math.max(350, parseInt(maxChars) || 8000);
-    const active = blocks.filter(block => block && clean(block.text)).map(block => ({ ...block }));
-    const join = list => list.map(item => item.text).filter(Boolean).join('\n\n');
-    if (join(active).length <= budget) return join(active);
-
-    // 公平保护：当总长超出预算且同时存在人物档案/持续事实/实体区块时，先将 500+ 字/条的「近期事件纪要」上限约束在预算的 50% 以内，
-    // 且按“先淘汰窗口内最老纪要、优先保留最新一轮纪要”的顺序收敛，绝不允许长纪要单块把当前出场人物档案挤成 0 字。
-    const recentSmallIdx = active.findIndex(item => item.kind === 'recent_small');
-    if (recentSmallIdx >= 0 && active.length > 1) {
-      const recentCap = Math.max(180, Math.floor(budget * 0.5));
-      if (active[recentSmallIdx].text.length > recentCap) {
-        const rLines = active[recentSmallIdx].text.split('\n');
-        while (rLines.length > 2 && rLines.join('\n').length > recentCap) {
-          rLines.splice(1, 1); // 移除窗口内最旧一条纪要，保留末尾最新一轮
-        }
-        active[recentSmallIdx].text = rLines.join('\n');
-        if (Array.from(active[recentSmallIdx].text).length > recentCap) {
-          active[recentSmallIdx].text = Array.from(active[recentSmallIdx].text).slice(0, Math.max(40, recentCap - 1)).join('') + '…';
-        }
-      }
-    }
-    if (join(active).length <= budget) return join(active);
-
-    // 预算仍超出时按优先级裁剪（近期纪要淘汰最旧行，其余区块从末尾裁剪，同时为高相关人物保留基本档案头）。
-    const sortedIndexes = active
-      .map((item, idx) => ({ idx, priority: Number(item.priority) || 0 }))
-      .sort((a, b) => a.priority - b.priority)
-      .map(entry => entry.idx);
-    for (const idx of sortedIndexes) {
-      if (join(active).length <= budget) break;
-      const lines = active[idx].text.split('\n');
-      const minKeepLines = active[idx].kind === 'person' ? Math.min(lines.length, 3) : 2;
-      while (lines.length > minKeepLines && join(active).length > budget) {
-        if (active[idx].kind === 'recent_small') lines.splice(1, 1);
-        else lines.pop();
-        active[idx].text = lines.join('\n');
-      }
-      if (join(active).length > budget) {
-        const overflow = join(active).length - budget;
-        const chars = Array.from(active[idx].text);
-        if (chars.length <= overflow + 24) active[idx].text = '';
-        else active[idx].text = chars.slice(0, Math.max(0, chars.length - overflow - 3)).join('') + '…';
-      }
-    }
-    return join(active);
+  function clearInjection() {
+    const ctx = context();
+    if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, '', 1, 1);
   }
 
   function applyInjection(options) {
@@ -3488,921 +2054,453 @@ window.MEMORY_ENGINE = (function() {
     restoreActiveWorldContributions();
     const legacyReroll = options?.isReroll && window.STORY_ENGINE_PROJECTION?.active?.() !== true;
     const state = (legacyReroll && data().loadCheckpoint()) || data().loadState();
-    ensureEntityState(state);
-    ensureStructuredMemoryState(state);
-    const eventMemory = ensureEventState(state);
-    const activeFacts = (state.ongoing_facts || []).filter(item => item.status === 'active');
-    const arcs = Array.isArray(state.character_arcs) ? state.character_arcs : [];
-    const hasPeople = Boolean(state?.personal_memory?.length);
-    const hasEntities = ENTITY_TYPES.some(type => state.entity_memory[type].length);
-    const hasEvents = Boolean(eventMemory.small_summaries.length);
-    if (!hasPeople && !hasEntities && !hasEvents && !activeFacts.length && !arcs.length) {
+    const tables = state.tables || data().emptyTables();
+    const counts = data().tableRowCounts(state);
+    if (counts.totalRows === 0) {
       clearInjection();
       syncHiddenMessages(new Set(), '恢复正文失败');
       return '';
     }
-    if (!state.knowledge_index || !Object.keys(state.knowledge_index).length) rebuildKnowledgeIndex(state);
-    const scan = chat().slice(-Math.max(1, parseInt(st.searchDepth) || 5)).map(message => clean(message?.mes)).join('\n');
-    const scanLower = scan.toLocaleLowerCase();
-    const queryTokens = tokenizeSearchText(scan);
-    let bridgeActors = [];
-    let bridgeHints = {};
-    let vectorRecall = null;
-    try {
-      const bridge = window.STORY_ENGINE_BRIDGE;
-      if (bridge) {
-        bridgeActors = bridge.getOutlineActiveActors?.() || [];
-        bridgeHints = bridge.getCrossInjectionHints?.() || {};
-      }
-    } catch (_) {}
-    try {
-      vectorRecall = st.vectorEnabled === true ? window.MEMORY_ENGINE_VECTOR?.getRecallScoresForInjection?.() : null;
-    } catch (_) {}
-    const bridgeActorSet = new Set(bridgeActors.map(normalized).filter(Boolean));
-    const appearsInScan = name => {
-      if (!name) return false;
-      if (bridgeActorSet.has(normalized(name))) return true;
-      return new RegExp(String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u').test(scan);
-    };
-    const matched = (state.personal_memory || []).filter(character =>
-      (character.names || []).some(appearsInScan) || Number(vectorRecall?.personScores?.[character.id]) > 0
-    ).sort((a, b) => {
-      const aAppear = (a.names || []).some(appearsInScan) ? 1 : 0;
-      const bAppear = (b.names || []).some(appearsInScan) ? 1 : 0;
-      const aScore = aAppear * 0.5 + (Number(vectorRecall?.personScores?.[a.id]) || 0);
-      const bScore = bAppear * 0.5 + (Number(vectorRecall?.personScores?.[b.id]) || 0);
-      return bScore - aScore;
-    });
-    const matchedEntities = ENTITY_TYPES.flatMap(type => state.entity_memory[type]
-      .filter(entity => unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan)
-        || Number(vectorRecall?.entityScores?.[`${type}:${entity.id}`]) > 0)
-      .map(entity => ({
-        type,
-        entity,
-        rankScore: (unique([entity.name, ...(entity.aliases || [])]).some(appearsInScan) ? 0.5 : 0)
-          + (Number(vectorRecall?.entityScores?.[`${type}:${entity.id}`]) || 0)
-      })))
-      .sort((a, b) => b.rankScore - a.rankScore);
-    const blocks = [], globalSeen = new Set(), limit = Math.max(1, parseInt(st.maxPerCharacter) || 20);
 
-    // P0: 持续生效事实（与当前场景人物/扫描词元/语义向量命中者优先排前）
-    const factsLimit = Math.max(0, parseInt(st.injectOngoingFactsLimit ?? 15) || 0);
-    if (factsLimit > 0 && activeFacts.length) {
-      const sortedFacts = activeFacts.map((fact, idx) => {
-        const vecScore = Number(vectorRecall?.factScores?.[fact.id]) || 0;
-        const hit = (fact.subject && appearsInScan(fact.subject) ? 10 : 0)
-          + (Array.isArray(fact.keywords) ? fact.keywords.filter(kw => scanLower.includes(clean(kw).toLocaleLowerCase())).length * 4 : 0)
-          + vecScore * 30;
-        return { fact, hit, idx };
-      }).sort((a, b) => (b.hit - a.hit) || (b.idx - a.idx)).slice(0, factsLimit);
-      blocks.push({
-        priority: 90,
-        text: `【长期持续事实】\n${sortedFacts.map(({ fact }) =>
-          `- [${fact.category || '状态'} · ${fact.subject || '全局'}] ${fact.fact}`
-        ).join('\n')}`
-      });
-    }
-
-    // P1: 近期事件纪要（直接注入最新 N 条有效纪要；更早的有效纪要自动进入历史召回池）
-    const validSmall = eventMemory.small_summaries.filter(item =>
-      item.status !== 'stale' && item.status !== 'failed' && clean(item.content)
-    );
-    const directLimit = st.smallSummaryInjectLimit === undefined
-      ? 8 : Math.max(0, parseInt(st.smallSummaryInjectLimit) || 0);
-    const recentSmall = directLimit > 0 ? validSmall.slice(-directLimit) : [];
-    const olderSmall = directLimit > 0
-      ? validSmall.slice(0, Math.max(0, validSmall.length - directLimit))
-      : validSmall;
-    if (recentSmall.length) {
-      const worldDigestTrim = clean(bridgeHints.worldDigestTrim);
-      blocks.push({
-        kind: 'recent_small',
-        priority: 85,
-        text: `【近期事件纪要】\n${recentSmall.map(item => {
-          const isWorldDup = item.source === 'world_engine' && worldDigestTrim && clean(item.content) === worldDigestTrim;
-          const prefix = isWorldDup ? '[世界同步] ' : '';
-          return `- [楼层 ${formatLayerSpan(item.startLayer, item.endLayer)}] ${prefix}${item.content}`;
-        }).join('\n')}`
-      });
-    }
-
-    // P3: 对超出直接注入窗口的更早历史纪要，综合本地关键词/词元重合与 Embedding/Rerank 语义召回精准唤醒
-    const recallLimit = Math.max(0, parseInt(st.recallArchivedSmallLimit ?? 3) || 0);
-    if (recallLimit > 0 && olderSmall.length) {
-      const recalled = olderSmall
-        .map((item, idx) => {
-          const lexical = scoreArchivedSmallSummary(item, queryTokens, scanLower, idx, olderSmall.length);
-          const vecScore = Number(vectorRecall?.smallScores?.[item.id]) || 0;
-          return { item, score: lexical + vecScore * 35, vecScore };
-        })
-        .filter(entry => entry.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, recallLimit);
-      if (recalled.length) {
-        const hasVectorHits = recalled.some(entry => entry.vecScore > 0);
-        const title = hasVectorHits ? '【语义与关键词召回历史细节】' : '【关键词召回历史细节】';
-        blocks.push({
-          priority: 65,
-          text: `${title}\n${recalled.map(({ item, vecScore }) => {
-            const tags = [
-              item.keywords?.length ? `#${item.keywords.slice(0, 3).join(' #')}` : '',
-              vecScore > 0 ? `语义 ${(vecScore * 100).toFixed(0)}%` : ''
-            ].filter(Boolean).join(' · ');
-            return `- [楼层 ${formatLayerSpan(item.startLayer, item.endLayer)}${tags ? ` · ${tags}` : ''}] ${item.content}`;
-          }).join('\n')}`
-        });
-      }
-    }
-
-    // P4: 匹配人物（优先附带角色弧光卡片 + 主观记忆采样）
-    const arcLimit = Math.max(0, parseInt(st.injectCharacterArcsLimit ?? 6) || 0);
-    let injectedArcCount = 0;
-    const arcMap = new Map();
-    for (const arc of arcs) {
-      if (arc.characterId) arcMap.set(arc.characterId, arc);
-      for (const n of arc.names || []) arcMap.set(normalized(n), arc);
-    }
-    for (const character of matched) {
-      const charArc = arcMap.get(character.id) || (character.names || []).map(n => arcMap.get(normalized(n))).find(Boolean);
-      const candidates = collectCharacterCandidates(state, character, globalSeen);
-      const selected = exponentialMemorySample(candidates, limit, Math.random, st.injectionDiceSides);
-      selected.forEach(record => globalSeen.add(`${record.ownerId}\u0000${record.time}\u0000${record.memory}`));
-      const charLines = [];
-      const basicLine = formatCharacterBasicInfoLine(character.profile);
-      if (basicLine) {
-        charLines.push(`- [基本信息] ${basicLine}`);
-      }
-      const expText = clean(character.profile?.experiences);
-      if (expText) {
-        charLines.push(`- [迄今经历] ${expText}`);
-      }
-      if (charArc && injectedArcCount < arcLimit && (charArc.currentStance || charArc.arcSummary || charArc.relationship)) {
-        injectedArcCount++;
-        charLines.push(`- [角色弧光 ${charArc.progressPct ?? 0}%${charArc.relationship ? ` · ${charArc.relationship}` : ''}] ${charArc.currentStance || ''}${charArc.arcSummary ? `｜${charArc.arcSummary}` : ''}`);
-      }
-      if (selected.length) {
-        charLines.push(...selected.map(record => `- [${record.time || '时间未明'}] ${record.memory}`));
-      }
-      if (charLines.length) {
-        blocks.push({
-          kind: 'person',
-          priority: 50,
-          text: `【${character.names?.[0] || character.id}】\n${charLines.join('\n')}`
-        });
-      }
-    }
-    if (matchedEntities.length) {
-      const entitySections = matchedEntities.map(({ type, entity }) => {
-        const lines = [`【${ENTITY_LABELS[type]}：${entity.name}】`, entity.description];
-        const history = exponentialMemorySample(
-          Array.isArray(entity.history) ? entity.history : [], limit, Math.random, st.injectionDiceSides
-        );
-        if (history.length) lines.push(...history.map(entry => `- [${entry.time || '时间未明'}] ${entry.event}`));
-        return lines.filter(Boolean).join('\n');
-      });
-      blocks.push({
-        priority: 40,
-        text: `【相关世界实体】\n${entitySections.join('\n\n')}`
-      });
-    }
-    const coveredRefs = timelineApi()?.unionRefs?.(
-      validSmall.map(item => item.sourceRefs || [])
-    ) || [];
-    const api = timelineApi();
-    const coveredMessageIds = (() => {
-      if (st.hideCoveredRawText === false) return new Set();
-      const baseKeep = st.recentRawRounds === undefined ? 1 : Math.max(0, parseInt(st.recentRawRounds) || 0);
-      const delayKeep = getEffectiveSummaryDelay(st);
-      const keepRawRounds = Math.max(baseKeep, delayKeep);
-      const recentMessageIds = recentRawRoundMessageIds(chat(), keepRawRounds, st, api);
-      return selectHiddenMessageIds(coveredRefs, data()?.getChatId?.(), recentMessageIds);
+    const scanDepth = Math.max(1, parseInt(st.searchDepth, 10) || 5);
+    const scanText = chat().slice(-scanDepth).map(m => clean(m?.mes)).join('\n');
+    const lowerScan = scanText.toLocaleLowerCase();
+    const scanTokens = tokenizeSearchText(scanText);
+    const outlineActors = (() => {
+      try { return window.STORY_ENGINE_BRIDGE?.getOutlineActiveActors?.() || []; }
+      catch (_) { return []; }
     })();
-    syncHiddenMessages(coveredMessageIds, '同步正文覆盖失败');
-    if (!blocks.length) { clearInjection(); return ''; }
-    const header = `${SENTINEL}\n事件总结记录对话中已经发生的剧情；持续事实记录当前长期生效的约束；人物条目包含阶段弧光与当前场景人物知晓的主观记忆（允许彼此矛盾）；实体条目记录相关组织、物件、能力与地点的当前描述和本地历史。\n\n`;
-    const maxBodyChars = Math.max(300, (parseInt(st.memoryInjectMaxChars) || 8000) - header.length);
-    const body = buildBudgetedSections(blocks, maxBodyChars);
-    if (!body) { clearInjection(); return ''; }
-    const content = `${header}${body}`;
-    registerInjection(content);
+    const outlineActorSet = new Set(outlineActors.map(normalized).filter(Boolean));
+    const vectorRecall = (() => {
+      try { return window.MEMORY_ENGINE_VECTOR?.getRecallScoresForInjection?.() || null; }
+      catch (_) { return null; }
+    })();
+    const recalledKeys = new Set((vectorRecall?.hits || []).map(h => h.key));
+
+    const headerLine = '【长期记忆数据库（以下为客观已记录事实，请保持连贯）】\n';
+    const budget = Math.max(200, parseInt(st.memoryInjectMaxChars, 10) || 8000);
+    const sections = [];
+    let usedChars = headerLine.length;
+    const pushSection = (title, body) => {
+      const text = clean(body);
+      if (!text) return false;
+      const block = `<${title}>\n${text}\n</${title}>`;
+      if (usedChars + block.length + 2 > budget) {
+        const remain = budget - usedChars - title.length * 2 - 12;
+        if (remain < 40) return false;
+        const trimmed = `<${title}>\n${text.slice(0, remain)}…\n</${title}>`;
+        sections.push(trimmed);
+        usedChars += trimmed.length + 2;
+        return false;
+      }
+      sections.push(block);
+      usedChars += block.length + 2;
+      return true;
+    };
+
+    // 1. 全局数据表
+    const gs = tables.global_state?.[0];
+    if (gs) {
+      const locParts = [gs.current_major_region, gs.current_minor_region, gs.current_location].map(clean).filter(Boolean);
+      const timeParts = [
+        gs.cur_time ? `当前时间：${gs.cur_time}` : '',
+        gs.prev_scene_time ? `上轮时间：${gs.prev_scene_time}` : '',
+        gs.elapsed_time ? `经过：${gs.elapsed_time}` : ''
+      ].filter(Boolean);
+      pushSection('全局状态', [
+        locParts.length ? `当前地点：${locParts.join(' · ')}` : '',
+        timeParts.length ? timeParts.join('｜') : ''
+      ].filter(Boolean).join('\n'));
+    }
+
+    // 2. 主角信息表
+    const pro = tables.protagonist_info?.[0];
+    if (pro) {
+      const lines = [
+        `姓名：${pro.name || '主角'}${pro.gender || pro.age ? `（${[pro.gender, pro.age].filter(Boolean).join(' / ')}）` : ''}${pro.identity_text ? `｜身份：${pro.identity_text}` : ''}`,
+        pro.current_condition ? `近况：${pro.current_condition}` : '',
+        pro.location_name ? `所在地点：${pro.location_name}` : '',
+        pro.appearance ? `外貌：${pro.appearance}` : '',
+        pro.belongings ? `随身财物：${pro.belongings}` : ''
+      ].filter(Boolean);
+      pushSection('主角信息', lines.join('\n'));
+    }
+
+    // 3. 任务与事件表
+    if (tables.quests_events?.length) {
+      const qLines = tables.quests_events.map(q => {
+        const meta = [q.issuer ? `发布：${q.issuer}` : '', q.current_progress ? `进度：${q.current_progress}` : '', q.time_limit ? `时限：${q.time_limit}` : ''].filter(Boolean).join('｜');
+        const extra = [q.reward ? `奖励：${q.reward}` : '', q.penalty ? `惩罚：${q.penalty}` : ''].filter(Boolean).join('｜');
+        return `- [${q.quest_type || '支线任务'}] ${q.quest_name}${meta ? `（${meta}）` : ''}：${q.detail_desc || ''}${extra ? ` [${extra}]` : ''}`;
+      });
+      pushSection('当前任务与事件', qLines.join('\n'));
+    }
+
+    // 4. 重要角色表（双层注入：全员索引 + 在场/正文提及/向量召回角色详情）
+    if (tables.important_characters?.length) {
+      const activeOrMentioned = [];
+      const indexLines = [];
+      for (const ch of tables.important_characters) {
+        indexLines.push(`- ${ch.name}｜${ch.brief_intro || '重要角色'}｜${ch.presence_status || '在场'}${ch.location_name ? `·${ch.location_name}` : ''}`);
+        const vecHit = recalledKeys.has(`char:${ch.rowId}`)
+          || recalledKeys.has(`char:${ch.name}`)
+          || Number(vectorRecall?.personScores?.[String(ch.rowId)] || 0) > 0;
+        const mentioned = clean(ch.name) && (
+          lowerScan.includes(ch.name.toLocaleLowerCase())
+          || outlineActorSet.has(normalized(ch.name))
+          || vecHit
+        );
+        if (ch.presence_status === '在场' || mentioned) activeOrMentioned.push(ch);
+      }
+      if (activeOrMentioned.length) {
+        const detailLines = activeOrMentioned.map(ch => {
+          const head = `【${ch.name}】${[ch.gender, ch.age].filter(Boolean).join('/')} · ${ch.brief_intro || ''}（${ch.presence_status || '在场'}${ch.location_name ? `@${ch.location_name}` : ''}）`;
+          const body = [
+            ch.appearance ? `外貌：${ch.appearance}` : '',
+            ch.outfit_text ? `穿着：${ch.outfit_text}` : '',
+            ch.relation_text ? `关系：${ch.relation_text}` : '',
+            ch.past_experience ? `经历：${ch.past_experience}` : '',
+            ch.interaction_options ? `可交互：${ch.interaction_options}` : ''
+          ].filter(Boolean).join('｜');
+          return body ? `${head}\n  ${body}` : head;
+        });
+        pushSection('重要角色详情', detailLines.join('\n'));
+      }
+      pushSection('已登场重要角色索引', indexLines.join('\n'));
+    }
+
+    // 5. 主角技能表 & 背包物品表（向量命中的条目优先排前）
+    if (tables.protagonist_skills?.length) {
+      const sortedSkills = [...tables.protagonist_skills].sort((a, b) => {
+        const sa = Number(vectorRecall?.entityScores?.[`ability:${a.rowId}`] || 0);
+        const sb = Number(vectorRecall?.entityScores?.[`ability:${b.rowId}`] || 0);
+        return sb - sa;
+      });
+      const sLines = sortedSkills.map(s =>
+        `- ${s.skill_name} [${s.skill_type || '主动'}${s.skill_level ? `·${s.skill_level}` : ''}]：${s.effect_desc || ''}`
+      );
+      pushSection('主角技能', sLines.join('\n'));
+    }
+    if (tables.inventory?.length) {
+      const sortedItems = [...tables.inventory].sort((a, b) => {
+        const sa = Number(vectorRecall?.entityScores?.[`object:${a.rowId}`] || 0);
+        const sb = Number(vectorRecall?.entityScores?.[`object:${b.rowId}`] || 0);
+        return sb - sa;
+      });
+      const iLines = sortedItems.map(item =>
+        `- ${item.item_name} ×${item.quantity || '1'}${item.category ? ` [${item.category}]` : ''}${item.description ? `：${item.description}` : ''}`
+      );
+      pushSection('背包物品', iLines.join('\n'));
+    }
+
+    // 6. 纪要表（最近 N 条完整直注 + 早期归档 AM 索引 + 关键词/向量精准召回）
+    const validChronicle = (tables.chronicle || []).filter(r => r && r.status !== 'stale' && r.status !== 'failed' && clean(r.chronicle_text));
+    const injectLimit = Math.max(0, parseInt(st.smallSummaryInjectLimit, 10) ?? 8);
+    const recentRows = injectLimit > 0 ? validChronicle.slice(-injectLimit) : [];
+    const recentIds = new Set(recentRows.map(r => r.id));
+    const archivedRows = validChronicle.filter(r => !recentIds.has(r.id));
+
+    if (recentRows.length) {
+      const lines = recentRows.map(r => {
+        const span = formatLayerSpan(r.startLayer, r.endLayer);
+        const head = `[${r.code_index} · 楼层 ${span}${r.time_span ? ` · ${r.time_span}` : ''}]`;
+        return `${head} ${r.chronicle_text}${r.key_dialogue ? `\n  重要对话：${r.key_dialogue}` : ''}`;
+      });
+      pushSection('近期纪要', lines.join('\n'));
+    }
+
+    const recallLimit = Math.max(0, parseInt(st.recallArchivedSmallLimit, 10) || 3);
+    if (archivedRows.length && recallLimit > 0) {
+      const recalled = archivedRows
+        .map(row => {
+          const vecBoost = (recalledKeys.has(`small:${row.id}`) || Number(vectorRecall?.smallScores?.[row.id] || 0) > 0) ? 6 : 0;
+          return {
+            row,
+            score: scoreArchivedChronicle(row, scanText, scanTokens) + vecBoost
+          };
+        })
+        .filter(item => item.score >= 2.2)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, recallLimit)
+        .map(item => item.row);
+      if (recalled.length) {
+        const rLines = recalled.map(r =>
+          `[${r.code_index} · 楼层 ${formatLayerSpan(r.startLayer, r.endLayer)}${r.time_span ? ` · ${r.time_span}` : ''}] ${r.chronicle_text}${r.key_dialogue ? `\n  重要对话：${r.key_dialogue}` : ''}`
+        );
+        pushSection('记忆回溯', rLines.join('\n'));
+      }
+    }
+
+    if (archivedRows.length) {
+      const idxLines = archivedRows.map(r =>
+        `- ${r.code_index}${r.time_span ? ` | ${r.time_span}` : ''} | ${r.summary || clean(r.chronicle_text).slice(0, 30)}`
+      );
+      pushSection('已发生的事件概览', idxLines.join('\n'));
+    }
+
+    const content = sections.length
+      ? `${headerLine}${sections.join('\n\n')}`
+      : '';
+    const ctx = context();
+    if (typeof ctx?.setExtensionPrompt === 'function') {
+      ctx.setExtensionPrompt(INJECTION_NAME, content, 1, 1);
+    }
+
+    // 同步隐藏已由有效纪要覆盖的旧楼层原文（保留 recentRawRounds 轮原文可见）
+    if (st.hideCoveredRawText !== false && validChronicle.length) {
+      const coveredRefs = validChronicle.filter(r => r.source !== 'world_engine').flatMap(r => r.sourceRefs || []);
+      const recentIdsSet = recentRawRoundMessageIds(st.recentRawRounds);
+      const hidden = selectHiddenMessageIds(coveredRefs, data().getChatId(), recentIdsSet);
+      syncHiddenMessages(hidden, '同步隐藏已覆盖正文失败');
+    } else {
+      syncHiddenMessages(new Set(), '恢复正文失败');
+    }
+
+    lastInjectionDebug = {
+      at: Date.now(),
+      chars: content.length,
+      budget,
+      sections: sections.length,
+      content
+    };
+    try { window.WORLD_ENGINE_INJECT_INSPECTOR?.record?.('memory', content, { budget, sections: sections.length }); } catch (_) {}
     return content;
   }
 
-  function buildWorldEngineContext(worldState) {
-    const st = settings();
-    if (st.engineEnabled === false || st.injectIntoWorldEngine !== true || !worldState) return '';
-    const state = data().loadState();
-    ensureEntityState(state);
-    ensureStructuredMemoryState(state);
-    if (!state.knowledge_index || !Object.keys(state.knowledge_index).length) rebuildKnowledgeIndex(state);
-    const scan = JSON.stringify(worldState);
-    const appears = name => name && scan.includes(String(name));
-    const limit = Math.max(1, parseInt(st.worldEngineMemoryLimit) || 5);
-    const sections = [], seenRecords = new Set();
-    const matchedFacts = (state.ongoing_facts || []).filter(item =>
-      item.status === 'active' && (appears(item.subject) || (item.keywords || []).some(appears) || item.subject === '全局')
-    ).slice(-6);
-    if (matchedFacts.length) {
-      sections.push(`【相关持续事实】\n` + matchedFacts.map(item =>
-        `- [${item.category || '状态'} · ${item.subject || '全局'}] ${item.fact}`
-      ).join('\n'));
-    }
-    for (const character of state.personal_memory || []) {
-      if (!(character.names || []).some(appears)) continue;
-      const candidates = collectCharacterCandidates(state, character, seenRecords);
-      const selected = exponentialMemorySample(candidates, limit, Math.random, st.injectionDiceSides);
-      selected.forEach(record => seenRecords.add(`${record.ownerId}\u0000${record.time}\u0000${record.memory}`));
-      const lines = [];
-      const basicLine = formatCharacterBasicInfoLine(character.profile);
-      if (basicLine) lines.push(`- [基本信息] ${basicLine}`);
-      const expText = clean(character.profile?.experiences);
-      if (expText) lines.push(`- [迄今经历] ${expText}`);
-      if (selected.length) lines.push(...selected.map(record => `- [${record.time || '时间未明'}] ${record.memory}`));
-      if (lines.length) sections.push(`【人物：${character.names?.[0] || character.id}】\n` + lines.join('\n'));
-    }
-    for (const type of ENTITY_TYPES) {
-      for (const entity of state.entity_memory[type] || []) {
-        if (!unique([entity.name, ...(entity.aliases || [])]).some(appears)) continue;
-        const lines = [`【${ENTITY_LABELS[type]}：${entity.name}】`];
-        if (entity.description) lines.push(entity.description);
-        lines.push(...exponentialMemorySample(
-          Array.isArray(entity.history) ? entity.history : [], limit, Math.random, st.injectionDiceSides
-        )
-          .map(entry => `- [${entry.time || '时间未明'}] ${entry.event}`));
-        sections.push(lines.join('\n'));
-      }
-    }
-    if (!sections.length) return '';
-    return `【记忆引擎提供的相关人物与实体信息】\n以下信息只用于辅助世界推演；不包含纪要。\n\n${sections.join('\n\n')}`;
-  }
+  // ==================== 世界 / 大纲跨引擎联动接口 ====================
 
-  function buildLightweightWorldEntities(worldUpdate) {
-    const groups = {};
-    for (const type of ENTITY_TYPES) groups[type] = [];
-    if (!worldUpdate || typeof worldUpdate !== 'object') return groups;
-    for (const faction of Array.isArray(worldUpdate.factions) ? worldUpdate.factions : []) {
-      const name = clean(faction?.name);
-      if (!name) continue;
-      const desc = [faction.status && `状态:${faction.status}`, faction.relation && `关系:${faction.relation}`, faction.currentGoal && `目标:${faction.currentGoal}`].filter(Boolean).join(' · ');
-      groups.organization.push({ name, aliases: [], description: desc, event: clean(faction.event || ''), time: '' });
-    }
-    for (const evt of Array.isArray(worldUpdate.events) ? worldUpdate.events : []) {
-      const name = clean(evt?.name), desc = clean(evt?.desc);
-      if (!name || !desc) continue;
-      if (['已爆发', '已完成'].includes(evt.stage)) {
-        groups.organization.push({ name: clean(evt.faction || name), aliases: [], description: '', event: Array.from(`事件「${name}」进入${evt.stage}：${desc}`).slice(0, 50).join(''), time: '' });
-      }
-    }
-    return groups;
-  }
-
-  function syncVerifiedOutlineKnowledge(events) {
+  function buildWorldEngineContext() {
     const st = settings();
-    if (st.engineEnabled === false || !Array.isArray(events) || !events.length) return { changed: 0 };
-    const nameBlacklist = configuredNameBlacklist(st);
+    if (st.engineEnabled === false || st.injectIntoWorldEngine === false) return '';
     const state = data().loadState();
-    const timeline = ensureTimelineState(state);
-    let changed = 0;
-    const personal = [];
-    for (const entry of events) {
-      const names = unique(entry?.actorNames || [entry?.actorId]).filter(n => !nameIsBlacklisted(n, nameBlacklist));
-      const memory = Array.from(clean(entry?.memory)).slice(0, 50).join('');
-      const eventId = clean(entry?.outlineEventId);
-      if (!names.length || !memory) continue;
-      const duplicateNode = eventId && timeline.nodes.some(node =>
-        node.status === 'valid' && node.kind === 'outline_verified' && node.outlineEventId === eventId
-      );
-      if (duplicateNode) continue;
-      personal.push({ name: names, known_by: [], memory, time: clean(entry?.time), outlineEventId: eventId });
+    const tables = state.tables || data().emptyTables();
+    const limit = Math.max(1, parseInt(settings().worldEngineMemoryLimit, 10) || 5);
+    const lines = [];
+    const gs = tables.global_state?.[0];
+    if (gs) lines.push(`当前地点与时间：${[gs.current_major_region, gs.current_minor_region, gs.current_location].filter(Boolean).join('·')} ${gs.cur_time || ''}`.trim());
+    const pro = tables.protagonist_info?.[0];
+    if (pro?.name) lines.push(`主角：${pro.name}（${pro.identity_text || ''}${pro.current_condition ? `｜${pro.current_condition}` : ''}）`);
+    if (tables.important_characters?.length) {
+      lines.push('重要角色：' + tables.important_characters.slice(0, limit).map(c => `${c.name}(${c.brief_intro || ''}/${c.presence_status})`).join('；'));
     }
-    if (!personal.length) return { changed: 0 };
-    const layer = Number.isFinite(Number(events[0]?.layer)) ? Number(events[0].layer) : currentLayer();
-    for (const item of personal) {
-      changed += mergeMemories(state, [item]);
-      const refs = Array.isArray(events.find(e => e.outlineEventId === item.outlineEventId)?.sourceRefs)
-        ? clone(events.find(e => e.outlineEventId === item.outlineEventId).sourceRefs)
-        : [];
-      timeline.nodes.push({
-        id: nextTimelineNodeId(timeline),
-        kind: 'outline_verified',
-        outlineEventId: item.outlineEventId,
-        originChatId: data()?.getChatId?.() || 'default',
-        startLayer: layer,
-        endLayer: layer,
-        sourceRefs: refs,
-        sourceDigest: timelineApi()?.digestRefs?.(refs) || `outline:${item.outlineEventId || Date.now()}`,
-        personal: [item],
-        entities: {},
-        factUpdates: [],
-        arcUpdates: [],
-        status: 'valid',
-        revision: 1,
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      });
+    if (tables.quests_events?.length) {
+      lines.push('进行中任务：' + tables.quests_events.slice(0, limit).map(q => `${q.quest_name}(${q.current_progress || '进行中'})`).join('；'));
     }
-    data().saveState(replayTimeline(state));
-    applyInjection();
-    refreshMemoryPanel();
-    return { changed };
+    const recentChron = (tables.chronicle || []).filter(r => r.status === 'valid').slice(-limit);
+    if (recentChron.length) {
+      lines.push('近期纪要：\n' + recentChron.map(r => `- [${r.code_index}·楼层${formatLayerSpan(r.startLayer, r.endLayer)}] ${r.summary || clean(r.chronicle_text).slice(0, 120)}`).join('\n'));
+    }
+    return lines.join('\n');
   }
 
   function getSnapshotSummaryForBridge() {
     try {
       const state = data().loadState();
-      ensureEntityState(state);
-      ensureStructuredMemoryState(state);
-      const events = ensureEventState(state);
-      const validSmalls = (events.small_summaries || []).filter(item => item.status === 'valid' && clean(item.content));
+      const tables = state.tables || data().emptyTables();
+      const validSmalls = (state.event_memory?.small_summaries || []).filter(item => item.status === 'valid' && clean(item.content));
       const recentSmallSummaries = validSmalls.slice(-6);
       const recentIds = new Set(recentSmallSummaries.map(item => item.id));
-      const keySmallSummaries = validSmalls
-        .filter(item => item.impactLevel === 'key' && !recentIds.has(item.id))
-        .slice(-4);
+      const keySmallSummaries = validSmalls.filter(item => item.impactLevel === 'key' && !recentIds.has(item.id)).slice(-4);
       return {
-        ongoingFacts: clone((state.ongoing_facts || []).filter(item => item.status === 'active')),
-        characterArcs: clone(state.character_arcs || []),
+        globalState: tables.global_state?.[0] ? clone(tables.global_state[0]) : null,
+        protagonist: tables.protagonist_info?.[0] ? clone(tables.protagonist_info[0]) : null,
+        characters: clone(tables.important_characters || []),
+        skills: clone(tables.protagonist_skills || []),
+        inventory: clone(tables.inventory || []),
+        quests: clone(tables.quests_events || []),
+        // 兼容桥接字段（大纲参考与世界参考沿用）
+        ongoingFacts: (tables.quests_events || []).map(q => ({
+          id: `quest_${q.rowId}`,
+          category: q.quest_type || '任务',
+          subject: q.issuer || q.quest_name,
+          fact: `${q.quest_name}${q.current_progress ? `（${q.current_progress}）` : ''}：${q.detail_desc || ''}`.trim(),
+          status: 'active'
+        })),
         recentSmallSummaries: clone(recentSmallSummaries),
         keySmallSummaries: clone(keySmallSummaries),
-        peopleRoster: (state.personal_memory || []).map(p => ({
-          id: p.id,
-          names: unique(p.names),
-          profile: p.profile ? clone(p.profile) : null
+        peopleRoster: (tables.important_characters || []).map(c => ({
+          id: `char_${c.rowId}`,
+          names: [c.name],
+          brief_intro: c.brief_intro,
+          presence_status: c.presence_status,
+          relation_text: c.relation_text,
+          past_experience: c.past_experience,
+          profile: {
+            basicInfo: { identity: c.brief_intro, appearance: c.appearance, relations: c.relation_text },
+            experiences: c.past_experience
+          }
         })),
-        entityRoster: ENTITY_TYPES.flatMap(type => (state.entity_memory[type] || []).map(e => ({
-          id: e.id, type, name: e.name, aliases: unique(e.aliases), description: clean(e.description)
-        })))
+        entityRoster: [
+          ...(tables.inventory || []).map(it => ({ type: 'object', name: it.item_name, aliases: [] })),
+          ...(tables.protagonist_skills || []).map(sk => ({ type: 'ability', name: sk.skill_name, aliases: [] }))
+        ]
       };
     } catch (_) {
       return null;
     }
   }
 
-  async function ingestWorldEvolution(payload) {
-    const originChatId = data().getChatId();
-    const worldSettings = window.WORLD_ENGINE_API?.getSettings?.(true) || {};
-    if (worldSettings.memoryLinkEnabled !== true && payload?.force !== true) return { skipped: true, reason: 'disabled' };
-    const st = settings();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭，无法执行世界联动');
-    if (backfillRunning) throw new Error('记忆引擎正在批量重填，暂不能执行世界联动');
-    const layer = Number.isFinite(Number(payload?.layer)) ? Number(payload.layer) : currentLayer();
-    // 普通记忆提取先开始时，等待它完整落库；不得并发读取同一基底后互相覆盖。
-    const deadline = Date.now() + Math.max(10000, Number(st.apiTimeoutMs) || 120000);
-    while (running && Date.now() < deadline) await delay(100);
-    if (running) throw new Error('等待当前记忆任务结束超时');
-    if (originChatId !== data().getChatId()) throw new Error('聊天已经切换，世界记忆联动已取消');
-    if (payload?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(payload.worldCommitId) === false) return { skipped: true, reason: 'stale-world-commit' };
-    if (payload?.replace === true) rollbackLinkedLayer(layer);
+  // 弱联动模式：剧情大纲不再向记忆 7 表写入任何记录（仅通过协同桥提供只读焦距参考）
+  function syncVerifiedOutlineKnowledge() {
+    return { changed: 0, readonly: true };
+  }
 
-    const digest = clean(payload?.worldDigest);
-    if (!digest) return { skipped: true, reason: 'empty_digest' };
+  function removeLinkedLayerFromState(state, layer) {
     const sourceKey = `${data().getChatId()}:${layer}`;
-    const safeWorldUpdate = window.STORY_ENGINE_PROJECTION?.active?.()
-      ? window.STORY_ENGINE_PROJECTION.forMemory(payload?.worldUpdate || {}) : payload?.worldUpdate;
-    const worldInfo = safeWorldUpdate && typeof safeWorldUpdate === 'object'
-      ? JSON.stringify(safeWorldUpdate, null, 2)
-      : digest;
-    const attemptBase = data().loadState();
+    const tl = ensureTimelineState(state);
+    const beforeN = tl.nodes.length;
+    const beforeC = (state.tables?.chronicle || []).length;
+    tl.nodes = tl.nodes.filter(n => !(n?.kind === 'world_link' && n.sourceKey === sourceKey));
+    state.tables.chronicle = (state.tables.chronicle || []).filter(r => !(r?.source === 'world_engine' && r.sourceKey === sourceKey));
+    return tl.nodes.length !== beforeN || state.tables.chronicle.length !== beforeC;
+  }
 
-    // 轻同步模式（不发起额外的记忆提取 LLM API 调用，直接落库公开世界节点与世界同步纪要）
-    if (payload?.lightweight === true) {
-      const next = clone(attemptBase);
-      const lightweightEntities = buildLightweightWorldEntities(safeWorldUpdate);
-      const entityChanges = mergeEntityMemories(next, lightweightEntities);
-      const factUpdates = (Array.isArray(safeWorldUpdate?.worldTrends) ? safeWorldUpdate.worldTrends : [])
-        .filter(trend => clean(trend?.name) && clean(trend?.description))
-        .slice(0, 3)
-        .map(trend => ({
-          action: trend.status === '已结束' ? 'resolve' : 'upsert',
-          category: '设定',
-          subject: clean(trend.name),
-          fact: Array.from(clean(trend.description)).slice(0, 120).join(''),
-          keywords: unique([trend.name, trend.scope])
-        }));
-      const factChanges = factUpdates.length
-        ? mergeOngoingFacts(next, factUpdates, layer, null, clean(payload?.worldCommitId))
-        : 0;
-      appendTimelineNode(next, {
-        personal: [],
-        entities: lightweightEntities,
-        factUpdates,
-        arcUpdates: []
-      }, {
-        kind: 'world_link',
-        sourceKey,
-        worldCommitId: clean(payload?.worldCommitId),
-        startLayer: layer,
-        endLayer: layer,
-        conversation: digest
-      }, { layer });
-      const eventMemory = ensureEventState(next);
-      const worldKeywords = unique([
-        ...(Array.isArray(safeWorldUpdate?.factions) ? safeWorldUpdate.factions.map(f => f?.name) : []),
-        ...(Array.isArray(safeWorldUpdate?.events) ? safeWorldUpdate.events.map(e => e?.name) : [])
-      ]).slice(0, 6);
-      eventMemory.small_summaries.push({
-        id: nextSmallSummaryId(eventMemory),
-        startLayer: layer,
-        endLayer: layer,
-        content: Array.from(digest).slice(0, 200).join(''),
-        keywords: worldKeywords,
-        entityNames: worldKeywords,
-        impactLevel: 'normal',
-        source: 'world_engine',
-        sourceKey,
-        ...(payload?.worldCommitId ? { worldCommitId: clean(payload.worldCommitId) } : {}),
-        originChatId: data()?.getChatId?.() || 'default',
-        status: 'valid',
-        revision: 1
-      });
-      eventMemory.small_summaries = sortSmallSummaries(eventMemory.small_summaries);
-      data().saveState(next);
-      window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
-      applyInjection();
-      refreshMemoryPanel();
-      return {
-        lightweight: true,
-        added: entityChanges.entities + entityChanges.history + entityChanges.descriptions + factChanges + 1,
-        addedSmall: 1,
-        state: data().loadState()
-      };
-    }
+  function rollbackLinkedLayer(layer) {
+    const state = data().loadState();
+    if (!removeLinkedLayerFromState(state, layer)) return false;
+    data().saveState(replayTimeline(state));
+    applyInjection();
+    refreshMemoryPanel();
+    return true;
+  }
 
-    try {
-      const result = await runTasks({
-        memory: {
-          conversation: `【世界引擎本轮返回】\n${worldInfo}\n\n以上是客观世界信息。只更新其中明确支持的人物认知与世界实体，不得猜测任何人物知晓未公开信息。`,
-          sourceKey,
-          worldCommitId: clean(payload?.worldCommitId),
-          startLayer: layer,
-          endLayer: layer,
-          kind: 'world_link'
-        }
-      }, {
-        layer,
-        baseState: attemptBase,
-        saveCheckpoint: false,
-        worldDigestMinute: { layer, sourceKey, content: digest, worldCommitId: clean(payload?.worldCommitId) }
-      });
-      return result;
-    } catch (error) {
-      // 联动失败只撤销本次联动尝试；同楼层已完成的普通记忆提取仍应保留。
-      if (originChatId === data().getChatId() && !(payload?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(payload.worldCommitId) === false)) {
-        data().saveState(attemptBase); applyInjection();
-      }
-      throw error;
-    }
+  // 弱联动模式：世界引擎不再向记忆 7 表写入纪要或任务（旧存档中已有的 world_engine/world_link 记录仍受上方回滚与撤回逻辑正常维护）
+  async function ingestWorldEvolution() {
+    return { skipped: true, reason: 'readonly_weak_coupling', lightweight: true, added: 0, addedSmall: 0 };
   }
 
   function invalidateWorldCommits(ids) {
     const removed = new Set(Array.isArray(ids) ? ids : []);
     if (!removed.size) return { changed: false };
-    const state = data().loadState(), timeline = ensureTimelineState(state), events = ensureEventState(state);
-    const archive = state.world_commit_archive || { nodes: [], smallSummaries: [] };
+    const state = data().loadState();
+    const tl = ensureTimelineState(state);
+    const archive = state.world_commit_archive || { nodes: [], chronicle: [] };
     archive.nodes = Array.isArray(archive.nodes) ? archive.nodes : [];
-    archive.smallSummaries = Array.isArray(archive.smallSummaries) ? archive.smallSummaries : [];
-    delete archive.bigSummaries;
+    archive.chronicle = Array.isArray(archive.chronicle) ? archive.chronicle : [];
     const preserve = (items, value) => {
-      const index = items.findIndex(item => item.record?.id === value.record.id && item.record?.worldCommitId === value.record.worldCommitId);
-      if (index < 0) items.push(value); else items[index] = value;
+      const idx = items.findIndex(item => item.record?.id === value.record.id && item.record?.worldCommitId === value.record.worldCommitId);
+      if (idx < 0) items.push(value); else items[idx] = value;
     };
-    timeline.nodes.forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.nodes, { record: clone(record), position }); });
-    events.small_summaries.forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.smallSummaries, { record: clone(record), position }); });
+    tl.nodes.forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.nodes, { record: clone(record), position }); });
+    (state.tables.chronicle || []).forEach((record, position) => { if (removed.has(record.worldCommitId)) preserve(archive.chronicle, { record: clone(record), position }); });
     state.world_commit_archive = archive;
-    const beforeNodes = timeline.nodes.length, beforeSmall = events.small_summaries.length;
-    timeline.nodes = timeline.nodes.filter(node => !removed.has(node.worldCommitId));
-    const removedMinutes = new Set(events.small_summaries.filter(item => removed.has(item.worldCommitId)).map(item => item.id));
-    events.small_summaries = events.small_summaries.filter(item => !removedMinutes.has(item.id));
-    if (beforeNodes === timeline.nodes.length && beforeSmall === events.small_summaries.length) return { changed: false };
+    const beforeN = tl.nodes.length, beforeC = (state.tables.chronicle || []).length;
+    tl.nodes = tl.nodes.filter(n => !removed.has(n.worldCommitId));
+    state.tables.chronicle = (state.tables.chronicle || []).filter(r => !removed.has(r.worldCommitId));
+    if (beforeN === tl.nodes.length && beforeC === state.tables.chronicle.length) return { changed: false };
     abortController?.abort();
     data().saveState(replayTimeline(state));
     applyInjection();
-    return { changed: true, removedNodes: beforeNodes - timeline.nodes.length, removedMinutes: removedMinutes.size };
+    return { changed: true, removedNodes: beforeN - tl.nodes.length, removedMinutes: beforeC - state.tables.chronicle.length };
   }
 
-  // preview 暂时撤下的世界贡献仍在同一聊天的完整存档中；只有原 commit 重新可信 active 才恢复。
   function restoreActiveWorldContributions() {
     const state = data().loadState(), archive = state.world_commit_archive;
     if (!archive || !window.STORY_ENGINE_HISTORY?.isCommitActive || window.STORY_ENGINE_HISTORY.isApplying?.() === true) return false;
     const active = record => record?.worldCommitId && window.STORY_ENGINE_HISTORY.isCommitActive(record.worldCommitId) === true;
-    const timeline = ensureTimelineState(state), events = ensureEventState(state);
+    const tl = ensureTimelineState(state);
     let changed = false;
     const insert = (items, record, position) => items.splice(Math.max(0, Math.min(items.length, Number(position) || 0)), 0, record);
     archive.nodes = (archive.nodes || []).filter(entry => {
       if (!active(entry.record)) return true;
-      const record = clone(entry.record);
-      if (!timeline.nodes.some(item => item.worldCommitId === record.worldCommitId && item.sourceDigest === record.sourceDigest)) {
-        if (timeline.nodes.some(item => item.id === record.id)) record.id = nextTimelineNodeId(timeline);
-        record.status = 'valid'; insert(timeline.nodes, record, entry.position);
+      const rec = clone(entry.record);
+      if (!tl.nodes.some(item => item.worldCommitId === rec.worldCommitId && item.sourceDigest === rec.sourceDigest)) {
+        rec.status = 'valid'; insert(tl.nodes, rec, entry.position);
       }
       changed = true; return false;
     });
-    archive.smallSummaries = (archive.smallSummaries || []).filter(entry => {
+    const chronArchive = archive.chronicle || archive.smallSummaries || [];
+    const remainingChron = chronArchive.filter(entry => {
       if (!active(entry.record)) return true;
-      const record = clone(entry.record);
-      const same = events.small_summaries.find(item => item.worldCommitId === record.worldCommitId && item.content === record.content && item.sourceKey === record.sourceKey);
-      if (!same) {
-        if (events.small_summaries.some(item => item.id === record.id)) record.id = nextSmallSummaryId(events);
-        record.status = 'valid'; insert(events.small_summaries, record, entry.position);
+      const rec = clone(entry.record);
+      const exists = (state.tables.chronicle || []).some(item => item.worldCommitId === rec.worldCommitId && item.sourceKey === rec.sourceKey);
+      if (!exists) {
+        const usedCodes = new Set((state.tables.chronicle || []).map(r => r.code_index));
+        const normalizedRec = data().normalizeTableRow('chronicle', rec, (state.tables.chronicle?.length || 0) + 1, usedCodes);
+        if (normalizedRec) insert(state.tables.chronicle, normalizedRec, entry.position);
       }
       changed = true; return false;
     });
-    delete archive.bigSummaries;
+    archive.chronicle = remainingChron;
+    delete archive.smallSummaries;
     if (!changed) return false;
-    events.small_summaries = sortSmallSummaries(events.small_summaries);
-    if (!archive.nodes.length && !archive.smallSummaries.length) delete state.world_commit_archive;
+    if (!archive.nodes.length && !archive.chronicle.length) delete state.world_commit_archive;
     data().saveState(replayTimeline(state));
     return true;
   }
 
   function getQuarantineBackup(backupKey) {
-    const chatId = data()?.getChatId?.() || 'default';
-    const prefix = `memory_engine_quarantine_${chatId}_`;
-    const key = clean(backupKey || window.WORLD_ENGINE_STORE?.getItem(`memory_engine_quarantine_latest_${chatId}`));
-    if (!key.startsWith(prefix)) return null;
-    try { return JSON.parse(window.WORLD_ENGINE_STORE?.getItem(key) || 'null'); } catch (_) { return null; }
+    const cid = data()?.getChatId?.() || 'default';
+    const prefix = `memory_engine_quarantine_${cid}_`;
+    const k = clean(backupKey || window.WORLD_ENGINE_STORE?.getItem(`memory_engine_quarantine_latest_${cid}`));
+    if (!k.startsWith(prefix)) return null;
+    try { return JSON.parse(window.WORLD_ENGINE_STORE?.getItem(k) || 'null'); } catch (_) { return null; }
   }
 
-  // 仅由作者显式从头重建时调用。无来源 Root 和人工全量快照先完整备份，再退出自动注入。
-  // 本地隔离不请求模型；仍有真实来源的节点继续沿原流程审计、修复。
   function quarantineUnprovenancedHistory(options) {
-    const state = data().loadState(), chatId = data().getChatId(), timeline = ensureTimelineState(state), events = ensureEventState(state);
+    const state = data().loadState(), cid = data().getChatId(), tl = ensureTimelineState(state);
     const checkpoint = data().loadCheckpoint?.() || null, linkCheckpoint = data().loadLinkCheckpoint?.() || null;
-    const stamp = Date.now(), prefix = `memory_engine_quarantine_${chatId}_`;
+    const stamp = Date.now(), prefix = `memory_engine_quarantine_${cid}_`;
     let backupKey = prefix + stamp, suffix = 0;
     while (window.WORLD_ENGINE_STORE?.getItem(backupKey) != null) backupKey = prefix + stamp + '_' + ++suffix;
-    const backup = { type: 'memory-engine-quarantine-backup', version: 1, chatId, createdAt: stamp,
-      reason: clean(options?.reason || '作者显式从头重建，隔离无来源记忆'), state: clone(state), checkpoint: clone(checkpoint), linkCheckpoint: clone(linkCheckpoint) };
+    const backup = {
+      type: 'memory-engine-quarantine-backup',
+      version: 2,
+      chatId: cid,
+      createdAt: stamp,
+      reason: clean(options?.reason || '作者显式从头重建，隔离无来源记忆'),
+      state: clone(state),
+      checkpoint: clone(checkpoint),
+      linkCheckpoint: clone(linkCheckpoint)
+    };
     const store = window.WORLD_ENGINE_STORE;
-    const ownsTransaction = typeof store.beginTransaction === 'function' && !store.isTransactionActive?.();
-    if (ownsTransaction) store.beginTransaction();
+    const ownsTx = typeof store.beginTransaction === 'function' && !store.isTransactionActive?.();
+    if (ownsTx) store.beginTransaction();
     try {
-    // 备份失败则直接抛出：不能在没有可恢复副本时清理任何记忆。
-    window.WORLD_ENGINE_STORE.setItem(backupKey, JSON.stringify(backup));
-    window.WORLD_ENGINE_STORE.setItem(`memory_engine_quarantine_latest_${chatId}`, backupKey);
-    try { window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('无来源记忆隔离前完整备份'); } catch (_) { /* 独立本地备份已成功。 */ }
-    abortController?.abort();
-    const root = timeline.root?.base || {};
-    const counts = { rootPeople: root.personal_memory?.length || 0,
-      rootEntities: ENTITY_TYPES.reduce((total, type) => total + (root.entity_memory?.[type]?.length || 0), 0),
-      manualNodes: 0, unprovenancedNodes: 0, staleNodes: 0, smallSummaries: 0 };
-    const supported = record => {
-      if (record?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(record.worldCommitId) === true) return true;
-      const refs = record?.sourceRefs;
-      return Array.isArray(refs) && refs.length > 0 && refs.every(ref => clean(ref.chatId) === chatId && clean(ref.messageId) && ref.synthetic !== true);
-    };
-    const audited = record => {
-      if (record.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(record.worldCommitId) === true) return true;
-      return timelineApi()?.auditRefs?.(record.sourceRefs)?.valid === true;
-    };
-    timeline.nodes = timeline.nodes.filter(node => {
-      if (node.kind === 'manual_snapshot' || node.snapshot) { counts.manualNodes++; return false; }
-      if (!supported(node)) { counts.unprovenancedNodes++; return false; }
-      node.status = audited(node) ? 'valid' : 'stale'; if (node.status === 'stale') counts.staleNodes++;
-      return true;
-    });
-    timeline.root.base = {
-      personal_memory: [],
-      knowledge_index: {},
-      entity_memory: { organization: [], object: [], ability: [], location: [] },
-      entity_index: {},
-      ongoing_facts: [],
-      character_arcs: [],
-      round: 0,
-      chatLayer: null
-    };
-    events.small_summaries = events.small_summaries.filter(summary => {
-      if (!supported(summary)) { counts.smallSummaries++; return false; }
-      summary.status = audited(summary) ? 'valid' : 'stale'; return true;
-    });
-    // 隔离不是申请历史全量记忆重填；下一轮纪要从当前聊天基线继续。
-    events.small_summary_layer = currentLayer();
-    state.rebaseLayer = currentLayer();
-    const safe = replayTimeline(state);
-    data().saveState(safe);
-    data().saveCheckpoint(safe);
-    data().clearLinkCheckpoint?.();
-    const persistence = ownsTransaction ? store.commitTransaction() : Promise.resolve();
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
-    applyInjection(); refreshMemoryPanel();
-    return { changed: true, backupKey, quarantined: counts, retainedNodes: safe.timeline.nodes.length, needsAuthorReview: true, persistence };
+      store.setItem(backupKey, JSON.stringify(backup));
+      store.setItem(`memory_engine_quarantine_latest_${cid}`, backupKey);
+      try { window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('无来源记忆隔离前完整备份'); } catch (_) {}
+      abortController?.abort();
+      const supported = rec => {
+        if (rec?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(rec.worldCommitId) === true) return true;
+        const refs = rec?.sourceRefs;
+        return Array.isArray(refs) && refs.length > 0 && refs.every(ref => clean(ref.chatId) === cid && clean(ref.messageId) && ref.synthetic !== true);
+      };
+      const audited = rec => {
+        if (rec?.worldCommitId && window.STORY_ENGINE_HISTORY?.isCommitActive?.(rec.worldCommitId) === true) return true;
+        return timelineApi()?.auditRefs?.(rec.sourceRefs)?.valid === true;
+      };
+      const counts = { rootRows: data().tableRowCounts({ tables: tl.root?.base?.tables }).totalRows, manualNodes: 0, unprovenancedNodes: 0, staleNodes: 0, chronicleRows: 0 };
+      tl.nodes = tl.nodes.filter(node => {
+        if (node.kind === 'manual_snapshot' || node.snapshot) { counts.manualNodes++; return false; }
+        if (!supported(node)) { counts.unprovenancedNodes++; return false; }
+        node.status = audited(node) ? 'valid' : 'stale';
+        if (node.status === 'stale') counts.staleNodes++;
+        return true;
+      });
+      tl.root.base = { tables: data().emptyTables(), round: 0, chatLayer: null };
+      state.tables.chronicle = (state.tables.chronicle || []).filter(row => {
+        if (!supported(row)) { counts.chronicleRows++; return false; }
+        row.status = audited(row) ? 'valid' : 'stale';
+        return true;
+      });
+      state.rebaseLayer = currentLayer();
+      const safe = replayTimeline(state);
+      data().saveState(safe);
+      data().saveCheckpoint(safe);
+      data().clearLinkCheckpoint?.();
+      const persistence = ownsTx ? store.commitTransaction() : Promise.resolve();
+      window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
+      applyInjection();
+      refreshMemoryPanel();
+      return { changed: true, backupKey, quarantined: counts, retainedNodes: safe.timeline.nodes.length, needsAuthorReview: true, persistence };
     } catch (error) {
-      if (ownsTransaction && store.isTransactionActive?.()) store.rollbackTransaction();
+      if (ownsTx && store.isTransactionActive?.()) store.rollbackTransaction();
       throw error;
     }
   }
 
-  function setBackfillStatus(current, total, message) {
-    backfillStatus = { running: backfillRunning, current, total, message: message || '' };
-    const element = document.getElementById('we-memory-person-backfill-status');
-    if (element) element.textContent = backfillStatus.message;
-  }
-
-  function setSummaryBackfillStatus(current, total, message) {
-    summaryBackfillStatus = { running: backfillRunning, current, total, message: message || '' };
-    for (const id of ['we-memory-home-fill-status', 'we-memory-core-status', 'we-memory-summary-backfill-status', 'we-memory-minutes-action-status']) {
-      const element = document.getElementById(id);
-      if (element) element.textContent = summaryBackfillStatus.message;
-    }
-  }
-
-  async function backfill() {
-    if (backfillRunning || running) return;
-    const st = settings(), all = chat();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    const configuredEnd = Math.max(0, parseInt(st.backfillEndLayer) || 0);
-    const end = Math.min(all.length - 1, configuredEnd || all.length - 1);
-    const opening = ignoreFirstLayer(st);
-    const aiLayers = all.map((message, index) => (!message?.is_user && index <= end && !(opening && index === 0) ? index : -1)).filter(i => i >= 0);
-    const size = Math.max(1, parseInt(st.backfillBatchSize) || 5), batches = [];
-    for (let i = 0; i < aiLayers.length; i += size) batches.push(aiLayers.slice(i, i + size));
-    if (!batches.length) { setBackfillStatus(0, 0, '没有可重填的 AI 楼层'); return; }
-    backfillRunning = true;
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('记忆重填前自动备份');
-    const original = data().loadState();
-    data().saveCheckpoint(original);
-    data().saveState({
-      ...original,
-      personal_memory: [],
-      knowledge_index: {},
-      entity_memory: { organization: [], object: [], ability: [], location: [] },
-      entity_index: {},
-      ongoing_facts: [],
-      character_arcs: [],
-      round: 0,
-      chatLayer: null,
-      timeline: null
-    });
-    try {
-      for (let i = 0; i < batches.length && backfillRunning; i++) {
-        const layers = batches[i], start = Math.max(0, layers[0] - 1), finish = layers.at(-1);
-        setBackfillStatus(i, batches.length, `正在重填 ${i + 1} / ${batches.length}`);
-        await extractConversation(formatMessages(all.slice(start, finish + 1), start), {
-          startLayer: start,
-          endLayer: finish,
-          sourceRefs: timelineApi()?.captureRange?.(start, finish) || [],
-          layer: finish, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
-        });
-      }
-      setBackfillStatus(batches.length, batches.length, backfillRunning ? '记忆重填完成' : '记忆重填已停止');
-    } catch (error) {
-      setBackfillStatus(backfillStatus.current, batches.length, `重填失败：${error?.message || error}`);
-      throw error;
-    } finally { backfillRunning = false; backfillStatus.running = false; applyInjection(); }
-  }
-
-  async function backfillSummaries() {
-    if (backfillRunning || running || reconciling) return;
-    const st = settings(), all = chat();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    const configuredEnd = Math.max(0, parseInt(st.backfillEndLayer) || 0);
-    const end = Math.min(all.length - 1, configuredEnd || all.length - 1);
-    const opening = ignoreFirstLayer(st);
-    const aiLayers = all.map((message, index) => (!message?.is_user && index <= end && !(opening && index === 0) ? index : -1)).filter(index => index >= 0);
-    const size = Math.max(1, parseInt(st.summaryBackfillSmallEveryX) || 5), batches = [];
-    for (let i = 0; i < aiLayers.length; i += size) batches.push(aiLayers.slice(i, i + size));
-    if (!batches.length) { setSummaryBackfillStatus(0, 0, '没有可重填的 AI 楼层'); return; }
-    backfillRunning = true;
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('纪要重填前自动备份');
-    const original = data().loadState();
-    data().saveCheckpoint(original);
-    data().saveState({
-      ...original,
-      event_memory: { small_summaries: [], small_summary_layer: null }
-    });
-    try {
-      for (let i = 0; i < batches.length && backfillRunning; i++) {
-        const layers = batches[i], firstAi = layers[0], finish = layers.at(-1);
-        const start = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
-        const smallTask = {
-          startLayer: start,
-          endLayer: finish,
-          conversation: formatMessages(all.slice(start, finish + 1), start),
-          sourceRefs: timelineApi()?.captureRange?.(start, finish) || []
-        };
-        const state = data().loadState();
-        setSummaryBackfillStatus(i, batches.length, `正在重填纪要 ${i + 1} / ${batches.length}（楼层 ${start}–${finish}）`);
-        await runTasks({ small: smallTask }, {
-          baseState: state, retries: st.backfillRetries, saveCheckpoint: false, allowWhileBackfill: true
-        });
-      }
-      setSummaryBackfillStatus(batches.length, batches.length, backfillRunning ? '纪要重填完成' : '纪要重填已停止');
-    } catch (error) {
-      setSummaryBackfillStatus(summaryBackfillStatus.current, batches.length, `纪要重填失败：${error?.message || error}`);
-      throw error;
-    } finally {
-      backfillRunning = false;
-      summaryBackfillStatus.running = false;
-      applyInjection();
-      refreshMemoryPanel();
-      refreshVectorRecallAsync();
-    }
-  }
-
-  // 统一的逐层/逐批自动填表执行内核：一键追平、指定范围填表共用自动填表的纯增量写入逻辑
-  async function runIncrementalFillBatch(batch, options = {}) {
-    const st = settings();
-    const overwrite = options.overwrite === true;
-    const includeMemory = options.includeMemory !== false;
-    const curState = data().loadState();
-    const curSmall = overwrite ? new Set() : coveredDialogueAiLayersSet(curState);
-    const curMem = (overwrite || !includeMemory) ? curSmall : coveredMemoryAiLayersSet(curState);
-    const needSmall = overwrite || batch.aiLayers.some(layer => !curSmall.has(layer));
-    // 只要开启全要素填表且本批需要补填纪要，就在同一次请求中一并提取人物、实体、持续事实与角色弧光（零额外调用），绝不退化成仅请求纪要
-    const needMemory = includeMemory && (overwrite || needSmall || batch.aiLayers.some(layer => !curMem.has(layer)));
-    if (!needSmall && !needMemory) return { skipped: true, addedSmall: 0 };
-    const tasks = {
-      ...(needMemory ? { memory: batch } : {}),
-      ...(needSmall ? { small: batch } : {})
-    };
-    const hasBounds = overwrite && Number.isFinite(Number(options.rangeStart)) && Number.isFinite(Number(options.rangeEnd));
-    return runTasks(tasks, {
-      baseState: curState,
-      layer: batch.endLayer,
-      retries: options.retries ?? st.backfillRetries,
-      saveCheckpoint: false,
-      allowWhileBackfill: true,
-      replaceExactSameBatch: overwrite || options.replaceEmptyOrSuperseded === true,
-      overwriteRangeBounds: hasBounds ? { start: Number(options.rangeStart), end: Number(options.rangeEnd) } : null,
-      retryEmptyMemory: true
-    });
-  }
-
-  async function fillSummaryRange(options = {}) {
-    const st = settings(), all = chat();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    if (backfillRunning || running || reconciling) throw new Error('已有记忆任务正在运行');
-    if (!all.length) {
-      setSummaryBackfillStatus(0, 0, '当前聊天没有可填表的楼层');
-      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, skipped: true };
-    }
-    const maxChatLayer = all.length - 1;
-    const rawStart = options.startLayer !== undefined && options.startLayer !== '' ? parseInt(options.startLayer, 10) : (parseInt(st.backfillStartLayer, 10) || 0);
-    const rawEnd = options.endLayer !== undefined && options.endLayer !== '' ? parseInt(options.endLayer, 10) : (parseInt(st.backfillEndLayer, 10) || 0);
-    const startLayer = Math.max(0, Number.isFinite(rawStart) ? rawStart : 0);
-    const endLayer = Math.min(maxChatLayer, rawEnd > 0 ? rawEnd : (options.endLayer === 0 && options.explicitZeroEnd ? 0 : maxChatLayer));
-    if (endLayer < startLayer) throw new Error(`结束楼层（${endLayer}）不能小于起始楼层（${startLayer}）`);
-
-    // 默认按纯增量逐层自动填表补漏；仅当用户显式传 overwrite: true 时才覆盖区间内已有记录
-    const overwrite = options.overwrite === true;
-    const includeMemory = options.includeMemory !== false;
-    const batchSize = Math.max(1, parseInt(options.batchSize ?? st.smallSummaryEveryX) || 1);
-    const stateBefore = data().loadState();
-    const coveredSet = overwrite ? new Set() : coveredDialogueAiLayersSet(stateBefore);
-    const coveredMemSet = (overwrite || !includeMemory) ? coveredSet : coveredMemoryAiLayersSet(stateBefore);
-    const eligibleAi = collectEligibleAiLayers(st, startLayer, endLayer).filter(layer =>
-      !coveredSet.has(layer) || (includeMemory && !coveredMemSet.has(layer))
-    );
-    const batches = buildContiguousAiBatches(eligibleAi, batchSize, startLayer);
-    if (!batches.length) {
-      const msg = overwrite ? `楼层 ${startLayer}–${endLayer} 内没有可填表的 AI 楼层` : `楼层 ${startLayer}–${endLayer} 已全部覆盖`;
-      setSummaryBackfillStatus(0, 0, msg);
-      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, skipped: true, message: msg };
-    }
-
-    backfillRunning = true;
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.(`范围填表前自动备份（${startLayer}-${endLayer}）`);
-    data().saveCheckpoint(stateBefore);
-    let completedBatches = 0, addedSmall = 0;
-    try {
-      for (let i = 0; i < batches.length && backfillRunning; i++) {
-        const batch = batches[i];
-        setSummaryBackfillStatus(i, batches.length, `正在范围填表 ${i + 1} / ${batches.length}（楼层 ${formatLayerSpan(batch.startLayer, batch.endLayer, '–')}）`);
-        const res = await runIncrementalFillBatch(batch, {
-          overwrite,
-          includeMemory,
-          rangeStart: startLayer,
-          rangeEnd: endLayer,
-          retries: st.backfillRetries,
-          replaceEmptyOrSuperseded: true
-        });
-        if (res?.skipped) continue;
-        completedBatches++;
-        addedSmall += Number(res?.addedSmall || 0);
-      }
-      const stopped = !backfillRunning;
-      setSummaryBackfillStatus(completedBatches, batches.length, stopped
-        ? `范围填表已停止（已完成 ${completedBatches}/${batches.length} 批）`
-        : `范围填表完成（楼层 ${formatLayerSpan(startLayer, endLayer, '–')}，共 ${completedBatches} 批）`);
-      return { completedBatches, totalBatches: batches.length, addedSmall, stopped, state: data().loadState() };
-    } catch (error) {
-      setSummaryBackfillStatus(completedBatches, batches.length, `范围填表失败：${error?.message || error}`);
-      throw error;
-    } finally {
-      backfillRunning = false;
-      summaryBackfillStatus.running = false;
-      const latestState = data().loadState();
-      applyInjection();
-      refreshMemoryPanel();
-      refreshVectorRecallAsync(latestState);
-    }
-  }
-
-  async function catchUpToLatest(options = {}) {
-    const st = settings(), all = chat();
-    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    if (backfillRunning || running || reconciling) throw new Error('已有记忆任务正在运行');
-    if (!all.length) {
-      setSummaryBackfillStatus(0, 0, '当前聊天为空，无需追平');
-      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, repaired: 0, alreadyCaughtUp: true };
-    }
-    const includeCurrentFloor = options.includeCurrentFloor === true;
-    const respectDelay = includeCurrentFloor ? false : (options.respectDelay !== false);
-    const includeMemory = options.includeMemory !== false;
-    const batchSize = Math.max(1, parseInt(options.batchSize ?? st.smallSummaryEveryX) || 1);
-
-    // 1. 先做本地对账与死记录清理，避免基于已删楼层的陈旧游标计算目标
-    const preReport = newHistoryAuditReport();
-    let state = data().loadState();
-    const preOpts = { pruneDead: true, respectDelay };
-    const preChanged = auditStoredSources(state, preReport, preOpts);
-    const preCursorChanged = recomputeSummaryCursor(state, preReport, preOpts._auditMeta);
-    if (preChanged || preCursorChanged) {
-      state = replayTimeline(state);
-      data().saveState(state);
-      try { window.MEMORY_ENGINE_VECTOR?.pruneVectorsForState?.(state); } catch (_) {}
-    }
-
-    // 2. 修复目标楼层之前的 stale 纪要/节点
-    let repaired = 0;
-    const staleBefore = ensureTimelineState(state).nodes.some(n => n.status === 'stale')
-      || ensureEventState(state).small_summaries.some(s => s.status === 'stale');
-    if (staleBefore) {
-      const rec = await reconcileHistory({ respectDelay, refillUncovered: false });
-      repaired += Number(rec?.repairedCount || 0);
-    }
-
-    const coverage = getSummaryCoverageStatus(st);
-    const targetEnd = includeCurrentFloor ? coverage.latestAiLayer : coverage.latestAutoTargetLayer;
-    if (targetEnd < 0) {
-      const msg = coverage.effectiveDelayFloors > 0 && !includeCurrentFloor
-        ? '当前楼层处于延迟区（当前层不填表），暂无可追平楼层'
-        : '当前聊天没有可填表的 AI 楼层';
-      setSummaryBackfillStatus(0, 0, msg);
-      applyInjection();
-      refreshMemoryPanel();
-      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, repaired, targetEndLayer: targetEnd, alreadyCaughtUp: true, message: msg };
-    }
-
-    const uncoveredLayers = includeMemory
-      ? (includeCurrentFloor ? coverage.uncoveredCombinedAiLayers : coverage.uncoveredCombinedAutoAiLayers)
-      : (includeCurrentFloor ? coverage.uncoveredAiLayers : coverage.uncoveredAutoAiLayers);
-    const batches = buildContiguousAiBatches(uncoveredLayers, batchSize);
-    if (!batches.length) {
-      const msg = repaired > 0
-        ? `已修复 ${repaired} 条历史记录并追平至第 ${targetEnd} 层`
-        : `已追平至第 ${targetEnd} 层，无需补填`;
-      setSummaryBackfillStatus(0, 0, msg);
-      applyInjection();
-      refreshMemoryPanel();
-      refreshVectorRecallAsync(data().loadState());
-      return { completedBatches: 0, totalBatches: 0, addedSmall: 0, repaired, targetEndLayer: targetEnd, alreadyCaughtUp: repaired === 0, message: msg };
-    }
-
-    backfillRunning = true;
-    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('一键追平填表前自动备份');
-    data().saveCheckpoint(data().loadState());
-    let completedBatches = 0, addedSmall = 0;
-    try {
-      for (let i = 0; i < batches.length && backfillRunning; i++) {
-        const batch = batches[i];
-        setSummaryBackfillStatus(i, batches.length, `正在追平填表 ${i + 1} / ${batches.length}（楼层 ${formatLayerSpan(batch.startLayer, batch.endLayer, '–')}）`);
-        // 一键追平严格走纯增量逐层自动填表，绝不删除任何已有的旧楼层记忆节点
-        const res = await runIncrementalFillBatch(batch, {
-          overwrite: false,
-          includeMemory,
-          retries: st.backfillRetries,
-          replaceEmptyOrSuperseded: true
-        });
-        if (res?.skipped) continue;
-        completedBatches++;
-        addedSmall += Number(res?.addedSmall || 0);
-      }
-      const stopped = !backfillRunning;
-      setSummaryBackfillStatus(completedBatches, batches.length, stopped
-        ? `追平已停止（已完成 ${completedBatches}/${batches.length} 批）`
-        : `已追平至第 ${targetEnd} 层（共补填 ${completedBatches} 批${repaired > 0 ? `，修复 ${repaired} 条` : ''}）`);
-      return { completedBatches, totalBatches: batches.length, addedSmall, repaired, targetEndLayer: targetEnd, stopped, state: data().loadState() };
-    } catch (error) {
-      setSummaryBackfillStatus(completedBatches, batches.length, `追平失败：${error?.message || error}`);
-      throw error;
-    } finally {
-      backfillRunning = false;
-      summaryBackfillStatus.running = false;
-      const latestState = data().loadState();
-      applyInjection();
-      refreshMemoryPanel();
-      refreshVectorRecallAsync(latestState);
-    }
-  }
-
-  function stopBackfill() {
-    backfillRunning = false;
-    clearTimeout(historyRefillTimer);
-    abortController?.abort();
-    setBackfillStatus(backfillStatus.current, backfillStatus.total, '正在停止…');
-    setSummaryBackfillStatus(summaryBackfillStatus.current, summaryBackfillStatus.total, '正在停止…');
-  }
+  // ==================== 向量召回同步与事件生命周期 ====================
 
   function refreshVectorRecallAsync(stateOverride) {
     try {
@@ -4412,7 +2510,7 @@ window.MEMORY_ENGINE = (function() {
       if (!vecApi) return;
       vecApi.pruneVectorsForState?.(stateOverride);
       if (st.vectorEnabled !== true || vecApi.isRunning?.()) return;
-      const scan = chat().slice(-Math.max(1, parseInt(st.searchDepth) || 5)).map(message => clean(message?.mes)).join('\n');
+      const scan = chat().slice(-Math.max(1, parseInt(st.searchDepth, 10) || 5)).map(m => clean(m?.mes)).join('\n');
       if (scan && typeof vecApi.recallForQuery === 'function') {
         Promise.resolve(vecApi.recallForQuery(scan, { state: stateOverride })).catch(err =>
           console.warn('[记忆引擎] 后台语义向量检索失败（已隔离）', err)
@@ -4425,61 +2523,98 @@ window.MEMORY_ENGINE = (function() {
     } catch (_) {}
   }
 
+  // 对齐 shujuku chat-mutation-scheduler：Trailing (1.2s) + MaxWait (3s) + 代次串行化，防止狂滑重入
+  function cancelMutationRefresh() {
+    clearTimeout(mutationTimer);
+    mutationTimer = null;
+    mutationGeneration++;
+    mutationFirstAt = 0;
+    mutationPending = false;
+  }
+
+  function scheduleMutationRefresh(reason, options = {}) {
+    mutationReason = reason || '历史变化';
+    if (options.refillUncovered) mutationRefillRequested = true;
+    mutationGeneration++;
+    const now = Date.now();
+    if (!mutationFirstAt) mutationFirstAt = now;
+
+    if (now - mutationFirstAt >= MUTATION_MAX_WAIT_MS) {
+      clearTimeout(mutationTimer);
+      mutationTimer = null;
+      void runMutationRound();
+      return;
+    }
+    clearTimeout(mutationTimer);
+    mutationTimer = setTimeout(() => {
+      mutationTimer = null;
+      void runMutationRound();
+    }, MUTATION_TRAILING_MS);
+  }
+
+  async function runMutationRound() {
+    if (mutationRunning) {
+      mutationPending = true;
+      return;
+    }
+    mutationRunning = true;
+    const startedGen = mutationGeneration;
+    const shouldRefill = mutationRefillRequested;
+    mutationFirstAt = 0;
+    mutationRefillRequested = false;
+    try {
+      await prepareHistoryForGeneration({ pruneDead: true, respectDelay: true });
+      const st = settings();
+      if (shouldRefill && !generationActive && st.engineEnabled !== false && st.evolveMode === 'auto' && st.autoRefillOnHistoryChange !== false) {
+        if (!(window.STORY_ENGINE_PROJECTION?.active?.() === true && window.STORY_ENGINE_HISTORY?.getStatus?.().blocked === true)) {
+          await reconcileHistory({ respectDelay: true, refillUncovered: true });
+        }
+      }
+    } catch (error) {
+      console.error(`[记忆引擎] ${mutationReason} 刷新失败`, error);
+    } finally {
+      mutationRunning = false;
+      if (mutationPending && mutationGeneration > startedGen) {
+        mutationPending = false;
+        void runMutationRound();
+      }
+    }
+  }
+
   function onMessageReceived() {
     generationActive = false;
-    const key = `${currentLayer()}:${clean(chat().at(-1)?.mes).slice(-80)}`;
+    const all = chat();
+    const lastMsg = all.at(-1);
+    if (lastMsg && !isFillEligibleAiMessage(lastMsg)) return;
+    const key = `${currentLayer()}:${clean(lastMsg?.mes).slice(-80)}`;
     if (key === lastEventKey) return;
     lastEventKey = key;
+    const capturedEpoch = autoFillEpoch;
     clearTimeout(autoTimer);
-    clearTimeout(historyRefillTimer);
     if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
-      window.STORY_ENGINE_BRIDGE.scheduleTurn?.({ scope: 'memory', layer: currentLayer(), key, run: async () => {
-        const res = await autoExtract();
-        refreshVectorRecallAsync();
-        return res;
-      } });
+      window.STORY_ENGINE_BRIDGE.scheduleTurn?.({
+        scope: 'memory',
+        layer: currentLayer(),
+        key,
+        run: async () => {
+          if (capturedEpoch !== autoFillEpoch) return;
+          const res = await autoExtract(capturedEpoch);
+          refreshVectorRecallAsync();
+          return res;
+        }
+      });
       return;
     }
     autoTimer = setTimeout(async () => {
+      if (capturedEpoch !== autoFillEpoch) return;
       try {
-        await autoExtract();
+        await autoExtract(capturedEpoch);
       } catch (error) {
-        console.error('[记忆引擎] 自动提取失败', error);
+        console.error('[记忆引擎] 自动填表失败', error);
       } finally {
         refreshVectorRecallAsync();
       }
     }, 1500);
-  }
-
-  function schedulePreparation(delayMs = 50) {
-    clearTimeout(autoTimer);
-    autoTimer = setTimeout(() => prepareHistoryForGeneration({ pruneDead: true, respectDelay: true })
-      .catch(error => console.error('[记忆引擎] 历史摘要撤旧失败', error)), delayMs);
-  }
-
-  function scheduleHistoryRefill(reason, delayMs = 1200, deferCount = 0) {
-    clearTimeout(historyRefillTimer);
-    const st = settings();
-    if (st.engineEnabled === false || st.evolveMode !== 'auto' || st.autoRefillOnHistoryChange === false) return;
-    historyRefillTimer = setTimeout(async () => {
-      historyRefillTimer = null;
-      const curSt = settings();
-      if (curSt.engineEnabled === false || curSt.evolveMode !== 'auto' || curSt.autoRefillOnHistoryChange === false) return;
-      if (generationActive || running || backfillRunning || reconciling) return;
-      if (window.STORY_ENGINE_PROJECTION?.active?.() === true && window.STORY_ENGINE_HISTORY?.getStatus?.().blocked === true) return;
-      // 若启用串行错峰且世界/大纲正在运行，主动错峰延后重试，避免并发撞限流
-      const peerBusy = window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() === 'stagger-serial'
-        && (window.WORLD_ENGINE_EVOLUTION?.isRunning?.() || window.OUTLINE_ENGINE?.isRunning?.());
-      if (peerBusy && deferCount < 10) {
-        scheduleHistoryRefill(reason, 1500, deferCount + 1);
-        return;
-      }
-      try {
-        await reconcileHistory({ respectDelay: true, refillUncovered: true });
-      } catch (error) {
-        console.error(`[记忆引擎] ${reason || '历史变化'}自动回退重填失败`, error);
-      }
-    }, delayMs);
   }
 
   function guardEvent(label, handler) {
@@ -4493,71 +2628,96 @@ window.MEMORY_ENGINE = (function() {
           return result.catch(error => console.error(`[记忆引擎] ${label}事件处理失败`, error));
         }
         return result;
+      } catch (error) {
+        console.error(`[记忆引擎] ${label}事件处理失败`, error);
       }
-      catch (error) { console.error(`[记忆引擎] ${label}事件处理失败`, error); }
     };
+  }
+
+  function ensureAutoBaselineForExistingChat() {
+    const st = settings();
+    if (st.engineEnabled === false) return;
+    const allAi = collectEligibleAiLayers(st);
+    if (!allAi.length) return;
+    const state = data().loadState();
+    const counts = data().tableRowCounts(state);
+    const hasNodes = (state.timeline?.nodes || []).length > 0;
+    if (counts.totalRows === 0 && !hasNodes && state.chatLayer === null && state.autoBaselineLayer === null && state.rebaseLayer === null) {
+      state.autoBaselineLayer = allAi[allAi.length - 1];
+      data().saveState(state);
+    }
   }
 
   function init() {
     if (initialized) return;
     initialized = true;
-    initializeSummaryBaseline();
+    ensureAutoBaselineForExistingChat();
     const ctx = context(), types = ctx?.event_types || {};
     if (ctx?.eventSource) {
       ctx.eventSource.on(types.GENERATION_ENDED || types.MESSAGE_RECEIVED || 'message_received', guardEvent('生成完成', onMessageReceived));
       ctx.eventSource.on(types.GENERATION_STOPPED || 'generation_stopped', guardEvent('生成中止', () => {
         generationActive = false;
       }));
+
       const onChatChange = () => {
         generationActive = false;
+        bumpAutoFillEpoch();
         window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
-        clearTimeout(historyRefillTimer);
+        cancelMutationRefresh();
         abortController?.abort();
         lastEventKey = '';
-        initializeSummaryBaseline();
-        schedulePreparation(100);
+        ensureAutoBaselineForExistingChat();
+        void prepareHistoryForGeneration({ pruneDead: true, respectDelay: true });
       };
       ctx.eventSource.on(types.CHAT_LOADED || 'chat_loaded', guardEvent('聊天加载', onChatChange));
-      if (types.CHAT_CHANGED || 'chat_id_changed') {
-        const chatChangedEvent = types.CHAT_CHANGED || 'chat_id_changed';
-        if (chatChangedEvent !== (types.CHAT_LOADED || 'chat_loaded')) {
-          ctx.eventSource.on(chatChangedEvent, guardEvent('聊天切换', onChatChange));
-        }
+      const chatChangedEvent = types.CHAT_CHANGED || 'chat_id_changed';
+      if (chatChangedEvent !== (types.CHAT_LOADED || 'chat_loaded')) {
+        ctx.eventSource.on(chatChangedEvent, guardEvent('聊天切换', onChatChange));
       }
-      ctx.eventSource.on(types.MESSAGE_SWIPED || 'message_swiped', guardEvent('滑动重生成', () => {
+
+      // 对齐 shujuku #56：删楼事件直接 await 同步撤旧、重放并刷新注入（0ms 重生成脏读窗口！）
+      ctx.eventSource.on(types.MESSAGE_DELETED || 'message_deleted', guardEvent('删除消息', async () => {
+        bumpAutoFillEpoch();
         window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
-        clearTimeout(historyRefillTimer);
+        cancelMutationRefresh();
         abortController?.abort();
+        lastEventKey = '';
+        await prepareHistoryForGeneration({ pruneDead: true, respectDelay: true });
+        if (!generationActive) scheduleMutationRefresh('删除楼层', { refillUncovered: true });
+      }));
+
+      // 滑动与编辑走代次防抖调度（Trailing 1.2s + MaxWait 3s）
+      ctx.eventSource.on(types.MESSAGE_SWIPED || 'message_swiped', guardEvent('滑动重生成', () => {
+        bumpAutoFillEpoch();
+        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+        clearTimeout(autoTimer);
+        abortController?.abort();
+        lastEventKey = '';
         if (window.STORY_ENGINE_PROJECTION?.active?.() === true) applyInjection();
         else if (!rollbackLinkedLayer(currentLayer())) applyInjection({ isReroll: true });
-        schedulePreparation(50);
-        if (!generationActive) scheduleHistoryRefill('滑动切换', 1200);
+        scheduleMutationRefresh('滑动切换', { refillUncovered: !generationActive });
       }));
+
       ctx.eventSource.on(types.MESSAGE_EDITED || 'message_edited', guardEvent('编辑消息', () => {
+        bumpAutoFillEpoch();
         window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
         clearTimeout(autoTimer);
-        clearTimeout(historyRefillTimer);
         abortController?.abort();
         lastEventKey = '';
-        schedulePreparation(50);
-        scheduleHistoryRefill('编辑重写', 1200);
+        runLocalAuditAndReplay({ pruneDead: true });
+        applyInjection();
+        scheduleMutationRefresh('编辑重写', { refillUncovered: !generationActive });
       }));
-      ctx.eventSource.on(types.MESSAGE_DELETED || 'message_deleted', guardEvent('删除消息', () => {
-        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-        clearTimeout(autoTimer);
-        clearTimeout(historyRefillTimer);
-        abortController?.abort();
-        lastEventKey = '';
-        schedulePreparation(50);
-        scheduleHistoryRefill('删除楼层', 1200);
-      }));
+
       ctx.eventSource.on(types.GENERATION_STARTED || 'generation_started', guardEvent('生成开始', (type, _opts, dryRun) => {
         if (!dryRun) {
           generationActive = true;
-          clearTimeout(historyRefillTimer);
+          cancelMutationRefresh();
           window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+          // 生成开始前兜底同步裁剪任何已删除/失效来源，确保 0 脏注入
+          runLocalAuditAndReplay({ pruneDead: true });
           applyInjection({ isReroll: type === 'swipe' || type === 'regenerate' });
         }
       }));
@@ -4567,25 +2727,63 @@ window.MEMORY_ENGINE = (function() {
   }
 
   return {
-    init, applyInjection, buildWorldEngineContext, ingestWorldEvolution, manualExtract, manualReextract, extractNow: manualExtract,
-    reconcileHistory, prepareHistoryForGeneration, replayTimeline, commitManualState,
-    invalidateWorldCommits, syncVerifiedOutlineKnowledge, getSnapshotSummaryForBridge,
-    quarantineUnprovenancedHistory, getQuarantineBackup,
-    manualSmallSummary, fillSummaryRange, catchUpToLatest, getSummaryCoverageStatus,
-    backfill, backfillSummaries, stopBackfill, abort,
-    repairStateIndexes, replaceKnownByRecords,
-    getLastDebug: () => clone(lastDebug), getBackfillStatus: () => clone(backfillStatus),
+    init,
+    applyInjection,
+    buildWorldEngineContext,
+    ingestWorldEvolution,
+    manualExtract,
+    manualReextract,
+    extractNow: manualExtract,
+    reconcileHistory,
+    prepareHistoryForGeneration,
+    replayTimeline,
+    commitManualState,
+    invalidateWorldCommits,
+    syncVerifiedOutlineKnowledge,
+    getSnapshotSummaryForBridge,
+    quarantineUnprovenancedHistory,
+    getQuarantineBackup,
+    manualSmallSummary,
+    fillSummaryRange,
+    prepareCatchUpPlan,
+    catchUpToLatest,
+    getSummaryCoverageStatus,
+    backfill,
+    backfillSummaries,
+    stopBackfill,
+    abort,
+    getLastDebug: () => clone(lastDebug),
+    getLastError: () => lastError,
+    getLastInjectionDebug: () => clone(lastInjectionDebug),
+    getBackfillStatus: () => clone(backfillStatus),
     getSummaryBackfillStatus: () => clone(summaryBackfillStatus),
     getRunningLabel: () => runningLabel,
     isRunning: () => running || backfillRunning || reconciling,
     _test: {
-      exponentialMemorySample, rollbackLinkedLayer, removeLinkedLayerFromState,
-      rewindSummaryCursorForDeletedLayers, recomputeSummaryCursor, trimRefsToCompleteRounds,
-      buildSmallHistoryContext, buildTaskReferenceContext, previousRawReference,
-      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds,
-      mergeOngoingFacts, mergeCharacterArcs, scoreArchivedSmallSummary, tokenizeSearchText,
-      getEffectiveSummaryDelay, stableAutoEndLayer, autoExtract, getSummaryCoverageStatus,
-      fillSummaryRange, catchUpToLatest, scheduleHistoryRefill
+      isFillEligibleAiMessage,
+      formatLayerSpan,
+      collectEligibleAiLayers,
+      getEffectiveSummaryDelay,
+      stableAutoEndLayer,
+      parseAndValidateTableResponse,
+      extractJsonObject,
+      buildBatchFromAiLayers,
+      previousRawReference,
+      selectHiddenMessageIds,
+      recentRawRoundMessageIds,
+      scoreArchivedChronicle,
+      tokenizeSearchText,
+      rollbackLinkedLayer,
+      removeLinkedLayerFromState,
+      auditStoredSources,
+      autoExtract,
+      getSummaryCoverageStatus,
+      prepareCatchUpPlan,
+      fillSummaryRange,
+      catchUpToLatest,
+      executeTableFillBatch,
+      getAutoFillEpoch: () => autoFillEpoch,
+      bumpAutoFillEpoch
     }
   };
 })();

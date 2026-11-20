@@ -99,34 +99,75 @@ const sandbox = {
       }
       if (nextMockMode === 'resolve-fact') {
         return JSON.stringify({
-          personal_memory: [],
-          entity_updates: [],
-          ongoing_fact_updates: [
-            { action: 'resolve', category: '契约', subject: '青铜虎符', fact: '半月内不可示人' },
-            { action: 'upsert', category: '状态', subject: '沈清秋', fact: '已公开亮明暗桩总管身份并接应林墨。', keywords: ['暗桩总管', '接应'] }
-          ],
-          character_arc_updates: [
-            { name: '沈清秋', current_stance: '完全托付信赖', arc_summary: '放下疑虑转为全力配合', relationship: '托付生死的盟友', progress_pct: 120 }
-          ],
-          small_summary: '半月期满，沈清秋主动公开身份解除了虎符保密契约。',
-          small_summary_keywords: ['半月期满', '公开身份'],
-          small_summary_entities: ['沈清秋', '青铜虎符'],
-          small_summary_impact: 'key'
+          important_characters: {
+            upsert: [{
+              name: '沈清秋',
+              brief_intro: '北境暗桩总管',
+              presence_status: '在场',
+              relation_text: '林墨:托付生死的盟友',
+              past_experience: '放下疑虑转为全力配合，公开亮明暗桩总管身份并接应林墨。'
+            }],
+            delete: []
+          },
+          quests_events: {
+            upsert: [{
+              quest_name: '接应林墨行动',
+              quest_type: '主线任务',
+              issuer: '沈清秋',
+              detail_desc: '已公开亮明暗桩总管身份并接应林墨。',
+              current_progress: '进行中'
+            }],
+            delete: ['青铜虎符保密契约']
+          },
+          chronicle: {
+            code_index: 'AM0002',
+            summary: '半月期满公开身份',
+            chronicle_text: '半月期满，沈清秋主动公开身份解除了虎符保密契约。',
+            keywords: ['半月期满', '公开身份'],
+            entities: ['沈清秋', '青铜虎符'],
+            impact: 'key'
+          }
         });
       }
       return JSON.stringify({
-        personal_memory: [{ name: ['沈清秋', '清秋'], known_by: ['林墨'], memory: '沈清秋在青石渡托付林墨保管青铜虎符。', time: '' }],
-        entity_updates: [{ type: 'object', name: '青铜虎符', aliases: ['虎符'], description: '北境暗桩调度信物。', event: '沈清秋将其转交林墨保密。', time: '' }],
-        ongoing_fact_updates: [
-          { action: 'upsert', category: '契约', subject: '青铜虎符', fact: '半月内不可示人，否则北境暗桩全毁。', keywords: ['青铜虎符', '保密', '北境暗桩'] }
-        ],
-        character_arc_updates: [
-          { name: '沈清秋', current_stance: '谨慎试探但有所托付', arc_summary: '将重要凭证交出以观后效', relationship: '利害同盟', progress_pct: 35 }
-        ],
-        small_summary: '沈清秋在青石渡把青铜虎符交给林墨，约法半月内绝密。',
-        small_summary_keywords: ['青铜虎符', '青石渡', '北境暗桩'],
-        small_summary_entities: ['沈清秋', '林墨', '青铜虎符'],
-        small_summary_impact: 'key'
+        important_characters: {
+          upsert: [{
+            name: '沈清秋',
+            brief_intro: '青石渡神秘接头人',
+            presence_status: '在场',
+            relation_text: '林墨:利害同盟',
+            past_experience: '在青石渡托付林墨保管青铜虎符。'
+          }],
+          delete: []
+        },
+        inventory: {
+          upsert: [{
+            item_name: '青铜虎符',
+            quantity: '1',
+            category: '关键物品',
+            description: '北境暗桩调度信物，由沈清秋转交林墨保密。'
+          }],
+          delete: []
+        },
+        quests_events: {
+          upsert: [{
+            quest_name: '青铜虎符保密契约',
+            quest_type: '主线任务',
+            issuer: '沈清秋',
+            detail_desc: '半月内不可示人，否则北境暗桩全毁。',
+            current_progress: '进行中',
+            time_limit: '半月内'
+          }],
+          delete: []
+        },
+        chronicle: {
+          code_index: 'AM0001',
+          summary: '青石渡托付青铜虎符',
+          chronicle_text: '沈清秋在青石渡把青铜虎符交给林墨，约法半月内绝密。',
+          keywords: ['青铜虎符', '青石渡', '北境暗桩'],
+          entities: ['沈清秋', '林墨', '青铜虎符'],
+          impact: 'key'
+        }
       });
     }
   }
@@ -145,19 +186,18 @@ for (const file of [
 sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
 
 (async () => {
-  // 1. 提取结构化持续事实、角色弧光与纪要关键词（不再生成总述）
+  // 1. 提取核心 7 表数据（重要角色、背包物品、任务事件、纪要）
   await sandbox.MEMORY_ENGINE.manualExtract();
   let state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.strictEqual(state.ongoing_facts.length, 1);
-  assert.strictEqual(state.ongoing_facts[0].status, 'active');
-  assert.strictEqual(state.ongoing_facts[0].category, '契约');
-  assert.strictEqual(state.character_arcs.length, 1);
-  assert.strictEqual(state.character_arcs[0].progressPct, 35);
-  assert.deepStrictEqual(Array.from(state.event_memory.small_summaries[0].keywords), ['青铜虎符', '青石渡', '北境暗桩']);
-  assert.strictEqual(state.event_memory.small_summaries[0].impactLevel, 'key');
+  assert.strictEqual(state.tables.quests_events.length, 1);
+  assert.strictEqual(state.tables.quests_events[0].quest_name, '青铜虎符保密契约');
+  assert.strictEqual(state.tables.inventory.length, 1);
+  assert.strictEqual(state.tables.important_characters.length, 1);
+  assert.deepStrictEqual(Array.from(state.tables.chronicle[0].keywords), ['青铜虎符', '青石渡', '北境暗桩']);
+  assert.strictEqual(state.tables.chronicle[0].impactLevel, 'key');
   assert.strictEqual(state.event_memory.big_summaries, undefined, '去除总述后不应生成 big_summaries');
-  assert.ok(injection.includes('【长期持续事实】'), '应注入持续事实区块');
-  assert.ok(injection.includes('[角色弧光 35% · 利害同盟]'), '应注入角色弧光定位');
+  assert.ok(injection.includes('<当前任务与事件>'), '应注入任务与事件区块');
+  assert.ok(injection.includes('<重要角色详情>'), '应注入在场重要角色详情');
 
   // 2. 早期纪要退出直注窗口（smallSummaryInjectLimit=1）后，后续对话提及“青铜虎符”应按关键词精准唤醒
   chat.push(
@@ -167,16 +207,15 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   nextMockMode = 'resolve-fact';
   await sandbox.MEMORY_ENGINE.manualExtract();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
-  assert.strictEqual(state.ongoing_facts[0].status, 'resolved', '旧契约事实应被标记为 resolved');
-  assert.strictEqual(state.ongoing_facts[1].status, 'active', '新状态事实应生效');
-  assert.strictEqual(state.character_arcs[0].progressPct, 100, '百分比超过 100 应自动钳位到 100');
-  assert.ok(injection.includes('【关键词召回历史细节】'), '应凭关键词从超出直注窗口的早期纪要唤醒青铜虎符细节');
+  assert.ok(!state.tables.quests_events.some(q => q.quest_name === '青铜虎符保密契约'), '旧契约任务应被删除结案');
+  assert.ok(state.tables.quests_events.some(q => q.quest_name === '接应林墨行动'), '新任务应生效');
+  assert.ok(injection.includes('<记忆回溯>'), '应凭关键词从超出直注窗口的早期纪要唤醒青铜虎符细节');
   assert.ok(injection.includes('沈清秋在青石渡把青铜虎符交给林墨'), '唤醒的旧纪要正文应准确命中');
 
   // 3. 验证字符总预算控制（memoryInjectMaxChars）
   sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ memoryInjectMaxChars: 520 });
   const budgeted = sandbox.MEMORY_ENGINE.applyInjection();
-  assert.ok(budgeted.startsWith('【记忆信息】'), '预算裁剪后哨兵头仍须保留');
+  assert.ok(budgeted.startsWith('【长期记忆数据库'), '预算裁剪后哨兵头仍须保留');
   assert.ok(budgeted.length <= 540, `预算上限裁剪后总长应接近设定预算，实际=${budgeted.length}`);
   sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ memoryInjectMaxChars: 3500 });
 
@@ -185,8 +224,8 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   assert.strictEqual(pkg.__memoryEnginePackage, true);
   assert.strictEqual(pkg.format, 'memory-summary-package');
   assert.strictEqual(pkg.package.event_memory.small_summaries[0].sourceRefs, undefined, '记忆包不得携带原聊天 sourceRefs');
-  assert.strictEqual(pkg.package.ongoing_facts.length, 2);
-  assert.strictEqual(pkg.package.character_arcs.length, 1);
+  assert.strictEqual(pkg.package.tables.quests_events.length, 1);
+  assert.strictEqual(pkg.package.tables.important_characters.length, 1);
 
   assert.throws(() => sandbox.MEMORY_ENGINE_DATA.importMemoryPackage({ foo: 'bar' }), /格式校验失败/);
   currentChatId = 'pkg-test-b';
@@ -201,7 +240,7 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   const imported = sandbox.MEMORY_ENGINE_DATA.importMemoryPackage(pkg, { expectedChatId: 'pkg-test-b' });
   assert.strictEqual(imported.timeline.originChatId, 'pkg-test-b');
   assert.strictEqual(imported.chatLayer, chat.length - 1, '导入后应以目标聊天末楼为新基线');
-  assert.strictEqual(imported.character_arcs[0].originChatId, 'pkg-test-b');
+  assert.strictEqual(imported.tables.important_characters[0].name, '沈清秋');
 
   // 5. 验证延迟总结楼层（summaryDelayFloors=1）：仅剩未超出延迟区的新回复时不应提前调用总结 API
   sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ summaryDelayFloors: 1 });
@@ -220,8 +259,9 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
   assert.strictEqual(apiCallCount, beforeDelayCalls + 1, '超出延迟缓冲楼层后应只对已稳态的前轮发起 API');
   sandbox.MEMORY_ENGINE_SETTINGS.patchSettings({ summaryDelayFloors: 0 });
 
-  // 6. 验证轻同步模式（ingestWorldEvolution({ lightweight: true })）零大模型调用落库并支持同楼层回滚
+  // 6. 验证弱联动模式：世界引擎调用 ingestWorldEvolution 不再向记忆 7 表写入任何记录（0 API 调用、0 行污染）
   const beforeLightCalls = apiCallCount;
+  const beforeLightState = JSON.stringify(sandbox.MEMORY_ENGINE_DATA.loadState().tables);
   const lightRes = await sandbox.MEMORY_ENGINE.ingestWorldEvolution({
     lightweight: true,
     layer: chat.length - 1,
@@ -233,12 +273,10 @@ sandbox.MEMORY_ENGINE_SETTINGS.saveSettings(settings);
     },
     force: true
   });
-  assert.strictEqual(lightRes.lightweight, true);
-  assert.strictEqual(apiCallCount, beforeLightCalls, '轻同步模式未满总述阈值时应保持 0 次额外 LLM API 请求');
-  assert.ok(sandbox.MEMORY_ENGINE_DATA.loadState().ongoing_facts.some(f => f.subject === '北境戒严'));
-  const rolledBack = sandbox.MEMORY_ENGINE._test.rollbackLinkedLayer(chat.length - 1);
-  assert.strictEqual(rolledBack, true);
-  assert.ok(!sandbox.MEMORY_ENGINE_DATA.loadState().ongoing_facts.some(f => f.subject === '北境戒严'), '世界重 roll 回撤应连同轻同步事实一并撤销');
+  assert.strictEqual(lightRes.skipped, true, '弱联动模式下世界推演不得向记忆写入记录');
+  assert.strictEqual(lightRes.reason, 'readonly_weak_coupling');
+  assert.strictEqual(apiCallCount, beforeLightCalls, '弱联动模式下应保持 0 次额外 LLM API 请求');
+  assert.strictEqual(JSON.stringify(sandbox.MEMORY_ENGINE_DATA.loadState().tables), beforeLightState, '世界推演不得往记忆 7 表塞入任何任务或纪要');
 
   console.log('memory package & recall tests passed');
 })().catch(error => {

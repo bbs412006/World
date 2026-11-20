@@ -1,7 +1,16 @@
 // memory-engine-settings.js — 记忆引擎独立设置（只复用 API/调度等实现，不共享配置值）
 window.MEMORY_ENGINE_SETTINGS = (function() {
   const STORAGE_KEY = 'memory_engine_settings';
-  const VERSION = '1.3.0';
+  const VERSION = '2.0.0';
+  const TABLE_KEYS = Object.freeze([
+    'global_state',
+    'protagonist_info',
+    'important_characters',
+    'protagonist_skills',
+    'inventory',
+    'quests_events',
+    'chronicle'
+  ]);
   const DEFAULTS = Object.freeze({
     apiUrl: '',
     apiKey: '',
@@ -27,6 +36,12 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     skipCurrentFloorSummary: false,
     summaryDelayFloors: 0,
     autoRefillOnHistoryChange: true,
+    catchUpBatchSize: 3,
+    catchUpSelectedTables: null,
+    tableFillMaxRetries: 2,
+    tableConfigs: {},
+    tableFillSystemPrompt: '',
+    tableFillSheetRules: {},
     hideCoveredRawText: true,
     recentRawRounds: 1,
     referenceRawRounds: 1,
@@ -95,7 +110,36 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     return Math.min(max, Math.max(min, parsed));
   }
 
-  // 人物与实体记忆保持每轮可重放提取；纪要批量间隔（smallSummaryEveryX）与延迟楼层允许独立配置。
+  function normalizeTableConfigs(raw) {
+    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const out = {};
+    for (const key of TABLE_KEYS) {
+      const cfg = src[key] && typeof src[key] === 'object' ? src[key] : {};
+      out[key] = {
+        enabled: cfg.enabled !== false,
+        updateFrequency: clampInt(cfg.updateFrequency, 0, 0, 20)
+      };
+    }
+    return out;
+  }
+
+  function normalizeSelectedTables(raw) {
+    if (!Array.isArray(raw)) return null;
+    const valid = Array.from(new Set(raw.map(item => String(item || '').trim()).filter(key => TABLE_KEYS.includes(key))));
+    return valid.length ? valid : null;
+  }
+
+  function normalizeSheetRules(raw) {
+    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const out = {};
+    for (const key of TABLE_KEYS) {
+      const val = typeof src[key] === 'string' ? src[key].trim() : '';
+      if (val) out[key] = val;
+    }
+    return out;
+  }
+
+  // 分表支持独立启停与频率（tableConfigs）；追平合并批大小（catchUpBatchSize）与自动填表解耦。
   function normalizeSettings(value) {
     const merged = { ...DEFAULTS, ...(value || {}) };
     const savedMaxTokens = Math.max(1, parseInt(merged.maxTokens) || 65000);
@@ -122,6 +166,12 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
       skipCurrentFloorSummary: merged.skipCurrentFloorSummary === true,
       summaryDelayFloors: clampInt(merged.summaryDelayFloors, 0, 0, 10),
       autoRefillOnHistoryChange: merged.autoRefillOnHistoryChange !== false,
+      catchUpBatchSize: clampInt(merged.catchUpBatchSize, 3, 1, 20),
+      catchUpSelectedTables: normalizeSelectedTables(merged.catchUpSelectedTables),
+      tableFillMaxRetries: clampInt(merged.tableFillMaxRetries, 2, 0, 5),
+      tableConfigs: normalizeTableConfigs(merged.tableConfigs),
+      tableFillSystemPrompt: typeof merged.tableFillSystemPrompt === 'string' ? merged.tableFillSystemPrompt.trim() : '',
+      tableFillSheetRules: normalizeSheetRules(merged.tableFillSheetRules),
       recentRawRounds: clampInt(merged.recentRawRounds, 1, 0, 50),
       referenceRawRounds: clampInt(merged.referenceRawRounds, 1, 0, 20),
       referenceSmallSummaryCount: clampInt(merged.referenceSmallSummaryCount, 5, 0, 50),
@@ -211,6 +261,7 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
   return {
     STORAGE_KEY,
     VERSION,
+    TABLE_KEYS,
     DEFAULTS,
     getSettings,
     saveSettings,

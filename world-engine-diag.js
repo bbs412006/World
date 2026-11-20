@@ -286,31 +286,36 @@ window.WORLD_ENGINE_DIAG = (function() {
     const cache = window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory');
     const debug = safe(function () { return engine?.getLastDebug?.() || {}; });
     const state = safe(function () { return data?.loadState?.() || {}; });
-    const characters = Array.isArray(state?.personal_memory) ? state.personal_memory : [];
-    const entityTypes = ['organization', 'object', 'ability', 'location'];
-    const entities = entityTypes.flatMap(function (type) { return Array.isArray(state?.entity_memory?.[type]) ? state.entity_memory[type] : []; });
+    const counts = safe(function () { return data?.tableRowCounts?.(state) || {}; }) || {};
+    const chronicle = Array.isArray(state?.tables?.chronicle) ? state.tables.chronicle : (Array.isArray(state?.event_memory?.small_summaries) ? state.event_memory.small_summaries : []);
     return {
-      meta: safe(function () { return { engine: 'memory', extVersion: window.MEMORY_ENGINE_SETTINGS?.VERSION || '1.1.1', collectedAt: new Date().toISOString(), userAgent: navigator.userAgent }; }),
+      meta: safe(function () { return { engine: 'memory', extVersion: window.MEMORY_ENGINE_SETTINGS?.VERSION || '2.0.0', collectedAt: new Date().toISOString(), userAgent: navigator.userAgent }; }),
       env: safe(function () { const ctx = SillyTavern.getContext(); return { chatId: ctx?.chatId || null, chatCount: ctx?.chat?.length || 0, hasChatMetadata: !!ctx?.chatMetadata }; }),
       settings: safe(function () { return sanitizeSettings(window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true) || {}); }),
       memoryState: safe(function () {
         return {
           hasState: data?.hasState?.() || false,
+          schemaVersion: state?.schemaVersion || 3,
           round: state?.round || 0,
-          characterCount: characters.length,
-          memoryCount: characters.reduce(function (total, character) {
-            return total + Object.values(character.memory || {}).reduce(function (sum, list) { return sum + (Array.isArray(list) ? list.length : 0); }, 0);
-          }, 0),
-          entityCount: entities.length,
-          entityHistoryCount: entities.reduce(function (total, entity) { return total + (Array.isArray(entity.history) ? entity.history.length : 0); }, 0),
-          smallSummaryCount: Array.isArray(state?.event_memory?.small_summaries) ? state.event_memory.small_summaries.length : 0,
-          validSmallSummaryCount: Array.isArray(state?.event_memory?.small_summaries) ? state.event_memory.small_summaries.filter(function (s) { return s.status !== 'stale' && s.status !== 'failed'; }).length : 0,
-          staleSmallSummaryCount: Array.isArray(state?.event_memory?.small_summaries) ? state.event_memory.small_summaries.filter(function (s) { return s.status === 'stale'; }).length : 0,
-          smallSummaryLayer: state?.event_memory?.small_summary_layer ?? null,
-          coverage: safe(function () { return engine?.getSummaryCoverageStatus?.() || null; })
+          tableCounts: counts,
+          tableWatermarks: state?.tableWatermarks || {},
+          characterCount: counts.important_characters || 0,
+          skillCount: counts.protagonist_skills || 0,
+          inventoryCount: counts.inventory || 0,
+          questCount: counts.quests_events || 0,
+          smallSummaryCount: chronicle.length,
+          validSmallSummaryCount: chronicle.filter(function (s) { return s.status !== 'stale' && s.status !== 'failed'; }).length,
+          staleSmallSummaryCount: chronicle.filter(function (s) { return s.status === 'stale'; }).length,
+          smallSummaryLayer: state?.tableWatermarks?.chronicle ?? state?.event_memory?.small_summary_layer ?? null,
+          coverage: safe(function () { return engine?.getSummaryCoverageStatus?.() || null; }),
+          catchUpPlan: safe(function () { return engine?.prepareCatchUpPlan?.() || null; })
         };
       }),
-      checkpoint: safe(function () { const cp = data?.loadCheckpoint?.(); return { exists: !!cp, characterCount: Array.isArray(cp?.personal_memory) ? cp.personal_memory.length : 0, entityCount: entityTypes.reduce(function (sum, type) { return sum + (Array.isArray(cp?.entity_memory?.[type]) ? cp.entity_memory[type].length : 0); }, 0), smallSummaryCount: Array.isArray(cp?.event_memory?.small_summaries) ? cp.event_memory.small_summaries.length : 0 }; }),
+      checkpoint: safe(function () {
+        const cp = data?.loadCheckpoint?.();
+        const cpCounts = cp ? (data?.tableRowCounts?.(cp) || {}) : {};
+        return { exists: !!cp, totalRows: cpCounts.totalRows || 0, characterCount: cpCounts.important_characters || 0, smallSummaryCount: cpCounts.chronicle || 0 };
+      }),
       extraction: safe(function () { return { isRunning: engine?.isRunning?.() ?? null, lastError: engine?.getLastError?.() || null, lastPrompt: debug?.prompt || debug?.requestPrompt || '', lastRawResult: debug?.rawResult || debug?.apiResponse || debug?.response || '' }; }),
       injectionInspector: safe(function () { return window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastSnapshot?.('memory') || engine?.getLastInjectionDebug?.() || debug?.injection || { hasSnapshot: false }; }),
       chatcache: safe(function () { return { status: cache?.getStatus?.() || null, snapshots: (cache?.listSnapshots?.() || []).map(function (item) { return { id: item.id, name: item.name, auto: !!item.auto, round: item.round, characters: item.characters, entities: item.entities, createdAt: item.createdAt }; }) }; }),

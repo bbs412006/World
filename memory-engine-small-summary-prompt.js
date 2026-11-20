@@ -1,22 +1,21 @@
-// 纪要任务 Prompt：只负责把一段连续对话压缩为阶段性事件记录。
+// memory-engine-small-summary-prompt.js — 纪要表（chronicle）专用提示词（对齐 shujuku 纪要表规范）
 window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
-  const SYSTEM_PROMPT = `你是世界进程的纪要记录员。你的工作不是评价剧情，而是留下以后可以据此还原现场的事件记录。
+  const SYSTEM_PROMPT = `你是“记忆数据库”的纪要表（chronicle）记录员。你的工作不是评价剧情，而是留下客观中立、可还原现场的事件纪要。
 
-阅读给定的连续对话，只记录这一阶段实际发生、被明确说出、被确认或发生变化的内容。每个事件尽量写清“谁—做了什么或说了什么—作用于谁/什么—造成什么结果”，关键对话保留核心意思；避免只写“双方发生冲突”“关系有所变化”“局势得到推进”这类没有动作和结果的空泛概括。
+【纪要表字段规范】
+- code_index：编码索引，格式 AMXXXX（如 AM0001），严格使用输入提供的下一可用编号，不得重复。
+- time_span：本段事件实际时间跨度（优先 "YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM"；正文未给出明确时间时可留空或按上下文如实标注）。
+- summary：≤30 字的一句话客观概览，用于历史索引快速检索。
+- chronicle_text：以第三方中立客观视角详实记录本段实际发生的一切，须满足【字数要求】下限。
+  * 移除所有纯修辞、夸张比喻、情绪升华与主观评论；用词直白具体。
+  * 写清“谁—做了什么/说了什么—作用于谁/什么—造成什么结果”，保留关键人物互动、物品/位置变化、决定与承诺。
+  * 结尾必须开放自然停在事件流动处，严禁出现“故事仍在继续/新的篇章开启/关系迈入新阶段/未来等待着他们”等总结性收束。
+- key_dialogue：仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约的原文台词（标明说话人，通常 1~5 句，无则留空 ""）。
+- keywords：3 至 6 个高辨识度检索关键词（核心地点、关键物品、人物/事件专有名词）。
+- entities：本段直接出场或关键提及的人物姓名与重要地点/物品名称数组。
+- impact：若本段发生关系质变、不可逆损失、重要揭秘或重大转折填 "key"，常规推进填 "normal"。
 
-优先保留：改变人物处境的具体行动及结果；获得、失去、交付或使用的重要物品与关键数值；明确的决定、承诺、命令、拒绝和威胁；新发现的事实与线索；关系或立场的可验证变化；新产生的待办、悬念，以及它们被完成、取消、失败或揭晓的结果。一个事项若在本段内被提出后又了结，必须同时写明提出与最终结果，不能留下已经失效的半截任务。
-
-按事件实际发生顺序叙述。原文给出具体时间、地点、人名、物品名或数值时应保留；没有给出时不要推算。情绪、动机和关系变化只有在原文明确陈述，或有直接言行足以确认时才能记录，并保留“怀疑、猜测、声称”等原有确定性，不把人物认知改写成客观事实。
-
-只依据待总结对话，不补写其后的动作，不预测未来。历史参考只用于识别人物、指代与前因，small_summary 只能记录本段新发生或明确变化的内容，不得把历史重新抄入。忽略寒暄、重复表达、写作指令、纯修辞和不影响后续的枝节。
-
-使用详实、客观、可独立理解的中文正文，不加标题或列表。单层纪要正文最低不少于 500 字（若【字数要求】指定了具体最低字数则以其为准；汉字、数字、字母与标点均计入字数），应完整还原本段的人物具体行动、关键对话原意、心理与立场变化、重要物件/组织/地点细节、因果脉络及明确结果，切忌过度压缩成一两句话；不得编造原文未出现的内容，不得用残句生硬截断。
-
-【本任务输出字段】
-返回 small_summary 字符串字段；若联合模板同时要求 personal_memory、entity_updates、ongoing_fact_updates、character_arc_updates 以及 small_summary_keywords、small_summary_entities、small_summary_impact，请务必在同一个 JSON 对象中将所有字段一并完整填写：
-- small_summary_keywords：3 至 6 个高辨识度检索关键词（核心地点、关键道具、协议/秘辛名词、核心事件词），用于在历史长文压缩后按关键词精准唤醒本段细节。
-- small_summary_entities：本段直接出场或关键提及的人物主名与重要实体名称数组。
-- small_summary_impact：若本段发生关系质变、不可逆损失、重要揭秘或重大转折填 "key"，常规推进填 "normal"。`;
+只依据【待总结对话】，禁止编造后续剧情或抄入【只读历史参考】。只输出一个合法 JSON 对象，顶层包含 chronicle 对象。`;
 
   const clean = value => String(value == null ? '' : value).trim();
 
@@ -27,6 +26,7 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
     const minChars = Math.max(50, parseInt(input.minChars, 10) || 500);
     const aiCount = Math.max(1, parseInt(input.aiCount, 10) || 1);
     const targetMinChars = minChars * aiCount;
+    const nextCode = clean(input.nextChronicleCode) || 'AM0001';
     const referenceContext = clean(input.referenceContext);
     const small = Array.isArray(input.historySmallSummaries) ? input.historySmallSummaries : [];
     const formatSpan = (s, e) => {
@@ -36,16 +36,16 @@ window.MEMORY_ENGINE_SMALL_SUMMARY_PROMPT = (function() {
     };
     const history = small.length
       ? `【前置纪要】\n${small.map((item, index) =>
-        `${index + 1}. [楼层 ${formatSpan(item?.startLayer, item?.endLayer)}] ${clean(item?.content)}`
+        `${index + 1}. [${clean(item?.code_index || item?.codeIndex) || `AM${String(index + 1).padStart(4, '0')}`} · 楼层 ${formatSpan(item?.startLayer, item?.endLayer)}] ${clean(item?.chronicle_text || item?.content)}`
       ).join('\n')}`
       : '';
     const reference = referenceContext || history;
     const outlineFocus = clean(input.outlineFocusHint);
     const conversation = input.reuseConversation === true
-      ? '沿用同一请求前文人物/实体任务中的【待提取对话】；该对话即为本次总结范围，不再重复附录。'
+      ? '沿用同一请求前文中的【待提取对话】；该对话即为本次总结范围，不再重复附录。'
       : (clean(input.conversation) || '（空）');
     const rangeLabel = startLayer === endLayer ? `楼层 ${endLayer}` : `楼层 ${startLayer} 至 ${endLayer}`;
-    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}${outlineFocus ? `【当前公开章节与焦距提示（仅作主题对齐，未在正文中发生的内容不得写进纪要）】\n${outlineFocus}\n\n` : ''}【总结范围】\n${rangeLabel}\n\n【字数要求】\nsmall_summary 正文最低不少于 ${targetMinChars} 字（单层最低 ${minChars} 字 × 本次 ${aiCount} 个 AI 层），请完整展开本层的关键对话原意、人物互动、组织/物品/地点细节、线索与阶段结果，切勿简略概括。\n\n【待总结对话】\n${conversation}`;
+    return `${reference ? `【只读历史参考】\n${reference}\n\n` : ''}${outlineFocus ? `【当前公开章节与焦距提示（仅作主题对齐，未在正文中发生的内容不得写进纪要）】\n${outlineFocus}\n\n` : ''}【总结范围】\n${rangeLabel}\n下一可用编码索引：${nextCode}\n\n【字数要求】\nchronicle_text 正文最低不少于 ${targetMinChars} 字（单层最低 ${minChars} 字 × 本次 ${aiCount} 个 AI 层），请完整展开本段的关键对话原意、人物互动、细节与明确结果，切勿简略概括。\n\n【待总结对话】\n${conversation}`;
   }
 
   return { SYSTEM_PROMPT, buildUserPrompt };

@@ -281,7 +281,8 @@ function makeSandbox(fetchImpl) {
     apiUrl: 'https://proxy.example.com/v1?key=secret-query-123',
     apiKey: 'secret-bearer-key',
     model: 'gemini-2.5-pro',
-    evolveMode: 'manual'
+    evolveMode: 'manual',
+    tableFillMaxRetries: 0
   });
 
   // 1. 记忆提取遇到 <thought> 中夹带 [...] 与说明前缀时，应正常解析成功并记录到日志
@@ -319,7 +320,7 @@ function makeSandbox(fetchImpl) {
   assert.strictEqual(logs.length, 6, '应统一记录全部 6 次三模块及向量请求');
   const serialized = JSON.stringify(logs);
   assert.ok(!serialized.includes('secret-query-123') && !serialized.includes('secret-bearer-key'), '请求日志绝不能泄露任何 API Key');
-  assert.ok(logs.some(l => l.module === 'memory' && l.status === 'success' && l.purpose.includes('人物')), '记忆成功请求应带模块和任务名称');
+  assert.ok(logs.some(l => l.module === 'memory' && l.status === 'success' && l.purpose.includes('填表')), '记忆成功请求应带模块和任务名称');
   assert.ok(logs.some(l => l.module === 'world' && l.status === 'success'), '世界请求应带 world 模块标记');
   assert.ok(logs.some(l => l.module === 'outline' && l.status === 'error' && l.error.includes('SAFETY')), '大纲安全拦截空返回应进失败日志');
   assert.ok(logs.some(l => l.module === 'memory' && l.httpStatus === 429 && l.status === 'error'), '429 错误应保留 HTTP 状态和错误信息');

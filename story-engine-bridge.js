@@ -321,14 +321,15 @@ window.STORY_ENGINE_BRIDGE = (function() {
           }
           if (mem.peopleRoster?.length) {
             const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));
-            const pickedProfiles = mem.peopleRoster.filter(p =>
-              (clean(p.profile?.basicInfo?.identity) || clean(p.profile?.experiences))
-              && (!activeNames.size || (p.names || []).some(n => activeNames.has(normalized(n))))
-            ).slice(0, 4);
+            const pickedProfiles = mem.peopleRoster.filter(p => {
+              const idVal = clean(p.brief_intro || p.profile?.basicInfo?.identity);
+              const expVal = clean(p.past_experience || p.profile?.experiences);
+              return (idVal || expVal) && (!activeNames.size || (p.names || []).some(n => activeNames.has(normalized(n))));
+            }).slice(0, 4);
             if (pickedProfiles.length) {
               mLines.push('人物档案履历：\n' + pickedProfiles.map(p => {
-                const idText = clean(p.profile?.basicInfo?.identity);
-                const expText = cut(p.profile?.experiences, 120);
+                const idText = clean(p.brief_intro || p.profile?.basicInfo?.identity);
+                const expText = cut(p.past_experience || p.profile?.experiences, 120);
                 return `- ${p.names?.[0] || p.id}${idText ? `（${cut(idText, 30)}）` : ''}${expText ? `：${expText}` : ''}`;
               }).join('\n'));
             }
@@ -376,48 +377,9 @@ window.STORY_ENGINE_BRIDGE = (function() {
     }
   }
 
-  // —— 严格白名单同步大纲 verified 认知到记忆引擎 ——
-  function notifyOutlineCommitted(afterState, beforeState, selection) {
-    try {
-      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
-      const os = window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true);
-      if (!window.MEMORY_ENGINE?.syncVerifiedOutlineKnowledge || ms?.engineEnabled === false || ms?.acceptOutlineSync === false || os?.injectIntoMemoryEngine === false) return { changed: 0 };
-      const oldContactIds = new Set((beforeState?.contacts || []).filter(c => c.validity === 'valid').map(c => c.id));
-      const oldKnowledgeIds = new Set((beforeState?.knowledge || []).filter(k => k.validity === 'valid').map(k => k.id));
-      const newContacts = (afterState?.contacts || []).filter(c => c.validity === 'valid' && !oldContactIds.has(c.id));
-      const newKnowledge = (afterState?.knowledge || []).filter(k => k.validity === 'valid' && !oldKnowledgeIds.has(k.id));
-      const events = [];
-      for (const c of newContacts) {
-        const clue = (afterState.clues || []).find(item => item.id === c.clueId && item.validity === 'valid');
-        if (!clue || !clean(clue.publicHint)) continue;
-        events.push({
-          outlineEventId: `contact:${c.id}`,
-          actorId: c.actorId,
-          actorNames: resolveCharacterAliases(c.actorId),
-          memory: cut(`${c.actorId}接触并发现线索：${clue.publicHint}`, 50),
-          sourceRefs: Array.isArray(c.sourceRefs) && c.sourceRefs.length ? c.sourceRefs : (selection?.refs || []),
-          layer: selection?.refs?.at(-1)?.layer
-        });
-      }
-      for (const k of newKnowledge) {
-        const fact = (afterState.privateFacts || []).find(item => item.id === k.factId && item.validity === 'valid');
-        // 安全铁律：仅在确认为该 actorId 已正式揭露时，写入该角色专属个人记忆，绝不扩写其他无关旁人
-        if (!fact || !clean(fact.text) || !(fact.knownBy || []).includes(k.actorId)) continue;
-        events.push({
-          outlineEventId: `reveal:${k.id}`,
-          actorId: k.actorId,
-          actorNames: resolveCharacterAliases(k.actorId),
-          memory: cut(`${k.actorId}确认真相：${fact.text}`, 50),
-          sourceRefs: selection?.refs || [],
-          layer: selection?.refs?.at(-1)?.layer
-        });
-      }
-      if (!events.length) return { changed: 0 };
-      return window.MEMORY_ENGINE.syncVerifiedOutlineKnowledge(events);
-    } catch (error) {
-      console.warn('[协同桥] 大纲已验证认知同步记忆失败（已隔离）', error);
-      return { changed: 0 };
-    }
+  // —— 弱联动模式：大纲与世界不再向记忆 7 表自动写入记录，仅保留只读参考、错峰调度与联合回退 ——
+  function notifyOutlineCommitted() {
+    return { changed: 0, readonly: true };
   }
 
   // —— 跨模块后台 API 错峰单并发队列（解决 Vertex 等渠道瞬时并发限流） ——

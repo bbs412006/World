@@ -397,11 +397,14 @@ window.OUTLINE_ENGINE = (function() {
         const recent = validSmalls.slice(-5);
         const recentIds = new Set(recent.map(item => item.id));
         const keyEarlier = validSmalls.filter(item => item.impactLevel === 'key' && !recentIds.has(item.id)).slice(-3);
+        const quests = Array.isArray(memory?.tables?.quests_events) ? memory.tables.quests_events.slice(-6) : [];
         const facts = (memory?.ongoing_facts || []).filter(item => item.status === 'active').slice(-6);
         const memLines = [];
-        if (facts.length) memLines.push('当前持续事实：' + facts.map(f => `[${f.category || '状态'}·${f.subject || '全局'}] ${f.fact}`).join('；'));
-        if (keyEarlier.length) memLines.push('关键历史纪要：' + keyEarlier.map(s => `[楼层${s.startLayer}-${s.endLayer}] ${s.content}`).join('；'));
-        if (recent.length) memLines.push('近期事件纪要：' + recent.map(s => `[楼层${s.startLayer}-${s.endLayer}] ${s.content}`).join('；'));
+        if (quests.length) memLines.push('当前任务与事件：' + quests.map(q => `[${q.quest_type || '任务'}] ${q.quest_name}${q.current_progress ? `（${q.current_progress}）` : ''}`).join('；'));
+        else if (facts.length) memLines.push('当前持续事实：' + facts.map(f => `[${f.category || '状态'}·${f.subject || '全局'}] ${f.fact}`).join('；'));
+        const spanText = s => Number(s.startLayer) === Number(s.endLayer) ? `${s.endLayer}` : `${s.startLayer}-${s.endLayer}`;
+        if (keyEarlier.length) memLines.push('关键历史纪要：' + keyEarlier.map(s => `[楼层${spanText(s)}] ${s.content}`).join('；'));
+        if (recent.length) memLines.push('近期事件纪要：' + recent.map(s => `[楼层${spanText(s)}] ${s.content}`).join('；'));
         if (memLines.length) parts.push('记忆背景（不得作为原文证据）：' + memLines.join('\n').slice(0, 1400));
       } catch (_) { /* 不依赖记忆引擎运行。 */ }
     }
@@ -621,10 +624,7 @@ window.OUTLINE_ENGINE = (function() {
       state.tracking = { ...state.tracking, checkedLayer: currentLayer(), roundsSinceCheck: 0,
         lastDigest: `${state.revision}:${beforeChapterId}:${digest}`, pendingRecheck: false, recheckStartLayer: null };
       if (history()) history().recordOutlineCommit(beforeAutomatic, state, selection.refs); else data().saveState(state);
-      if (settings().injectIntoMemoryEngine !== false) {
-        try { window.STORY_ENGINE_BRIDGE?.notifyOutlineCommitted?.(state, beforeAutomatic, selection); }
-        catch (bridgeErr) { console.warn('[剧情大纲] 同步已核实认知失败（已隔离）', bridgeErr); }
-      }
+      // 弱联动模式：大纲不再向记忆 7 表自动写入记录（仅提供只读焦距参考）
       await window.WORLD_ENGINE_STORE?.flush?.();
       applyInjection(); refresh();
       setExternalStatus('剧情检查完成');

@@ -563,6 +563,15 @@ window.WORLD_ENGINE_CHATCACHE = (function() {
     function meta(id) {
       try {
         const state = JSON.parse(store().getItem(MSLOTS.state(id)) || '{}');
+        const tables = state.tables && typeof state.tables === 'object' ? state.tables : null;
+        if (tables) {
+          const characters = (Array.isArray(tables.important_characters) ? tables.important_characters.length : 0)
+            + (Array.isArray(tables.protagonist_info) ? tables.protagonist_info.length : 0);
+          const entities = (Array.isArray(tables.protagonist_skills) ? tables.protagonist_skills.length : 0)
+            + (Array.isArray(tables.inventory) ? tables.inventory.length : 0)
+            + (Array.isArray(tables.quests_events) ? tables.quests_events.length : 0);
+          return { round: Number(state.round) || 0, characters, entities };
+        }
         const entities = ['organization', 'object', 'ability', 'location']
           .reduce((sum, type) => sum + (Array.isArray(state.entity_memory?.[type]) ? state.entity_memory[type].length : 0), 0);
         return { round: Number(state.round) || 0, characters: Array.isArray(state.personal_memory) ? state.personal_memory.length : 0, entities };
