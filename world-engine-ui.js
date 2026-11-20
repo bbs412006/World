@@ -1406,7 +1406,9 @@ window.WORLD_ENGINE_UI = (function() {
     try {
       clearMemoryEditing();
       _memoryExpandedTableRows.clear();
-      _memoryTablePage = {};
+      _memoryCollapsedRecords.clear();
+      _memorySeenRecords.clear();
+      Object.keys(_memoryTablePage).forEach(k => delete _memoryTablePage[k]);
       _memoryMinutesPage = -1;
       if (typeof window.MEMORY_ENGINE?.clearAllTableData === 'function') {
         const res = window.MEMORY_ENGINE.clearAllTableData({

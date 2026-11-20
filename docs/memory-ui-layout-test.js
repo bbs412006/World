@@ -178,4 +178,68 @@ assert.ok(
 );
 assert.ok(!dataJs.includes('interaction_options') && !dataJs.includes('选项表'), '记忆核心 7 表不应包含选项表与角色表交互选项字段');
 
+// 5. 防回归：模块级 const 变量不得被重新赋值（避免点击清空时出现 Assignment to constant variable）
+for (const filename of ['world-engine-ui.js', 'memory-engine.js', 'memory-engine-data.js', 'memory-engine-prompt.js']) {
+  const src = fs.readFileSync(path.join(root, filename), 'utf8');
+  const lines = src.split(/\r?\n/);
+  const constVars = new Set();
+  for (const line of lines) {
+    const m = line.match(/^\s{2}const\s+([A-Za-z_$][\w$]*)\s*=/);
+    if (m) constVars.add(m[1]);
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*const\s+/.test(line)) continue;
+    for (const v of constVars) {
+      const re = new RegExp('(^|[^.\\w$])' + v + '\\s*(?:=(?!=)|\\+=|-=|\\*=|/=|\\+\\+|--)', 'g');
+      assert.ok(!re.test(line), `${filename}:${i + 1} 不得对 const 变量 ${v} 重新赋值：${line.trim()}`);
+    }
+  }
+}
+
+// 6. 运行时实测 confirmAndClearAllMemoryTables（覆盖 _memoryTablePage 原地清空路径，确保无异常）
+{
+  const vm = require('vm');
+  const fnStart = ui.indexOf('function confirmAndClearAllMemoryTables(');
+  const fnEnd = ui.indexOf('\n  function bindMemoryView()', fnStart);
+  assert.ok(fnStart > 0 && fnEnd > fnStart, '应能定位 confirmAndClearAllMemoryTables');
+  const fnSrc = ui.slice(fnStart, fnEnd);
+  let clearedCalls = 0;
+  let toastText = '';
+  let toastErr = false;
+  let refreshed = false;
+  const ctx = vm.createContext({
+    window: {
+      MEMORY_ENGINE: {
+        isRunning: () => false,
+        clearAllTableData: (opts) => { clearedCalls++; return { cleared: true, removedRows: 5, opts }; }
+      },
+      MEMORY_ENGINE_DATA: {
+        loadState: () => ({}),
+        tableRowCounts: () => ({ totalRows: 5, chronicle: 2 })
+      }
+    },
+    confirm: () => true,
+    showToast: (msg, isErr) => { toastText = msg; toastErr = !!isErr; },
+    clearMemoryEditing: () => {},
+    refresh: () => { refreshed = true; },
+    _memoryExpandedTableRows: new Set(['important_characters:char_000001']),
+    _memoryCollapsedRecords: new Set(['am00001']),
+    _memorySeenRecords: new Set(['am00001']),
+    _memoryMinutesPage: 2
+  });
+  vm.runInContext(`
+    const _memoryTablePage = { important_characters: 3, backpack_items: 1 };
+    ${fnSrc}
+    const ok = confirmAndClearAllMemoryTables({ clearCheckpoints: false });
+    globalThis.__result = { ok, remainingKeys: Object.keys(_memoryTablePage).length, minutesPage: _memoryMinutesPage };
+  `, ctx);
+  assert.strictEqual(ctx.__result.ok, true, 'confirmAndClearAllMemoryTables 应成功返回 true');
+  assert.strictEqual(ctx.__result.remainingKeys, 0, '_memoryTablePage 应原地清空所有分页键');
+  assert.strictEqual(ctx.__result.minutesPage, -1, '_memoryMinutesPage 应重置为 -1');
+  assert.strictEqual(clearedCalls, 1, '应调用一次 MEMORY_ENGINE.clearAllTableData');
+  assert.strictEqual(toastErr, false, `不应弹出错误提示，实际：${toastText}`);
+  assert.strictEqual(refreshed, true, '清空成功后应触发 UI refresh()');
+}
+
 console.log('memory UI layout tests passed');
