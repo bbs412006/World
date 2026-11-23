@@ -137,6 +137,9 @@ window.STORY_ENGINE_BRIDGE = (function() {
       if (allowOutline) {
         const outline = window.OUTLINE_ENGINE_DATA?.loadState?.();
         for (const node of outline?.plan?.nodes || []) {
+          for (const actorName of node.actors || []) {
+            if (clean(actorName)) groups.push({ source: 'outline', id: '', names: [clean(actorName)] });
+          }
           for (const ref of node.entityRefs || []) {
             if (clean(ref?.nameSnapshot)) {
               groups.push({ source: 'outline', id: clean(ref.id), names: [clean(ref.nameSnapshot)] });
@@ -220,9 +223,11 @@ window.STORY_ENGINE_BRIDGE = (function() {
         const focusParts = [];
         if (chapter?.title) focusParts.push(`当前章节：${chapter.title}${chapter.goal ? `（目标：${cut(chapter.goal, 80)}）` : ''}`);
         if (clean(outline?.plan?.publicSynopsis)) focusParts.push(`公开脉络：${cut(outline.plan.publicSynopsis, 160)}`);
-        // 严格只读取已激活且 visibility === 'public' 的节点标题，绝不暴露 private/未来节点/privateFacts
+        // 严格只读取已激活且对台前公开的节点标题，绝不暴露未显露暗线/secretNotes/authorNotes
+        const trackMap = new Map((outline?.plan?.tracks || []).map(t => [t.id, t]));
         const activePublicNodes = (outline?.plan?.nodes || []).filter(node => {
-          if (node.visibility === 'private') return false;
+          const isHidden = (trackMap.get(node.trackId)?.kind === 'hidden') || node.visibility === 'private';
+          if (isHidden && node.revealPublic !== true) return false;
           const st = window.OUTLINE_ENGINE_DATA?.getNodeStatus?.(outline, node.id);
           return st === 'active';
         }).slice(0, 4).map(node => node.title).filter(Boolean);
@@ -255,16 +260,17 @@ window.STORY_ENGINE_BRIDGE = (function() {
       const outline = window.OUTLINE_ENGINE_DATA?.loadState?.();
       if (!outline) return [];
       const names = new Set();
-      const validContactClueIds = new Set((outline.clues || []).filter(c => c.validity === 'valid' && c.available).map(c => c.id));
-      for (const contact of outline.contacts || []) {
-        if (contact.validity === 'valid' && validContactClueIds.has(contact.clueId) && clean(contact.actorId)) {
-          for (const alias of resolveCharacterAliases(contact.actorId)) names.add(alias);
-        }
-      }
+      const trackMap = new Map((outline.plan?.tracks || []).map(t => [t.id, t]));
       for (const node of outline.plan?.nodes || []) {
-        if (node.visibility === 'private') continue;
+        const isHidden = (trackMap.get(node.trackId)?.kind === 'hidden') || node.visibility === 'private';
+        if (isHidden && node.revealPublic !== true) continue;
         const st = window.OUTLINE_ENGINE_DATA?.getNodeStatus?.(outline, node.id);
         if (st === 'active') {
+          for (const actorName of node.actors || []) {
+            if (clean(actorName)) {
+              for (const alias of resolveCharacterAliases(actorName)) names.add(alias);
+            }
+          }
           for (const ref of node.entityRefs || []) {
             if (clean(ref.nameSnapshot)) {
               for (const alias of resolveCharacterAliases(ref.nameSnapshot)) names.add(alias);
@@ -320,7 +326,10 @@ window.STORY_ENGINE_BRIDGE = (function() {
             mLines.push('近期事件纪要：\n' + smalls.map(s => `- [楼层${spanText(s)}] ${cut(s.content, 200)}`).join('\n'));
           }
           if (mem.peopleRoster?.length) {
-            const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));
+            const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => [
+              ...(n.actors || []).map(a => normalized(a)),
+              ...(n.entityRefs || []).map(r => normalized(r.nameSnapshot))
+            ]).filter(Boolean));
             const pickedProfiles = mem.peopleRoster.filter(p => {
               const idVal = clean(p.brief_intro || p.profile?.basicInfo?.identity);
               const expVal = clean(p.past_experience || p.profile?.experiences);
@@ -335,7 +344,10 @@ window.STORY_ENGINE_BRIDGE = (function() {
             }
           }
           if (mem.characterArcs?.length) {
-            const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => (n.entityRefs || []).map(r => normalized(r.nameSnapshot))).filter(Boolean));
+            const activeNames = new Set((outlineState?.plan?.nodes || []).flatMap(n => [
+              ...(n.actors || []).map(a => normalized(a)),
+              ...(n.entityRefs || []).map(r => normalized(r.nameSnapshot))
+            ]).filter(Boolean));
             const pickedArcs = mem.characterArcs.filter(arc => !activeNames.size || (arc.names || []).some(n => activeNames.has(normalized(n)))).slice(0, 4);
             if (pickedArcs.length) {
               mLines.push('人物近况弧光：' + pickedArcs.map(a => `${a.names?.[0] || a.characterId}(${a.progressPct}% ${a.relationship || ''}:${cut(a.currentStance, 40)})`).join('；'));
@@ -447,6 +459,7 @@ window.STORY_ENGINE_BRIDGE = (function() {
         id: ++turnSequence,
         chatId: chat,
         layer,
+        delayMs: windowMs,
         tasks: new Map(),
         timer: null,
         running: false,
@@ -456,13 +469,14 @@ window.STORY_ENGINE_BRIDGE = (function() {
       };
     }
     const turn = activeTurn;
+    turn.delayMs = Math.max(turn.delayMs || 0, windowMs);
     turn.tasks.set(scope, { run: entry.run, key: clean(entry.key), done: false });
     if (turn.running) return turn.promise;
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = setTimeout(() => {
       turn.timer = null;
       drainTurn(turn).then(turn.resolve, turn.resolve);
-    }, windowMs);
+    }, turn.delayMs);
     return turn.promise;
   }
 

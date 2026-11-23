@@ -335,16 +335,17 @@ window.WORLD_ENGINE_DIAG = (function() {
       collectedAt: new Date().toISOString(),
       settings: safe(() => sanitizeSettings(window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true))),
       outline: {
+        schemaVersion: state.schemaVersion || 3,
         revision: state.revision, currentChapterId: state.currentChapterId,
         chapters: state.plan?.chapters?.length || 0,
-        nodes: state.plan?.nodes?.length || (state.plan?.chapters || []).reduce((total, chapter) => total + (chapter.nodes?.length || 0), 0),
+        nodes: state.plan?.nodes?.length || 0,
         tracks: state.plan?.tracks?.length || 0,
         tracking: safe(() => Object.fromEntries(
-          ['anchorLayer', 'checkedLayer', 'roundsSinceCheck', 'pendingRecheck', 'recheckStartLayer']
+          ['anchorLayer', 'checkedLayer', 'roundsSinceCheck']
             .map(key => [key, state.tracking?.[key] ?? null])
         )),
-        progressEventCount: state.progressEvents?.length || 0,
-        proposalCount: state.proposals?.length || 0
+        progressCount: Object.keys(state.progress || {}).length,
+        manualOverrideCount: Object.keys(state.manualOverrides || {}).length
       },
       execution: safe(() => ({ running: window.OUTLINE_ENGINE?.isRunning?.(), lastError: window.OUTLINE_ENGINE?.getLastError?.() || '' })),
       injectionInspector: safe(() => {
@@ -353,8 +354,7 @@ window.WORLD_ENGINE_DIAG = (function() {
         const { messages, ourContent, ourExcerpt, ...summary } = snapshot;
         return summary;
       }),
-        chatcache: safe(() => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.getStatus?.()),
-        history: safe(() => window.STORY_ENGINE_HISTORY?.getStatus?.())
+      chatcache: safe(() => window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.getStatus?.())
     };
   }
 

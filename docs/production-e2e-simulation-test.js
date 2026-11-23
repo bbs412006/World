@@ -150,10 +150,7 @@ function createProductionSandbox(initialChat = []) {
     'memory-engine.js',
     'outline-engine-settings.js',
     'outline-engine-data.js',
-    'outline-engine-scheduler.js',
     'outline-engine-prompt.js',
-    'story-engine-projection.js',
-    'story-engine-history.js',
     'outline-engine-cache.js',
     'outline-engine.js'
   ];
@@ -562,10 +559,8 @@ async function runAll() {
     assert.strictEqual(await env.sandbox.WORLD_ENGINE_EVOLUTION.evolve(wState1, '', env.ctx.chat[l2].mes, {
       dialogueText: '联合推进1', sourceRefs: refs2
     }), true);
-    const commit1 = env.sandbox.WORLD_ENGINE_EVOLUTION.getLastWorldCommitId();
-    assert.ok(commit1, '联合模式应生成 worldCommitId');
 
-    // 验证协同桥给记忆提取的提示绝不泄露 private 节点或 privateFacts
+    // 验证协同桥给记忆提取的提示绝不泄露暗线/幕后真相
     const hints = env.sandbox.STORY_ENGINE_BRIDGE.getMemoryExtractionHints();
     assert.ok(!hints.outlineFocusHint.includes('二皇子'), '私密大纲信息严禁泄露进记忆提取提示词');
 
@@ -613,16 +608,17 @@ async function runAll() {
     await env.sandbox.MEMORY_ENGINE.catchUpToLatest({ includeCurrentFloor: true, includeMemory: true });
     assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().round, 2);
 
-    // 删掉第 2 轮（楼层 3-4），触发联合历史与记忆同步回退
+    // 删掉第 2 轮（楼层 3-4），验证三模块各自独立 0ms 楼层回退（零 blocked 锁死！）
     env.ctx.chat.splice(3);
-    env.sandbox.STORY_ENGINE_HISTORY.reconcile();
+    env.sandbox.WORLD_ENGINE_CORE.rollbackToLayer();
+    await env.sandbox.OUTLINE_ENGINE.prepareHistoryForGeneration();
     await env.sandbox.MEMORY_ENGINE.reconcileHistory({ refillUncovered: false });
 
-    assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().round, 1, '联合世界回退至第 1 轮');
+    assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().round, 1, '世界回退至第 1 轮');
     assert.strictEqual(env.sandbox.WORLD_ENGINE_CORE.loadState().worldDigest, '第1轮联合世界摘要');
     const shenBack = env.sandbox.MEMORY_ENGINE_DATA.loadState().tables.important_characters.find(p => p.name === '沈清秋');
-    assert.strictEqual(shenBack.relation_text, '盟友', '联合模式下重要角色关系同步回退至第 1 轮');
-    console.log('✓ 场景 5 通过：三模块全开协同、私密大纲零泄露、人物履历桥接与联合删楼同步回退全部正常');
+    assert.strictEqual(shenBack.relation_text, '盟友', '重要角色关系同步回退至第 1 轮');
+    console.log('✓ 场景 5 通过：三模块全开协同、私密大纲零泄露、人物履历桥接与无锁删楼回退全部正常');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

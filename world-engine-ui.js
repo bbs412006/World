@@ -3150,7 +3150,7 @@ window.WORLD_ENGINE_UI = (function() {
       const chapterText = cur ? (cur.title || '未命名章节') : '尚未建纲';
       const sub = chapters.length
         ? `${chapterText} · ${chapters.length} 章 / ${nodes.length} 节点${enabled ? '' : '（未启用）'}`
-        : `章节进度 · 剧情线 · 线索调度${enabled ? '' : '（未启用）'}`;
+        : `章节进度 · 主支暗线 · 防剧透指导${enabled ? '' : '（未启用）'}`;
       return {
         enabled,
         title: plan.title || '尚未设置剧情大纲',

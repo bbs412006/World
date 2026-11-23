@@ -145,7 +145,6 @@ function createHarness(initialChat) {
     'memory-engine-prompt.js',
     'memory-engine-small-summary-prompt.js',
     'memory-engine-vector.js',
-    'story-engine-projection.js',
     'story-engine-bridge.js',
     'memory-engine.js'
   ]) {

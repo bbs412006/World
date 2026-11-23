@@ -123,7 +123,6 @@ const sandbox = {
 sandbox.window = sandbox;
 
 for (const file of [
-  'story-engine-projection.js',
   'memory-engine-data.js',
   'memory-engine-prompt.js',
   'memory-engine-small-summary-prompt.js',

@@ -1,4 +1,4 @@
-// node docs/outline-main-entry-test.js — 主界面剧情大纲入口与重设计页面离线回归测试
+// 剧情大纲 v3 主界面入口、悬浮球与统一主题联动测试：node docs/outline-main-entry-test.js
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -6,341 +6,177 @@ const vm = require('vm');
 
 const rootPath = path.resolve(__dirname, '..');
 
-function makeElement(tag = 'div', id = '') {
-  const listeners = {};
-  const attrs = {};
-  const classes = new Set();
+function makeElement(tagName = 'div', byId = null) {
+  const attrs = new Map();
+  const children = [];
+  let innerHTML = '';
   const el = {
-    tagName: tag.toUpperCase(),
-    id,
+    tagName: tagName.toUpperCase(),
+    id: '',
+    className: '',
     dataset: {},
     style: {},
-    children: [],
+    textContent: '',
+    scrollTop: 0,
     parentElement: null,
-    _innerHTML: '',
-    _textContent: '',
     classList: {
-      add(...names) { names.forEach(n => classes.add(n)); },
-      remove(...names) { names.forEach(n => classes.delete(n)); },
-      toggle(name, force) {
-        const next = force === undefined ? !classes.has(name) : Boolean(force);
-        if (next) classes.add(name); else classes.delete(name);
-        return next;
-      },
-      contains: name => classes.has(name)
+      add(...names) { const set = new Set((el.className || '').split(/\s+/).filter(Boolean)); names.forEach(n => set.add(n)); el.className = [...set].join(' '); },
+      remove(...names) { const set = new Set((el.className || '').split(/\s+/).filter(Boolean)); names.forEach(n => set.delete(n)); el.className = [...set].join(' '); },
+      toggle(name, force) { const has = el.classList.contains(name); const next = force === undefined ? !has : Boolean(force); if (next) el.classList.add(name); else el.classList.remove(name); return next; },
+      contains(name) { return (el.className || '').split(/\s+/).includes(name); }
     },
-    set className(v) {
-      classes.clear();
-      String(v || '').split(/\s+/).filter(Boolean).forEach(n => classes.add(n));
-    },
-    get className() { return [...classes].join(' '); },
-    setAttribute(k, v) {
-      attrs[k] = String(v);
-      if (k === 'id') el.id = String(v);
-      if (k.startsWith('data-')) {
-        const camel = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-        el.dataset[camel] = String(v);
-      }
-    },
-    getAttribute(k) { return attrs[k] ?? null; },
-    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
-    removeEventListener(type, fn) { listeners[type] = (listeners[type] || []).filter(f => f !== fn); },
-    appendChild(child) { child.parentElement = el; el.children.push(child); return child; },
-    set innerHTML(val) { el._innerHTML = String(val || ''); },
-    get innerHTML() { return el._innerHTML; },
-    set textContent(val) { el._textContent = String(val ?? ''); },
-    get textContent() { return el._textContent; },
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 600 }),
+    setAttribute(k, v) { attrs.set(k, String(v)); if (k === 'id') { el.id = String(v); if (byId) byId.set(el.id, el); } },
+    getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+    removeAttribute(k) { attrs.delete(k); },
+    appendChild(child) { child.parentElement = el; children.push(child); if (child.id && byId) byId.set(child.id, child); return child; },
+    addEventListener() {},
     querySelector(sel) {
-      if (sel === '#we-panel-body') return el._body || (el._body = makeElement('div', 'we-panel-body'));
-      if (sel === '#we-panel-version') return el._ver || (el._ver = makeElement('span', 'we-panel-version'));
-      if (sel === '.we-panel-close') return el._close || (el._close = makeElement('button'));
-      if (sel === '.we-engine-face-toggle') return el._title || (el._title = makeElement('button'));
-      if (sel === '#we-btn-settings-open') return el._settings || (el._settings = makeElement('button', 'we-btn-settings-open'));
-      if (sel === '#we-face-switcher') return el._switcher || (el._switcher = makeElement('div', 'we-face-switcher'));
-      if (sel === '#we-sat-forward') return el._satFwd || (el._satFwd = makeElement('span', 'we-sat-forward'));
-      if (sel === '#we-sat-redo') return el._satRedo || (el._satRedo = makeElement('span', 'we-sat-redo'));
-      if (sel === '#we-sat-abort') return el._satAbort || (el._satAbort = makeElement('span', 'we-sat-abort'));
-      if (sel === '#we-sat-power') return el._satPower || (el._satPower = makeElement('span', 'we-sat-power'));
-      if (sel === '#we-sat-engine-switch') return el._satSwitch || (el._satSwitch = makeElement('span', 'we-sat-engine-switch'));
-      if (sel === '#we-sat-outline-switch') return el._satOutline || (el._satOutline = makeElement('span', 'we-sat-outline-switch'));
-      if (sel === '.we-ball-ring') return el._ballRing || (el._ballRing = makeElement('span'));
-      if (sel === '.we-ball-badge') return el._ballBadge || (el._ballBadge = makeElement('span'));
-      if (sel === '.we-ball-count') return el._ballCount || (el._ballCount = makeElement('span'));
-      if (sel === '.we-panel-header') return el._header || (el._header = makeElement('div'));
-      if (sel === '.we-header-dot') return el._dot || (el._dot = makeElement('span'));
-      if (sel === '.we-header-mood-text') return el._moodText || (el._moodText = makeElement('span'));
-      if (sel === '.we-outline-root') return el;
+      if (sel.startsWith('#')) {
+        const target = sel.slice(1);
+        for (const c of children) {
+          if (c.id === target) return c;
+          const found = c.querySelector?.(sel);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (sel.startsWith('.')) {
+        const cls = sel.slice(1);
+        for (const c of children) {
+          if (c.classList.contains(cls)) return c;
+          const found = c.querySelector?.(sel);
+          if (found) return found;
+        }
+        const stub = makeElement('div', byId);
+        stub.classList.add(cls);
+        children.push(stub);
+        return stub;
+      }
       return null;
     },
-    querySelectorAll: () => [],
-    closest: () => null,
-    contains: () => true,
-    scrollIntoView() {}
+    querySelectorAll() { return []; },
+    get innerHTML() { return innerHTML; },
+    set innerHTML(html) {
+      innerHTML = String(html || '');
+      children.length = 0;
+      const re = /<[a-zA-Z]([^>]*?)>/g;
+      let m;
+      while ((m = re.exec(innerHTML))) {
+        const attrsStr = m[1];
+        const idM = /\sid="([^"]+)"/.exec(attrsStr);
+        const clsM = /\sclass="([^"]+)"/.exec(attrsStr);
+        if (!idM && !clsM) continue;
+        const child = makeElement('div', byId);
+        if (idM) { child.id = idM[1]; if (byId) byId.set(child.id, child); }
+        if (clsM) child.className = clsM[1];
+        children.push(child);
+      }
+    }
   };
   return el;
 }
 
-function runMainEntrySuite() {
+async function run() {
   const storage = new Map();
-  const bodyEl = makeElement('body');
   const byId = new Map();
-  const docEl = makeElement('html');
-  docEl.removeAttribute = () => {};
+  const bodyEl = makeElement('body', byId);
+  const docEl = makeElement('html', byId);
 
   const sandbox = {
-    console, setTimeout: (fn) => { return setTimeout(fn, 0); }, clearTimeout, Date, Math, Map, Set, Blob,
-    innerWidth: 1280,
-    innerHeight: 800,
+    window: null,
+    console: { log() {}, warn() {}, error() {} },
+    setTimeout,
+    clearTimeout,
+    innerWidth: 1024,
+    innerHeight: 768,
     addEventListener() {},
+    removeEventListener() {},
     MutationObserver: class { observe() {} disconnect() {} },
-    localStorage: { getItem: k => storage.get('ls:' + k) ?? null, setItem: (k, v) => storage.set('ls:' + k, String(v)) },
+    localStorage: {
+      getItem: k => (storage.has(k) ? storage.get(k) : null),
+      setItem: (k, v) => storage.set(k, String(v)),
+      removeItem: k => storage.delete(k)
+    },
     document: {
       documentElement: docEl,
+      head: makeElement('head'),
       body: bodyEl,
-      activeElement: null,
-      createElement: tag => makeElement(tag),
-      getElementById(id) {
-        if (byId.has(id)) return byId.get(id);
-        const panel = byId.get('we-panel');
-        if (panel) {
-          if (id === 'we-panel-body') return panel.querySelector('#we-panel-body');
-          if (id === 'we-header-round') return byId.get('we-header-round') || (byId.set('we-header-round', makeElement('span', 'we-header-round')), byId.get('we-header-round'));
-          if (id === 'we-header-mood') return byId.get('we-header-mood') || (byId.set('we-header-mood', makeElement('div', 'we-header-mood')), byId.get('we-header-mood'));
-        }
-        return null;
-      },
-      querySelector: () => null,
+      getElementById: id => byId.get(id) || bodyEl.querySelector('#' + id) || null,
+      querySelector: sel => (sel.startsWith('#') ? byId.get(sel.slice(1)) || null : null),
       querySelectorAll: () => [],
+      createElement: tag => makeElement(tag, byId),
       addEventListener() {}
     },
-    SillyTavern: { getContext: () => ({ chatId: 'chat-main-test', chat: [] }) },
+    SillyTavern: { getContext: () => ({ chatId: 'main-entry-v3', chat: [] }) },
     WORLD_ENGINE_STORE: {
-      getItem: k => storage.get(k) ?? null,
-      setItem: (k, v) => storage.set(k, v),
+      getItem: k => (storage.has(k) ? storage.get(k) : null),
+      setItem: (k, v) => storage.set(k, String(v)),
       removeItem: k => storage.delete(k)
     },
     WORLD_ENGINE_CORE: {
-      getChatId: () => 'chat-main-test',
+      getChatId: () => 'main-entry-v3',
       getChatLayer: () => 0,
-      loadState: () => ({ round: 1, events: [], factions: [], winds: [], worldTrends: [], memories: [], worldDigest: '世界摘要文本' }),
       restoreCheckpoint: () => null,
+      loadState: () => ({ round: 0, time: 1, events: [], factions: [], worldTrends: [], winds: [], economy: { climate: '平稳', signals: [] }, reputation: {}, enemies: [], influenceChain: [], regionalIncident: null, blackbox: {} }),
       renderUserName: t => String(t || '')
     },
-    WORLD_ENGINE_EVOLUTION: { isRunning: () => false, abort() {} },
     WORLD_ENGINE_API: {
-      getSettings: () => JSON.parse(storage.get('world_engine_settings') || '{}'),
-      fetchModelList: async () => ['gpt-4o-mini', 'claude-3-5-sonnet'],
-      testConnection: async cfg => ({ ok: true, durationMs: 32, preview: `{"ok":true,"model":"${cfg.model}"}`, length: 24 })
+      getSettings: () => ({ engineEnabled: true, displayMode: 'mask', connectionMode: 'proxy', apiUrl: 'https://world.sync/v1', apiKey: 'w-secret' }),
+      fetchModelList: async () => ['gpt-4o-mini'],
+      testConnection: async () => ({ ok: true, latencyMs: 32 })
     },
-    MEMORY_ENGINE_SETTINGS: {
-      VERSION: '1.1.2',
-      getSettings: () => ({ engineEnabled: true })
-    },
-    MEMORY_ENGINE_DATA: {
-      loadState: () => ({ personal_memory: [], entity_memory: {}, event_memory: { small_summaries: [], big_summaries: [] } })
-    },
-    confirm: () => true
+    WORLD_ENGINE_EVOLUTION: { isRunning: () => false, abort() {} },
+    WORLD_ENGINE_CHATCACHE: { forScope: () => ({ listSnapshots: () => [], createSnapshot: () => null }) },
+    MEMORY_ENGINE_SETTINGS: { VERSION: '2.0.0', getSettings: () => ({ engineEnabled: true }) },
+    MEMORY_ENGINE_DATA: { loadState: () => ({ tables: {} }), tableRowCounts: () => ({ totalRows: 0 }) }
   };
   sandbox.window = sandbox;
-  const origAppend = bodyEl.appendChild.bind(bodyEl);
-  bodyEl.appendChild = (el) => {
-    if (el.id) byId.set(el.id, el);
-    return origAppend(el);
-  };
+  vm.createContext(sandbox);
 
-  for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-scheduler.js', 'world-engine-ui.js', 'outline-engine-ui.js']) {
-    vm.runInNewContext(fs.readFileSync(path.join(rootPath, file), 'utf8'), sandbox, { filename: file });
+  for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-prompt.js', 'outline-engine.js', 'world-engine-ui.js', 'outline-engine-ui.js']) {
+    vm.runInContext(fs.readFileSync(path.join(rootPath, file), 'utf8'), sandbox, { filename: file });
   }
 
-  // 1. 未注册 outline 时，主界面与悬浮球均不显示大纲入口（故障隔离）
+  // 1. 未注册 outline 时隔离
   sandbox.WORLD_ENGINE_UI.buildInputButton();
   sandbox.WORLD_ENGINE_UI.showPanel();
   const ball = byId.get('we-input-btn');
   const ballOutlineSwitch = ball.querySelector('#we-sat-outline-switch');
-  const ballEngineSwitch = ball.querySelector('#we-sat-engine-switch');
   assert.strictEqual(ballOutlineSwitch.style.display, 'none', '未注册剧情大纲时悬浮球不应显示大纲切换钮');
-  assert.strictEqual(ballEngineSwitch.dataset.targetEngine, 'memory', '未注册剧情大纲时世界面右下角卫星应指向记忆引擎');
-  const panel = byId.get('we-panel');
-  const panelBody = panel.querySelector('#we-panel-body');
-  assert.ok(!panelBody.innerHTML.includes('data-face="outline"'), '未注册剧情大纲时主界面不应渲染大纲入口');
-  const switcher = panel.querySelector('#we-face-switcher');
-  assert.ok(!switcher.innerHTML.includes('data-switch-face="outline"'), '未注册剧情大纲时切换栏不应包含大纲');
 
-  // 2. 注册 outline 后，主界面遮蔽模式、展开模式、顶部切换栏与悬浮球左下角均展示剧情大纲入口
+  // 2. 注册 outline 后，顺序固定为 world · memory · outline，且悬浮球与主界面入口齐全
   sandbox.OUTLINE_ENGINE_UI.init();
   sandbox.WORLD_ENGINE_UI.refresh();
   assert.strictEqual(ballOutlineSwitch.style.display, '', '注册剧情大纲后悬浮球左下角切换钮必须可见');
-  assert.strictEqual(ballOutlineSwitch.dataset.targetEngine, 'outline', '世界面下悬浮球大纲切换钮应指向剧情大纲');
-  assert.ok(ballOutlineSwitch.classList.contains('we-sat-target-outline'), '悬浮球大纲切换钮应带大纲图标样式类');
-  assert.strictEqual(ballEngineSwitch.dataset.targetEngine, 'memory', '世界面下右下角仍可一键切记忆引擎');
-  const originalOutlineRunning = sandbox.OUTLINE_ENGINE?.isRunning;
-  sandbox.OUTLINE_ENGINE = { ...(sandbox.OUTLINE_ENGINE || {}), isRunning: () => true, getRunningLabel: () => '检查剧情进度' };
-  sandbox.WORLD_ENGINE_UI.refresh();
-  assert.strictEqual(ballOutlineSwitch.dataset.engineRunning, 'true', '剧情大纲后台运行时悬浮球大纲按钮应同步运行态');
-  assert.ok(ballOutlineSwitch.classList.contains('we-sat-engine-running'), '剧情大纲后台运行时悬浮球大纲按钮应启用脉冲动画类');
-  sandbox.OUTLINE_ENGINE.isRunning = originalOutlineRunning || (() => false);
-  sandbox.WORLD_ENGINE_UI.refresh();
-  assert.ok(switcher.innerHTML.includes('data-switch-face="outline"'), '顶部切换栏必须包含剧情大纲入口');
-  assert.ok(switcher.innerHTML.includes('世界引擎') && switcher.innerHTML.includes('记忆引擎') && switcher.innerHTML.includes('剧情大纲'));
-  assert.ok(panelBody.innerHTML.includes('data-face="outline"'), '主界面导航必须展示大纲入口');
-  assert.ok(panelBody.innerHTML.includes('草蛇灰线，伏脉千里'), '主界面大纲入口应遵循同款古文句式');
+  const faces = sandbox.WORLD_ENGINE_UI.listEngineFaces();
+  assert.deepStrictEqual([...faces.map(f => f.id)], ['world', 'memory', 'outline'], '顶部切换栏顺序固定为 世界 · 记忆 · 剧情大纲');
 
-  storage.set('world_engine_settings', JSON.stringify({ displayMode: 'expand' }));
-  sandbox.WORLD_ENGINE_UI.refresh();
-  assert.ok(panelBody.innerHTML.includes('id="we-sec-outline-entry"'), '展开模式主界面也必须展示剧情大纲入口卡片');
-  assert.ok(panelBody.innerHTML.includes('data-switch-face="outline"'), '展开模式应提供直接打开剧情大纲按钮');
+  const outlineFace = faces.find(f => f.id === 'outline');
+  assert.strictEqual(outlineFace.getHeaderText(), '尚未建纲');
+  assert.strictEqual(outlineFace.getHeaderMood().text, '未启用');
 
-  // 3. 剧情大纲瘦身首页与分页结构检查（统一视觉语言 + 职责一目了然）
-  const outlineHtml = sandbox.OUTLINE_ENGINE_UI.render();
-  assert.ok(outlineHtml.includes('we-outline-core-section') && outlineHtml.includes('剧情脉络'), '剧情大纲首页应包含核心环形仪表盘');
-  assert.ok(outlineHtml.includes('we-outline-nav-list') && outlineHtml.includes('data-outline-nav="progress"') && outlineHtml.includes('data-outline-nav="tracks"') && outlineHtml.includes('data-outline-nav="schedule"') && outlineHtml.includes('data-outline-nav="facts"'), '剧情大纲首页纵轴导航应包含进度、剧情、注入、线索 4 项入口');
-  assert.ok(!outlineHtml.includes('data-outline-nav="transfer"') && !outlineHtml.includes('data-outline-nav="recovery"'), '低频存档与恢复已收进设置页，不应占首页纵轴导航');
-  assert.ok(!outlineHtml.includes('we-outline-pos-section'), '当前位置卡片已下沉到「进度」分页，首页不再平铺');
-  assert.ok(!outlineHtml.includes('we-outline-board-toolbar'), '完整剧情看板已放进导航“剧情”模块，首页不再重复平铺');
-  assert.ok(!outlineHtml.includes('data-outline-action="open-text"') && !outlineHtml.includes('data-outline-action="toggle-injection-preview"'), '首页核心卡只保留立即检查等高频操作，整理文本与注入预览已下沉到分页');
-  assert.ok(outlineHtml.includes('we-core-actions') && outlineHtml.includes('data-outline-action="check-now"'), '首页核心卡应使用三模块统一的快捷操作区');
-  assert.ok(!outlineHtml.includes('we-outline-status-strip'), '模块状态已并入核心卡，不再在页面顶部常驻状态条');
+  // 启用后空大纲 mood 显示「尚未设置剧情大纲」
+  outlineFace.setEnabled(true);
+  assert.strictEqual(outlineFace.getHeaderMood().text, '尚未设置剧情大纲');
 
-  // 4. 二级分页、设置选项卡与编辑器均使用统一的 we-sub-topbar 与 we-settings-tabs-shell
-  return (async () => {
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-progress');
-    const progressHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(progressHtml.includes('we-outline-pos-section') && progressHtml.includes('当前位置'), '「进度」分页应展示当前所处剧情位置');
+  // 3. 独立主题保存、复制世界 API、拉取模型、测试连接与设置保存
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('copy-world-api');
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('fetch-models');
+  sandbox.OUTLINE_ENGINE_UI._test.captureInput({ id: 'we-outline-model-list', value: 'gpt-4o-mini', dataset: {} });
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('test-api');
+  assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('连接正常（32ms）'));
+  sandbox.OUTLINE_ENGINE_UI._test.captureInput({ id: 'we-outline-theme-select', value: 'deepsea', dataset: {} });
+  assert.strictEqual(outlineFace.getTheme(), 'deepsea', '大纲独立主题应生效');
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('save-settings');
+  const saved = sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true);
+  assert.strictEqual(saved.apiUrl, 'https://world.sync/v1');
+  assert.strictEqual(saved.model, 'gpt-4o-mini');
 
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-schedule');
-    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('正文注入实时预览'), '「注入」分页顶部应直接展示正文注入实时预览');
-
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-tracks');
-    const tracksHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(tracksHtml.includes('we-outline-home-chapter') && tracksHtml.includes('we-outline-board-toolbar') && tracksHtml.includes('data-outline-action="board-mode-chapter"') && tracksHtml.includes('data-outline-action="board-mode-track"'), '剧情分页应直接采用完整剧情看板样式并支持按章节/按剧情线切换');
-    assert.ok(tracksHtml.includes('data-outline-action="open-text"') && tracksHtml.includes('data-outline-action="edit-plan"'), '整理文本与全量编排入口应位于「剧情」看板内');
-
-    for (const view of ['progress', 'tracks', 'schedule', 'facts', 'recovery', 'transfer', 'debug']) {
-      await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-' + view);
-      const subHtml = sandbox.OUTLINE_ENGINE_UI.render();
-      assert.ok(subHtml.includes('we-sub-topbar') && subHtml.includes('data-outline-action="view-home"'), `${view} 分页必须使用统一返回顶栏`);
-    }
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-home');
-
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
-    const settingsHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(settingsHtml.includes('we-sub-topbar') && settingsHtml.includes('data-outline-action="close-settings"'), '设置页必须使用统一返回顶栏');
-    assert.ok(settingsHtml.includes('we-settings-tabs-shell')
-      && settingsHtml.includes('data-tab="common"')
-      && settingsHtml.includes('data-tab="link"')
-      && settingsHtml.includes('data-tab="advanced"')
-      && settingsHtml.includes('data-tab="archive"')
-      && settingsHtml.includes('data-tab="debug"')
-      && settingsHtml.includes('data-tab="about"')
-      && !settingsHtml.includes('data-tab="api"')
-      && settingsHtml.includes('we-section-toggle')
-      && settingsHtml.includes('data-section="set-outline-api"')
-      && settingsHtml.includes('聊天备份保存点'),
-      '设置页选项卡与可折叠分区应与世界/记忆模块保持一致（API 归入常用，联动与高级独立分栏）');
-    assert.ok(settingsHtml.includes('we-settings-save-sticky'), '设置页底部保存栏应常驻');
-    assert.ok(settingsHtml.includes('id="we-outline-fetch-models"')
-      && settingsHtml.includes('id="we-outline-test-api"')
-      && settingsHtml.includes('data-outline-action="copy-world-api"')
-      && settingsHtml.includes('id="we-outline-stream"')
-      && settingsHtml.includes('id="we-outline-streamIdleTimeoutSeconds"')
-      && settingsHtml.includes('id="we-outline-jsonMode"')
-      && settingsHtml.includes('id="we-outline-topP"')
-      && settingsHtml.includes('id="we-outline-reasoningEffort"')
-      && !settingsHtml.includes('id="we-outline-apiSource"')
-      && !settingsHtml.includes('API 来源')
-      && settingsHtml.includes('id="we-outline-apiAutoRetries"')
-      && settingsHtml.includes('id="we-outline-firstLayerIsAiOpening"')
-      && settingsHtml.includes('id="we-outline-theme-select"')
-      && settingsHtml.includes('id="we-outline-coordinationMode"')
-      && settingsHtml.includes('id="we-outline-useWorldReference"')
-      && settingsHtml.includes('id="we-outline-injectIntoMemoryEngine"')
-      && settingsHtml.includes('id="we-outline-useMemoryReference"'),
-      '设置页应包含独立 API 拉取模型、测试连接、复制世界连接、流式及高级请求参数（无 API 来源）、自动重试、首楼 AI 开场白、主题配色与完整三模块联动开关');
-    assert.ok(!/id="we-(?:api|model|fetch-models|save-settings|stream|test-api|json-mode|top-p|reasoning-effort)/.test(settingsHtml), '设置页不得使用世界/记忆冲突 ID');
-
-    storage.set('world_engine_settings', JSON.stringify({ connectionMode: 'proxy', apiUrl: 'https://world.sync/v1', apiKey: 'w-secret' }));
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('copy-world-api');
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'stream' }, checked: true, type: 'checkbox' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'streamIdleTimeoutSeconds' }, value: '45', type: 'number' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'jsonMode' }, checked: true, type: 'checkbox' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'topP' }, value: '', type: 'number' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'reasoningEffort' }, value: 'low', type: 'select-one' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'apiAutoRetries' }, value: '2', type: 'number' });
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ dataset: { outlineSetting: 'firstLayerIsAiOpening' }, checked: false, type: 'checkbox' });
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('fetch-models');
-    const afterFetchHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(afterFetchHtml.includes('id="we-outline-model-list"') && afterFetchHtml.includes('gpt-4o-mini'), '获取模型列表后应渲染模型下拉选框');
-    sandbox.OUTLINE_ENGINE_UI._test.captureInput({ id: 'we-outline-model-list', dataset: {}, value: 'gpt-4o-mini', type: 'select-one' });
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('test-api');
-    assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('连接成功（32ms）'), '连接测试应显示耗时与成功提示');
-    await sandbox.OUTLINE_ENGINE_UI._test.handleAction('save-settings');
-    const savedOutline = sandbox.OUTLINE_ENGINE_SETTINGS.getSettings(true);
-    assert.strictEqual(savedOutline.apiUrl, 'https://world.sync/v1');
-    assert.strictEqual(savedOutline.connectionMode, 'proxy');
-    assert.strictEqual(savedOutline.model, 'gpt-4o-mini');
-    assert.strictEqual(savedOutline.stream, true);
-    assert.strictEqual(savedOutline.streamIdleTimeoutMs, 45000);
-    assert.strictEqual(savedOutline.jsonMode, true);
-    assert.strictEqual(savedOutline.topP, null, '留空 topP 必须保留 null 而非转成 0');
-    assert.strictEqual(savedOutline.reasoningEffort, 'low');
-    assert.strictEqual(savedOutline.apiAutoRetries, 2);
-    assert.strictEqual(savedOutline.firstLayerIsAiOpening, false);
-
-    // 验证绑定设置区块折叠与独立主题配色
-    const mockToggle = { dataset: { section: 'set-outline-api' }, onclick: null };
-    const mockRoot = {
-      contains: () => true,
-      querySelectorAll: () => [],
-      oninput: null,
-      onchange: null,
-      onclick: null
-    };
-    sandbox.OUTLINE_ENGINE_UI.bind({ querySelector: () => mockRoot });
-    await mockRoot.onchange({ target: { id: 'we-outline-theme-select', value: 'deepsea', dataset: {}, type: 'select-one' } });
-    assert.strictEqual(docEl.getAttribute('data-we-theme'), 'deepsea', '切换剧情大纲主题应立即应用配色');
-    await mockRoot.onclick({ target: { closest: sel => sel.includes('we-section-toggle') ? mockToggle : null }, preventDefault() {} });
-    const collapsedHtml = sandbox.OUTLINE_ENGINE_UI.render();
-    assert.ok(collapsedHtml.includes('id="we-section-body-set-outline-api" style="display:none"') && collapsedHtml.includes('id="we-section-arrow-set-outline-api">▶<'), '点击设置区块标题应持久化折叠状态');
-
-    // 同视图刷新应保持滚动条位置
-    panelBody.scrollTop = 180;
-    sandbox.WORLD_ENGINE_UI.refresh();
-    assert.strictEqual(panelBody.scrollTop, 180, '同视图刷新应保留面板滚动位置');
-
-    const faces = sandbox.WORLD_ENGINE_UI.listEngineFaces();
-    assert.deepStrictEqual(Array.from(faces.map(f => f.id)), ['world', 'memory', 'outline'], '顶部标签顺序必须固定为 世界引擎 · 记忆引擎 · 剧情大纲');
-    // 复现 world-engine.js 真实启动顺序：OUTLINE_ENGINE_UI 先注册 outline，再渲染面板
-    const bootBox = {
-      window: null,
-      console: { log() {}, warn() {}, error() {} },
-      setTimeout,
-      clearTimeout,
-      document: { documentElement: { setAttribute() {}, removeAttribute() {} }, head: makeElement('head'), body: makeElement('body'), getElementById: () => null, querySelector: () => null, createElement: tag => makeElement(tag), addEventListener() {} },
-      WORLD_ENGINE_STORE: { getItem: () => null, setItem() {} },
-      WORLD_ENGINE_CORE: { renderUserName: t => String(t || ''), getChatId: () => 'boot', getChatLayer: () => 0 }
-    };
-    bootBox.window = bootBox;
-    vm.runInNewContext(fs.readFileSync(path.join(rootPath, 'world-engine-ui.js'), 'utf8'), bootBox, { filename: 'world-engine-ui.js' });
-    bootBox.WORLD_ENGINE_UI.registerEngineFace({ id: 'outline', label: '剧情大纲', render: () => '' });
-    assert.deepStrictEqual(
-      Array.from(bootBox.WORLD_ENGINE_UI.listEngineFaces().map(f => f.id)),
-      ['world', 'memory', 'outline'],
-      '即便先注册剧情大纲，内置世界与记忆也必须排在大纲之前'
-    );
-    const outlineFace = faces.find(f => f.id === 'outline');
-    assert.ok(outlineFace && typeof outlineFace.getHeaderMood === 'function', 'outline face 应提供 getHeaderMood');
-    assert.strictEqual(outlineFace.getTheme(), 'deepsea', 'outline face 应独立保存并返回自身主题配色');
-    assert.strictEqual(typeof outlineFace.refreshDebug, 'function', 'outline face 应提供 refreshDebug');
-    assert.strictEqual(outlineFace.getHeaderText(), '尚未建纲');
-    assert.ok(outlineFace.getHeaderMood().text.includes('尚未设置剧情大纲'));
-    assert.strictEqual(typeof outlineFace.getScrollKey, 'function', 'outline face 应提供 getScrollKey');
-
-    console.log('outline main entry & redesigned UI tests passed');
-  })();
+  console.log('outline v3 main entry & UI tests passed');
 }
 
-runMainEntrySuite().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
 });

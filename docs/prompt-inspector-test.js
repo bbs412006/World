@@ -103,7 +103,6 @@ async function main() {
     'world-engine-inject-inspector.js',
     'outline-engine-settings.js',
     'outline-engine-data.js',
-    'outline-engine-scheduler.js',
     'world-engine-ui.js',
     'outline-engine-ui.js'
   ]) {
@@ -144,11 +143,12 @@ async function main() {
   assert.ok(sharedHtml.includes('上次正文生成完整提示词全文') && sharedHtml.includes('角色设定原文 &lt;keep-raw&gt;'), 'UI 应展示转义后的完整正文提示词');
   assert.ok(sharedHtml.includes('data-we-prompt-copy') && sharedHtml.includes('data-we-prompt-export'));
 
-  // 4. 大纲面板「注入与调度」与「调试」页集成该查看器
+  // 4. 大纲面板「注入」与「设置 → 调试」页集成该查看器
   await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-schedule');
   const outlineSchedHtml = sandbox.OUTLINE_ENGINE_UI.render();
   assert.ok(outlineSchedHtml.includes('上次正文生成完整提示词') && outlineSchedHtml.includes('世界信息(第3条) → 记忆信息(第4条) → 剧情指导(第5条)'));
-  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('view-debug');
+  await sandbox.OUTLINE_ENGINE_UI._test.handleAction('toggle-settings');
+  sandbox.OUTLINE_ENGINE_UI._test.getDraft().settingsTab = 'debug';
   assert.ok(sandbox.OUTLINE_ENGINE_UI.render().includes('上次正文生成完整提示词全文'));
 
   // 5. 文本补全模式：即使超过 340 字也必须完整保留全文，且按真实字符顺序（例如 记忆 → 大纲 → 世界）排序

@@ -1,761 +1,838 @@
-// 剧情大纲运行时：未来安排只作指导；节点进度只接受可复核的原文证据。
+// outline-engine.js — 剧情大纲 v3 轻量化运行时（0ms 按楼层回退、无冷却漏检、带错回灌纠错重试、防剧透双轨注入）
 window.OUTLINE_ENGINE = (function() {
+  'use strict';
+
   const INJECTION_NAME = 'outline-engine-outline';
   const clean = value => String(value == null ? '' : value).trim();
-  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
-  const settings = () => window.OUTLINE_ENGINE_SETTINGS.getSettings(true);
-  const data = () => window.OUTLINE_ENGINE_DATA;
-  const timeline = () => window.MEMORY_ENGINE_TIMELINE;
-  const prompts = () => window.OUTLINE_ENGINE_PROMPT;
-  const history = () => window.STORY_ENGINE_HISTORY;
-  const scheduler = () => window.OUTLINE_ENGINE_SCHEDULER;
-  const chapterNodes = (state, chapter) => data().getChapterNodes ? data().getChapterNodes(state.plan, chapter?.id) : chapter?.nodes || [];
-  const findNode = (state, nodeId) => data().getNode ? data().getNode(state, nodeId) : state.plan.chapters.flatMap(item => item.nodes || []).find(item => item.id === nodeId);
-  let initialized = false, currentChatId = '', sessionToken = 0;
-  let request = null, autoTimer = null, generationInProgress = false, generationType = '';
-  let lastAutoAttemptKey = '';
-  let lastError = '', lastDebug = null;
-  const injectionDebug = { narrative: null, world: null };
-  let lastWorldSelection = null;
+  const cut = (value, max) => {
+    const text = clean(value);
+    return !max || text.length <= max ? text : text.slice(0, Math.max(0, max - 1)) + '…';
+  };
 
-  function context() { try { return SillyTavern.getContext(); } catch (_) { return null; } }
-  function chatId() { return clean(context()?.chatId || window.WORLD_ENGINE_CORE?.getChatId?.() || 'default'); }
-  function chat() { return context()?.chat || []; }
-  function currentLayer() { return Math.max(0, chat().length - 1); }
-  function setExternalStatus(text, isError) {
-    try {
-      if (typeof window.__WE_SetExternalStatus === 'function') window.__WE_SetExternalStatus(text, !!isError);
-    } catch (_) {}
+  let initialized = false;
+  let sessionToken = 0;
+  let activeTask = null;
+  let autoTimer = null;
+  let generationInProgress = false;
+  let generationType = '';
+  let lastProcessedKey = '';
+  let lastAutoAttemptKey = '';
+  let lastError = '';
+  let lastDebug = null;
+  let injectionDebug = { narrative: null, world: null };
+
+  const context = () => { try { return SillyTavern?.getContext?.() || null; } catch (_) { return null; } };
+  const settings = () => window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true) || {};
+  const data = () => window.OUTLINE_ENGINE_DATA;
+  const promptApi = () => window.OUTLINE_ENGINE_PROMPT;
+  const chatId = () => data()?.getChatId?.() || 'default';
+  const chat = () => {
+    const list = context()?.chat;
+    return Array.isArray(list) ? list : [];
+  };
+  const currentLayer = () => Math.max(0, chat().length - 1);
+
+  function hashText(text) {
+    let h = 2166136261;
+    for (const ch of String(text || '')) {
+      h ^= ch.codePointAt(0);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
   }
-  function refresh() {
-    try { window.OUTLINE_ENGINE_UI?.refresh?.(); } catch (error) { console.warn('[剧情大纲] 刷新界面失败', error); }
-    try { window.WORLD_ENGINE_UI?.refresh?.(true); } catch (_) { /* 界面故障不影响进度。 */ }
+
+  function isAiMessage(m) {
+    return Boolean(m && !m.is_user && !m.is_system && clean(m.mes));
+  }
+
+  function firstEligibleLayer(st) {
+    return st?.firstLayerIsAiOpening !== false ? 1 : 0;
+  }
+
+  function refreshUI() {
+    try { window.WORLD_ENGINE_UI?.refresh?.(); } catch (_) {}
     try { window.WORLD_ENGINE_UI?.updateBallControls?.(); } catch (_) {}
   }
-  function hash(value) { return timeline().hashText(typeof value === 'string' ? value : JSON.stringify(value)); }
-  function chapterOf(state) { return state.plan?.chapters?.find(item => item.id === state.currentChapterId) || null; }
-  function nodeStatus(state, id) { return data().getNodeStatus(state, id); }
-  function manualOverride(state, id) { return Object.prototype.hasOwnProperty.call(state.manualOverrides || {}, id); }
-  function isFinished(state) {
-    const chapters = state.plan?.chapters || [], chapter = chapterOf(state);
-    const required = chapter?.exitNodeIds || chapterNodes(state, chapter).filter(node => node.required !== false).map(node => node.id);
-    const openCrossChapter = (state.plan.nodes || []).some(node => state.plan.tracks?.find(track => track.id === node.trackId)?.kind !== 'main' && !['completed', 'skipped'].includes(nodeStatus(state, node.id)));
-    const openClues = (state.clues || []).some(clue => clue.validity === 'valid' && clue.available && clue.status !== 'known');
-    return chapters[chapters.length - 1]?.id === chapter?.id && required.length > 0 && !openCrossChapter && !openClues &&
-      required.every(nodeId => ['completed', 'skipped'].includes(nodeStatus(state, nodeId)));
+
+  function setStatusText(text, isError) {
+    try { window.__WE_SetExternalStatus?.(text, Boolean(isError)); } catch (_) {}
   }
-  function basisDigest(state) {
-    return hash({ revision: state.revision, plan: state.plan, chapter: state.currentChapterId,
-      manual: state.manualOverrides || {}, events: (state.progressEvents || []).filter(item => item.validity === 'valid') });
-  }
+
   function abort() {
-    sessionToken++;
-    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
-    const previous = request;
-    request = null;
-    if (previous) previous.controller.abort();
-  }
-  function ensureChat() {
-    const id = chatId();
-    if (id !== currentChatId) {
-      abort(); currentChatId = id; generationInProgress = false; generationType = ''; lastAutoAttemptKey = '';
+    sessionToken += 1;
+    clearTimeout(autoTimer);
+    autoTimer = null;
+    if (activeTask?.controller) {
+      try { activeTask.controller.abort(); } catch (_) {}
     }
-    return id;
+    activeTask = null;
+    refreshUI();
   }
-  function assistantRefs() {
-    const ignoreOpening = settings().firstLayerIsAiOpening !== false;
-    return timeline().captureRange(0, Math.max(0, chat().length - 1)).filter(ref => {
-      const message = chat()[ref.layer];
-      return message && !message.is_user && clean(message.mes) && !(ignoreOpening && ref.layer === 0);
-    });
-  }
-  function activate(state) {
-    if (state.tracking?.anchorLayer != null) {
-      history()?.ensureBaseline?.();
-      try { void timeline()?.flushSave?.(); } catch (_) {}
-      return data().loadState();
-    }
-    const refs = assistantRefs();
-    state.tracking = { ...(state.tracking || {}), anchorLayer: currentLayer(), checkedLayer: currentLayer(),
-      anchorMessageId: refs[refs.length - 1]?.messageId || '', seenAssistantIds: refs.map(ref => ref.messageId),
-      roundsSinceCheck: 0, lastDigest: '', pendingRecheck: false };
-    data().saveState(state);
-    history()?.ensureBaseline?.();
-    try { void timeline()?.flushSave?.(); } catch (_) {}
-    return data().loadState();
-  }
+
   function clearInjection() {
-    try {
-      const ctx = context();
-      if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, '', 1, 1);
-      else if (typeof ctx?.unregisterInjection === 'function') ctx.unregisterInjection(INJECTION_NAME);
-      else if (Array.isArray(ctx?.extensionPrompts)) ctx.extensionPrompts = ctx.extensionPrompts.filter(item => item.name !== INJECTION_NAME);
-    } catch (error) { console.warn('[剧情大纲] 清除注入失败（已隔离）', error); }
-  }
-  function registerInjection(content) {
     const ctx = context();
-    if (typeof ctx?.setExtensionPrompt === 'function') ctx.setExtensionPrompt(INJECTION_NAME, content, 1, 1);
-    else if (typeof ctx?.registerInjection === 'function') {
-      ctx.unregisterInjection?.(INJECTION_NAME);
-      ctx.registerInjection(INJECTION_NAME, content, { position: 1, depth: 1, role: 'system' });
+    const st = settings();
+    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 1;
+    const depth = Number.isFinite(Number(st.injectDepth)) ? Math.max(0, Math.min(20, parseInt(st.injectDepth, 10))) : 1;
+    if (typeof ctx?.setExtensionPrompt === 'function') {
+      ctx.setExtensionPrompt(INJECTION_NAME, '', pos, depth);
+    } else if (typeof ctx?.unregisterInjection === 'function') {
+      ctx.unregisterInjection(INJECTION_NAME);
     } else if (Array.isArray(ctx?.extensionPrompts)) {
-      ctx.extensionPrompts = ctx.extensionPrompts.filter(item => item.name !== INJECTION_NAME);
-      ctx.extensionPrompts.push({ name: INJECTION_NAME, content, role: 'system', position: 1, depth: 1 });
+      ctx.extensionPrompts = ctx.extensionPrompts.filter(item => item?.name !== INJECTION_NAME);
     }
   }
 
-  function validateSavedSources(record) {
-    if (record.evidence?.length && record.evidence.every(proof => proof.kind === 'world_fact')) return record.evidence.every(proof => history()?.validateWorldEvidence?.(proof));
-    const refs = Array.isArray(record.sourceRefs) ? record.sourceRefs : [];
-    // 记忆时间链允许封存 foreign/synthetic 历史；大纲自动判断不能以它们替代本聊天原文。
-    if (!refs.length || refs.some(ref => !ref || ref.synthetic === true || clean(ref.chatId) !== chatId() || !clean(ref.messageId) || !clean(ref.hash))) return false;
-    const audit = timeline().auditRefs(refs);
-    if (!audit.valid || audit.synthetic || audit.inherited || timeline().digestRefs(refs) !== clean(record.sourceDigest)) return false;
-    const current = new Map(audit.refs.map(ref => [ref.messageId, ref]));
-    if (!Array.isArray(record.evidence) || !record.evidence.length) return false;
-    const matchFn = prompts()?.matchQuote || ((src, q) => String(src || '').includes(q));
-    return record.evidence.every(proof => {
-      const ref = current.get(clean(proof?.messageId)), quote = clean(proof?.quote);
-      return ref && quote && clean(proof.hash) === clean(ref.hash) && matchFn(String(chat()[ref.layer]?.mes || ''), quote);
+  // ==================== 节点选优（无冷却漏检、透明排序） ====================
+
+  const KIND_ORDER = { main: 0, side: 1, hidden: 2 };
+
+  function getUnlockedOpenNodes(state) {
+    const d = data();
+    if (!d || !state?.plan?.nodes?.length) return [];
+    const trackMap = new Map((state.plan.tracks || []).map(t => [t.id, t]));
+    return state.plan.nodes
+      .map((node, idx) => ({
+        node,
+        idx,
+        kind: trackMap.get(node.trackId)?.kind || 'main',
+        status: d.getNodeStatus(state, node.id)
+      }))
+      .filter(item => !d.isNodeClosed(state, item.node.id) && d.isNodeUnlocked(state, item.node.id))
+      .sort((a, b) => {
+        const aAct = a.status === 'active' ? 0 : 1;
+        const bAct = b.status === 'active' ? 0 : 1;
+        if (aAct !== bAct) return aAct - bAct;
+        const aKind = KIND_ORDER[a.kind] ?? 1;
+        const bKind = KIND_ORDER[b.kind] ?? 1;
+        if (aKind !== bKind) return aKind - bKind;
+        if (a.node.required !== b.node.required) return a.node.required ? -1 : 1;
+        return a.idx - b.idx;
+      })
+      .map(item => item.node);
+  }
+
+  function getNarrativeNodes(state, limit) {
+    const trackMap = new Map((state?.plan?.tracks || []).map(t => [t.id, t]));
+    const unlocked = getUnlockedOpenNodes(state);
+    const visible = unlocked.filter(n => {
+      const kind = trackMap.get(n.trackId)?.kind || 'main';
+      if (kind !== 'hidden') return true;
+      return n.revealPublic === true && Boolean(clean(n.publicHint));
     });
+    return visible.slice(0, Math.max(1, parseInt(limit, 10) || 4));
   }
 
-  // 全部是本地审计：生成前不启动 API，也不触碰世界事实或人物记忆。
-  function auditHistory() {
-    ensureChat();
-    let state = data().loadState(), changed = false;
-    const events = state.progressEvents || [];
-    let firstInvalid = -1;
-    for (let i = 0; i < events.length; i++) {
-      const event = events[i];
-      if (event.validity !== 'valid' || Number(event.planRevision) !== Number(state.revision)) continue;
-      if (!['active', 'completed', 'blocked'].includes(event.status) || !validateSavedSources(event)) { firstInvalid = i; break; }
-    }
-    if (firstInvalid !== -1) {
-      const recovered = history()?.reconcile?.();
-      if (recovered?.changed) return { state: data().loadState(), changed: true };
-      const first = events[firstInvalid];
-      for (let i = firstInvalid; i < events.length; i++) {
-        if (events[i].validity === 'valid') { events[i].validity = 'stale'; events[i].staleReason = 'source_changed'; }
-      }
-      if (state.plan.chapters.some(chapter => chapter.id === first.beforeChapterId)) state.currentChapterId = first.beforeChapterId;
-      state.tracking = { ...(state.tracking || {}), pendingRecheck: true, lastDigest: '', roundsSinceCheck: 0,
-        checkedLayer: Math.max(-1, Number(first.layer) - 1),
-        recheckStartLayer: Math.min(...(first.sourceRefs || []).map(ref => Number(ref.layer) || 0), Number(first.layer) || 0) };
-      state = data().advanceChapter(state);
-      changed = true;
-    }
-    for (const proposal of state.proposals || []) {
-      if (proposal.status !== 'pending') continue;
-      if (Number(proposal.planRevision) !== Number(state.revision) || !validateSavedSources(proposal) ||
-          (firstInvalid !== -1 && Number(proposal.createdAt) >= Number(events[firstInvalid].createdAt))) {
-        proposal.status = 'stale'; changed = true;
-      }
-    }
-    const advanced = data().advanceChapter(state);
-    if (advanced.currentChapterId !== state.currentChapterId) { state = advanced; changed = true; }
-    if (changed) { abort(); data().saveState(state); }
-    return { state, changed };
+  function getWorldNodes(state, limit) {
+    const trackMap = new Map((state?.plan?.tracks || []).map(t => [t.id, t]));
+    const unlocked = getUnlockedOpenNodes(state);
+    // 世界后台优先参考暗线与主线节点
+    const sorted = [...unlocked].sort((a, b) => {
+      const ka = trackMap.get(a.trackId)?.kind || 'main';
+      const kb = trackMap.get(b.trackId)?.kind || 'main';
+      const rank = k => (k === 'hidden' ? 0 : k === 'main' ? 1 : 2);
+      return rank(ka) - rank(kb);
+    });
+    return sorted.slice(0, Math.max(1, parseInt(limit, 10) || 6));
   }
 
-  function allowWorldLink() {
-    if (settings().useWorldReference === false) return false;
-    try {
-      const ws = window.WORLD_ENGINE_API?.getSettings?.();
-      if (ws && (ws.engineEnabled === false || ws.syncToOutlineEnabled === false)) return false;
-    } catch (_) {}
-    return true;
+  // ==================== 防剧透双轨注入 ====================
+
+  function buildNarrativeGuidance(stateOverride) {
+    const st = settings();
+    if (st.engineEnabled !== true || st.injectIntoPrompt === false) {
+      injectionDebug.narrative = null;
+      return '';
+    }
+    const d = data();
+    const state = stateOverride || d?.loadState?.();
+    const chapters = state?.plan?.chapters || [];
+    if (!chapters.length || d.isOutlineFinished(state)) {
+      injectionDebug.narrative = null;
+      return '';
+    }
+    const curChapter = chapters.find(c => c.id === state.currentChapterId) || chapters[0];
+    const trackMap = new Map((state.plan.tracks || []).map(t => [t.id, t]));
+    const nodes = getNarrativeNodes(state, st.narrativeLimit || 4);
+    const budget = Math.max(200, parseInt(st.injectMaxChars, 10) || 2000);
+
+    const header = '【剧情指导】\n以下为当前阶段的柔性叙事方向，仅供自然铺陈参考；请尊重角色当下选择，不得强行推进或提前剧透未揭示内容。';
+    const parts = [header];
+    let used = header.length;
+
+    const pushLine = line => {
+      const text = clean(line);
+      if (!text) return false;
+      if (used + text.length + 1 > budget) {
+        const remain = budget - used - 3;
+        if (remain < 24) return false;
+        const trimmed = text.slice(0, remain) + '…';
+        parts.push(trimmed);
+        used += trimmed.length + 1;
+        return false;
+      }
+      parts.push(text);
+      used += text.length + 1;
+      return true;
+    };
+
+    const chIdx = chapters.findIndex(c => c.id === curChapter.id);
+    pushLine(`当前章节：第 ${chIdx + 1}/${chapters.length} 章「${curChapter.title}」${curChapter.goal ? `｜阶段目标：${curChapter.goal}` : ''}`);
+    if (clean(state.plan.publicConstraints)) pushLine(`叙事原则：${state.plan.publicConstraints}`);
+    if (nodes.length) {
+      pushLine('当前可自然铺陈的剧情方向：');
+      for (const n of nodes) {
+        const kind = trackMap.get(n.trackId)?.kind || 'main';
+        const status = d.getNodeStatus(state, n.id);
+        const tag = kind === 'hidden'
+          ? '表面线索'
+          : (status === 'active' ? '进行中' : (kind === 'side' ? '支线' : '主线'));
+        // 暗线仅注入公开表面线索，绝不暴露内部标题或幕后备注
+        const line = kind === 'hidden'
+          ? `- [${tag}] ${n.publicHint}`
+          : `- [${tag}] ${n.title}${n.publicHint ? `：${n.publicHint}` : ''}`;
+        if (!pushLine(line)) break;
+      }
+    }
+    if (clean(state.plan.publicSynopsis)) {
+      pushLine(`公开脉络：${state.plan.publicSynopsis}`);
+    }
+
+    const content = parts.length > 1 ? parts.join('\n') : '';
+    injectionDebug.narrative = {
+      at: Date.now(),
+      chars: content.length,
+      budget,
+      chapterId: curChapter.id,
+      chapterTitle: curChapter.title,
+      nodeIds: nodes.map(n => n.id),
+      content
+    };
+    return content;
   }
-  function allowMemoryLink() {
-    if (settings().useMemoryReference === false) return false;
-    try {
-      const ms = window.MEMORY_ENGINE_SETTINGS?.getSettings?.();
-      if (ms && (ms.engineEnabled === false || ms.injectIntoOutlineEngine === false)) return false;
-    } catch (_) {}
-    return true;
+
+  function applyInjection() {
+    const st = settings();
+    const content = buildNarrativeGuidance();
+    const ctx = context();
+    if (!content) {
+      clearInjection();
+      return '';
+    }
+    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 1;
+    const depth = Number.isFinite(Number(st.injectDepth)) ? Math.max(0, Math.min(20, parseInt(st.injectDepth, 10))) : 1;
+    if (typeof ctx?.setExtensionPrompt === 'function') {
+      ctx.setExtensionPrompt(INJECTION_NAME, content, pos, depth);
+    } else if (typeof ctx?.registerInjection === 'function') {
+      ctx.unregisterInjection?.(INJECTION_NAME);
+      ctx.registerInjection(INJECTION_NAME, content, { position: pos, depth, role: 'system' });
+    } else if (Array.isArray(ctx?.extensionPrompts)) {
+      ctx.extensionPrompts = ctx.extensionPrompts.filter(item => item?.name !== INJECTION_NAME);
+      ctx.extensionPrompts.push({ name: INJECTION_NAME, content, role: 'system', position: pos, depth });
+    }
+    try { window.WORLD_ENGINE_INJECT_INSPECTOR?.record?.('outline', content, { budget: st.injectMaxChars }); } catch (_) {}
+    return content;
   }
-  function guidance(target, worldState) {
-    ensureChat();
-    injectionDebug[target] = { chars: 0 };
-    const config = settings();
-    if (config.engineEnabled !== true || (target === 'narrative' ? config.injectIntoPrompt === false : config.injectIntoWorldEngine === false)) return '';
-    if (target === 'world') {
+
+  function buildWorldGuidance(_worldState) {
+    const st = settings();
+    if (st.engineEnabled !== true || st.injectIntoWorldEngine === false) {
+      injectionDebug.world = null;
+      return '';
+    }
+    try {
+      if (window.WORLD_ENGINE_API?.getSettings?.()?.acceptOutlineGuidance === false) {
+        injectionDebug.world = null;
+        return '';
+      }
+    } catch (_) {}
+
+    const d = data();
+    const state = d?.loadState?.();
+    const chapters = state?.plan?.chapters || [];
+    if (!chapters.length) {
+      injectionDebug.world = null;
+      return '';
+    }
+    const curChapter = chapters.find(c => c.id === state.currentChapterId) || chapters[0];
+    const trackMap = new Map((state.plan.tracks || []).map(t => [t.id, t]));
+    const nodes = getWorldNodes(state, 6);
+    const budget = Math.max(300, parseInt(st.worldInjectMaxChars, 10) || 2000);
+
+    const header = '【剧情指导：作者后台专用】\n以下为柔性剧情方向与幕后备忘，仅供世界推演自然铺垫背景势态与暗线伏笔；世界仍须按自身因果与知情边界独立演化，严禁代演主角行动。';
+    const parts = [header];
+    let used = header.length;
+
+    const pushLine = line => {
+      const text = clean(line);
+      if (!text) return false;
+      if (used + text.length + 1 > budget) {
+        const remain = budget - used - 3;
+        if (remain < 24) return false;
+        parts.push(text.slice(0, remain) + '…');
+        used += remain + 4;
+        return false;
+      }
+      parts.push(text);
+      used += text.length + 1;
+      return true;
+    };
+
+    pushLine(`当前章节：${curChapter.title}${curChapter.goal ? `（${curChapter.goal}）` : ''}`);
+    if (clean(state.plan.authorNotes)) pushLine(`幕后总备忘：${cut(state.plan.authorNotes, 450)}`);
+    if (nodes.length) {
+      pushLine('当前活跃/暗线节点：');
+      for (const n of nodes) {
+        const kind = trackMap.get(n.trackId)?.kind || 'main';
+        const kindLabel = kind === 'hidden' ? '暗线' : kind === 'side' ? '支线' : '主线';
+        const status = d.getNodeStatus(state, n.id);
+        const detail = [
+          n.publicHint ? `公开方向：${cut(n.publicHint, 120)}` : '',
+          n.secretNotes ? `幕后真相：${cut(n.secretNotes, 180)}` : '',
+          n.completionCriteria ? `达成条件：${cut(n.completionCriteria, 100)}` : ''
+        ].filter(Boolean).join('｜');
+        if (!pushLine(`- [${kindLabel}·${status}] ${n.title}${detail ? `（${detail}）` : ''}`)) break;
+      }
+    }
+
+    const content = parts.length > 1 ? parts.join('\n') : '';
+    injectionDebug.world = {
+      at: Date.now(),
+      chars: content.length,
+      budget,
+      chapterId: curChapter.id,
+      nodeIds: nodes.map(n => n.id),
+      content
+    };
+    return content;
+  }
+
+  // ==================== 0ms 按楼层号本地回退 ====================
+
+  function syncRollbackToLayer(maxValidLayer) {
+    const d = data();
+    if (!d) return false;
+    const state = d.loadState();
+    const res = d.rollbackAfterLayer(state, maxValidLayer);
+    const trackingChanged = state.tracking.checkedLayer !== res.state.tracking.checkedLayer
+      || state.tracking.anchorLayer !== res.state.tracking.anchorLayer;
+    if (res.removedCount > 0 || res.chapterChanged || trackingChanged) {
+      d.saveState(res.state);
+      return true;
+    }
+    return false;
+  }
+
+  async function prepareHistoryForGeneration(options = {}) {
+    const type = clean(options?.type || generationType);
+    const isReroll = type === 'swipe' || type === 'regenerate';
+    const maxLayer = isReroll ? Math.max(-1, currentLayer() - 1) : currentLayer();
+    syncRollbackToLayer(maxLayer);
+    applyInjection();
+    return { ok: true, maxLayer };
+  }
+
+  // ==================== API 调用 + 带错回灌纠错重试 ====================
+
+  function buildApiConfig(st) {
+    const url = clean(st.apiUrl);
+    const model = clean(st.model);
+    if (!url || !model) {
+      throw new Error('请先在「剧情大纲 → 设置 → 常用」中配置大纲 API 地址与模型');
+    }
+    return {
+      apiUrl: url,
+      apiKey: clean(st.apiKey),
+      model,
+      connectionMode: st.connectionMode === 'proxy' ? 'proxy' : 'direct',
+      temperature: Number.isFinite(Number(st.temperature)) ? Number(st.temperature) : 0.2,
+      maxTokens: Math.max(1, parseInt(st.maxTokens, 10) || 8192),
+      apiTimeoutMs: Math.max(0, parseInt(st.apiTimeoutMs, 10) || 120000),
+      stream: st.stream === true,
+      streamIdleTimeoutMs: Math.max(0, parseInt(st.streamIdleTimeoutMs, 10) || 90000),
+      jsonMode: st.jsonMode === true,
+      topP: st.topP ?? null,
+      reasoningEffort: clean(st.reasoningEffort)
+    };
+  }
+
+  async function invokeWithFormatRetry({ label, basePrompt, parseFn, controller, token }) {
+    const api = window.WORLD_ENGINE_API;
+    if (!api?.callApi) throw new Error('API 模块未就绪');
+    const st = settings();
+    const cfg = buildApiConfig(st);
+    const maxFormatRetries = Math.max(0, Math.min(5, parseInt(st.formatMaxRetries ?? 2, 10) || 0));
+    const networkRetries = Math.max(0, parseInt(st.apiAutoRetries, 10) || 0);
+    const retryHistory = [];
+    let lastRaw = '';
+    let lastParsed = null;
+
+    for (let attempt = 0; attempt <= maxFormatRetries; attempt++) {
+      if (controller.signal.aborted || token !== sessionToken) {
+        const err = new Error('已取消');
+        err.name = 'AbortError';
+        throw err;
+      }
+      const prompt = retryHistory.length
+        ? promptApi().buildRetryCorrectionPrompt(basePrompt, retryHistory)
+        : basePrompt;
+      const purpose = attempt > 0 ? `${label} · 纠错重试${attempt}` : label;
+
+      const callOnce = async () => {
+        let logId = null;
+        api.setNextRequestMeta?.({
+          module: 'outline',
+          purpose,
+          attempt: attempt + 1,
+          maxAttempts: maxFormatRetries + 1,
+          onLogId: id => { logId = id; }
+        });
+        const raw = await api.callApi(prompt, cfg.maxTokens, cfg.temperature, controller.signal, cfg);
+        return { raw, logId };
+      };
+
+      const { raw, logId } = typeof api.executeWithRetry === 'function'
+        ? await api.executeWithRetry(callOnce, { retries: networkRetries, signal: controller.signal })
+        : await callOnce();
+
+      lastRaw = raw;
+      const parsed = parseFn(raw);
+      lastParsed = parsed;
+
+      lastDebug = {
+        at: Date.now(),
+        label,
+        attempt: attempt + 1,
+        prompt,
+        rawResult: raw,
+        ok: parsed.ok,
+        errors: parsed.errors || []
+      };
+
+      if (parsed.ok) {
+        if (logId) api.updateRequestLog?.(logId, { phase: '完成' });
+        return { ...parsed, raw, attempts: attempt + 1 };
+      }
+
+      if (logId) {
+        api.updateRequestLog?.(logId, {
+          status: 'error',
+          phase: '解析失败',
+          error: (parsed.errors || []).join('；')
+        });
+      }
+      retryHistory.push({ response: raw, errors: parsed.errors });
+    }
+
+    throw new Error(`${label}解析失败（已纠错重试 ${maxFormatRetries} 次）：${(lastParsed?.errors || ['返回格式无效']).join('；')}`);
+  }
+
+  // ==================== 文本整理建纲 & 剧情进度核对 ====================
+
+  async function organizeText(rawText) {
+    const text = clean(rawText);
+    if (!text) throw new Error('请输入或导入待整理的大纲文本');
+    if (activeTask) throw new Error('当前已有大纲任务运行中，请稍候或先停止');
+
+    const originChat = chatId();
+    const token = ++sessionToken;
+    const controller = new AbortController();
+    activeTask = { label: '整理剧情大纲', controller, token, chatId: originChat };
+    lastError = '';
+    setStatusText('正在整理剧情大纲…', false);
+    refreshUI();
+
+    try {
+      const roster = (() => {
+        try { return window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.() || ''; }
+        catch (_) { return ''; }
+      })();
+      const basePrompt = promptApi().buildOrganizePrompt({ text, roster });
+      const res = await invokeWithFormatRetry({
+        label: '整理大纲',
+        basePrompt,
+        parseFn: raw => promptApi().parseOrganizeResponse(raw),
+        controller,
+        token
+      });
+      if (token !== sessionToken || chatId() !== originChat) {
+        return { ok: false, cancelled: true };
+      }
+      setStatusText('大纲整理完成（待预览确认）', false);
+      return { ok: true, plan: res.plan, raw: res.raw, attempts: res.attempts };
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        lastError = error?.message || String(error);
+        setStatusText(`整理大纲失败：${lastError}`, true);
+      }
+      throw error;
+    } finally {
+      if (activeTask?.token === token) activeTask = null;
+      refreshUI();
+    }
+  }
+
+  function collectDialogueWindow(state, st) {
+    const all = chat();
+    const minLayer = firstEligibleLayer(st);
+    const aiIndices = [];
+    for (let i = minLayer; i < all.length; i++) {
+      if (isAiMessage(all[i])) aiIndices.push(i);
+    }
+    if (!aiIndices.length) return { messages: [], endLayer: -1, digest: '' };
+
+    const checked = state.tracking?.checkedLayer;
+    const maxAi = Math.max(parseInt(st.checkEveryX, 10) || 3, 8);
+    let targetAi = checked !== null && checked !== undefined
+      ? aiIndices.filter(i => i > checked)
+      : [];
+    if (!targetAi.length) {
+      targetAi = aiIndices.slice(-Math.max(1, parseInt(st.checkEveryX, 10) || 3));
+    } else if (targetAi.length > maxAi) {
+      targetAi = targetAi.slice(-maxAi);
+    }
+
+    const startAi = targetAi[0];
+    const endLayer = targetAi[targetAi.length - 1];
+    const startLayer = startAi > 0 && all[startAi - 1]?.is_user ? startAi - 1 : startAi;
+    const messages = [];
+    for (let i = startLayer; i <= endLayer; i++) {
+      const m = all[i];
+      if (!m || m.is_system || !clean(m.mes)) continue;
+      const filtered = window.WORLD_ENGINE_CORE?.filterDialogue ? window.WORLD_ENGINE_CORE.filterDialogue(m.mes) : m.mes;
+      if (!clean(filtered)) continue;
+      messages.push({
+        layer: i,
+        is_user: Boolean(m.is_user),
+        name: clean(m.name) || (m.is_user ? '玩家' : 'AI'),
+        mes: clean(filtered)
+      });
+    }
+    const digest = hashText(messages.map(m => `${m.layer}:${m.is_user ? 'u' : 'a'}:${m.mes}`).join('\n'));
+    return { messages, endLayer, digest };
+  }
+
+  function buildReferenceContext(state, st) {
+    try {
+      if (window.STORY_ENGINE_BRIDGE?.buildOutlineReferenceContext) {
+        return window.STORY_ENGINE_BRIDGE.buildOutlineReferenceContext(state, {
+          useWorld: st.useWorldReference !== false,
+          useMemory: st.useMemoryReference !== false
+        }) || '';
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  async function runCheck(manual = false) {
+    try { await window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.whenReady?.(); } catch (_) {}
+    const st = settings();
+    if (st.engineEnabled !== true) return { skipped: true, reason: 'disabled' };
+    if (activeTask) return { skipped: true, reason: 'busy' };
+    if (generationInProgress) return { skipped: true, reason: 'generating' };
+
+    const d = data();
+    const originChat = chatId();
+    const state = d.loadState(originChat);
+    if (!state.plan.chapters.length || !state.plan.nodes.length) {
+      return { skipped: true, reason: 'empty-plan' };
+    }
+    if (d.isOutlineFinished(state)) {
+      return { skipped: true, reason: 'outline-complete' };
+    }
+
+    const unlockedNodes = getUnlockedOpenNodes(state).slice(0, 24);
+    if (!unlockedNodes.length) {
+      return { skipped: true, reason: 'no-unlocked-nodes' };
+    }
+
+    const win = collectDialogueWindow(state, st);
+    if (!win.messages.length || win.endLayer < 0) {
+      return { skipped: true, reason: 'no-messages' };
+    }
+    const digestKey = `${state.revision}:${state.currentChapterId}:${win.endLayer}:${win.digest}`;
+    if (!manual && state.tracking.lastDigest === digestKey) {
+      return { skipped: true, reason: 'unchanged' };
+    }
+
+    const token = ++sessionToken;
+    const controller = new AbortController();
+    const startRevision = state.revision;
+    activeTask = { label: '核对剧情进度', controller, token, chatId: originChat };
+    lastError = '';
+    setStatusText('正在核对剧情进度…', false);
+    refreshUI();
+
+    try {
+      const referenceContext = buildReferenceContext(state, st);
+      const basePrompt = promptApi().buildCheckPrompt({
+        state,
+        unlockedNodes,
+        messages: win.messages,
+        referenceContext
+      });
+      const validIds = new Set(unlockedNodes.map(n => n.id));
+      const res = await invokeWithFormatRetry({
+        label: '核对剧情进度',
+        basePrompt,
+        parseFn: raw => promptApi().parseCheckResponse(raw, validIds),
+        controller,
+        token
+      });
+
+      if (token !== sessionToken || chatId() !== originChat || generationInProgress) {
+        return { skipped: true, reason: 'stale-result' };
+      }
+
+      let latest = d.loadState(originChat);
+      if (latest.revision !== startRevision) {
+        return { skipped: true, reason: 'plan-changed' };
+      }
+
+      const trackMap = new Map((latest.plan.tracks || []).map(t => [t.id, t]));
+      const applied = [];
+      const now = Date.now();
+      for (const upd of res.data.nodeUpdates || []) {
+        const node = d.getNode(latest, upd.nodeId);
+        if (!node) continue;
+        if (latest.manualOverrides[node.id]) continue;
+        if (d.isNodeClosed(latest, node.id)) continue;
+        if (upd.status === 'completed' && !clean(node.completionCriteria)) continue;
+
+        const prevStatus = d.getNodeStatus(latest, node.id);
+        const isHidden = trackMap.get(node.trackId)?.kind === 'hidden';
+        let revealedNow = false;
+        if (isHidden && upd.revealPublic === true && !node.revealPublic) {
+          node.revealPublic = true;
+          revealedNow = true;
+        }
+        if (upd.status !== prevStatus || revealedNow) {
+          if (upd.status !== prevStatus) {
+            latest.progress[node.id] = {
+              status: upd.status,
+              layer: win.endLayer,
+              reason: upd.reason || '',
+              updatedAt: now
+            };
+          }
+          applied.push({ nodeId: node.id, title: node.title, status: upd.status, revealedNow });
+        }
+      }
+
+      const prevChapter = latest.currentChapterId;
+      latest = d.advanceChapter(latest);
+      latest.tracking = {
+        ...latest.tracking,
+        anchorLayer: latest.tracking.anchorLayer ?? win.endLayer,
+        checkedLayer: win.endLayer,
+        roundsSinceCheck: 0,
+        lastDigest: digestKey
+      };
+      d.saveState(latest, originChat);
+      applyInjection();
+
+      const chapterAdvanced = latest.currentChapterId !== prevChapter;
+      const summary = applied.length || chapterAdvanced
+        ? `剧情进度已更新（${applied.length} 项变动${chapterAdvanced ? '，已推进至下一章' : ''}）`
+        : '剧情核对完成（暂无新节点变动）';
+      setStatusText(summary, false);
+      return { ok: true, applied, chapterAdvanced, note: res.data.note || '' };
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        lastError = error?.message || String(error);
+        setStatusText(`剧情核对失败：${lastError}`, true);
+      }
+      if (manual) throw error;
+      return { ok: false, error: lastError };
+    } finally {
+      if (activeTask?.token === token) activeTask = null;
+      refreshUI();
+    }
+  }
+
+  function checkNow() {
+    return runCheck(true);
+  }
+
+  function clearAllOutlineData(options = {}) {
+    if (activeTask) abort();
+    const d = data();
+    const prev = d.loadState();
+    const hadData = (prev.plan.chapters?.length || 0) > 0 || (prev.plan.nodes?.length || 0) > 0;
+    if (options.backup !== false && hadData) {
       try {
-        if (window.WORLD_ENGINE_API?.getSettings?.()?.acceptOutlineGuidance === false) return '';
+        window.WORLD_ENGINE_CHATCACHE?.forScope?.('outline')?.createSnapshot?.(
+          clean(options.backupName) || `清空大纲前自动备份 ${new Date().toLocaleString()}`
+        );
       } catch (_) {}
     }
-    const state = activate(auditHistory().state), chapter = chapterOf(state);
-    if (!chapter || (target !== 'world' && isFinished(state)) || history()?.getStatus?.().blocked) return '';
-    const selected = getSchedule(target === 'world' ? 'world' : 'narrative', { state, worldState });
-    const nodes = selected.selected || [];
-    const clues = (state.clues || []).filter(clue => clue.validity === 'valid' && clue.available && clue.publicHint);
-    if (!nodes.length && !clues.length && (target !== 'world' || !(state.privateFacts || []).length)) return '';
-    if (target === 'world') {
-      lastWorldSelection = { chatId: chatId(), revision: state.revision, nodeIds: [...selected.nodeIds], scheduler: clone(selected.scheduler) };
-      const backend = `【剧情指导：作者后台专用】\n以下是柔性未来意图，不是事实。世界继续按既有能力、时间、资源与知情边界独立演化；不得代演主角行动。只为已就绪节点提供合理机会，不预定结果。\n` +
-        JSON.stringify({ title: state.plan.title, synopsis: state.plan.synopsis, constraints: state.plan.constraints,
-          nodes: nodes.map(node => ({ ...node, currentStatus: nodeStatus(state, node.id) })),
-          privateFacts: (state.privateFacts || []).filter(fact => fact.validity === 'valid'), clues: state.clues || [], knowledge: state.knowledge || [],
-          pendingDisclosures: (state.plan.nodes || []).filter(node => node.visibility === 'private' && node.disclosure?.condition &&
-            (state.privateFacts || []).some(fact => fact.nodeId === node.id && fact.validity === 'valid') &&
-            !(state.clues || []).some(clue => clue.nodeId === node.id && clue.validity === 'valid') &&
-            scheduler()?.evaluateConditions(node.disclosure.condition, { state, worldState })?.eligible === true)
-            .map(node => ({ nodeId: node.id, trackId: node.trackId, publicHint: node.publicHint, clueText: node.disclosure.clueText,
-              instruction: '作者揭露门槛已经满足；仅在现实条件允许时形成可被发现的痕迹，不宣布任何角色已接触或知情。' })) });
-      injectionDebug.world = { chars: backend.length, budget: Number(config.injectMaxChars) || 2500, overBudget: backend.length > Number(config.injectMaxChars), chapterId: chapter.id, revision: state.revision, selectedNodeIds: selected.nodeIds };
-      return backend;
-    }
-    const limit = Math.max(200, Number(config.injectMaxChars) || 2500);
-    const head = `【剧情指导】\n这是柔性未来安排，不是已经发生的世界事实或人物知情。尊重既有事实、能力及知情边界；保留主角选择，不预定成败，缺条件先铺垫。\n`;
-    const purpose = target === 'world'
-      ? '世界继续独立演化；大纲目标不得冒充事实、世界摘要或人物记忆。\n'
-      : '自然呈现机会和线索，不复述大纲、不提前揭晓幕后安排。\n';
-    const nodeBlock = node => {
-      if (node.trackId === 'legacy-main') {
-        return `- ${clean(node.title)}：${clean(node.intent)}${node.completionCriteria ? `；达成条件：${clean(node.completionCriteria)}` : '；条件未指定，仅用户可确认完成'}${node.notes ? `；备注：${clean(node.notes)}` : ''}\n`;
-      }
-      const title = clean(node.title), hint = clean(node.publicHint);
-      if (title && hint && title !== hint && !hint.includes(title)) return `- ${title}：${hint}\n`;
-      return `- ${hint || title}\n`;
-    };
-    // 预算约束只裁可选内容；核心作者约束和当前节点必须完整，不能在句中被截掉。
-    const publicNodes = nodes.filter(node => node.visibility !== 'private');
-    const legacyPublic = publicNodes.length > 0 && publicNodes.every(node => node.trackId === 'legacy-main');
-    let result = head + purpose + (publicNodes.length && clean(chapter.title) ? `当前章节：${clean(chapter.title)}\n` : '');
-    if (state.plan.publicConstraints) result += `公开约束：${clean(state.plan.publicConstraints)}\n`;
-    if (publicNodes.length) result += '当前节点：\n' + nodeBlock(publicNodes[0]);
-    for (const clue of clues) result += `可被实际发现的线索[${clue.id}]：${clue.publicHint}（仅可发现，不代表任何角色已接触或知道其含义）\n`;
-    for (const extra of [publicNodes.length && chapter.goal ? `章节目标：${clean(chapter.goal)}\n` : '',
-      state.plan.publicSynopsis ? `故事方向：${clean(state.plan.publicSynopsis)}\n` : '', ...publicNodes.slice(1).map(nodeBlock)]) {
-      if (result.length + extra.length <= limit) result += extra;
-    }
-    // worldState 只读，由原有推演路径注入实际状态；此处绝不把它改成大纲结果。
-    injectionDebug[target] = { chars: result.length, budget: limit, overBudget: result.length > limit,
-      chapterId: chapter.id, revision: state.revision };
-    return result;
-  }
-  function buildNarrativeGuidance() { return guidance('narrative'); }
-  function buildWorldGuidance(worldState) { return guidance('world', worldState); }
-  function getSchedule(channel = 'narrative', options = {}) {
-    const state = clone(options.state || data().loadState());
-    if (!scheduler()) return { selected: chapterNodes(state, chapterOf(state)).filter(node => !['completed', 'skipped'].includes(nodeStatus(state, node.id))), nodeIds: [], explanations: [], scheduler: state.scheduler || {} };
-    const worldAllowed = allowWorldLink();
-    const worldState = options.worldState || (worldAllowed ? (history()?.getWorldState?.() || window.WORLD_ENGINE_CORE?.loadState?.()) : null);
-    if (channel === 'world' && window.WORLD_ENGINE_API?.getSettings?.().engineEnabled === false) return { selected: [], nodeIds: [], explanations: [], scheduler: state.scheduler || {} };
-    if (channel === 'world' && state.recovery?.status === 'rebuilding') state.recovery = { status: 'ready' };
-    return scheduler().select(state, { ...options, channel, worldState });
-  }
-  function applyInjection() {
-    try {
-      const content = buildNarrativeGuidance();
-      if (content) registerInjection(content); else clearInjection();
-      return content;
-    } catch (error) {
-      clearInjection(); console.warn('[剧情大纲] 注入失败（已隔离）', error); return '';
-    }
-  }
-  async function prepareHistoryForGeneration() {
-    if (!settings().engineEnabled) { clearInjection(); return { changed: false }; }
-    const joint = history()?.reconcile?.();
-    const result = auditHistory();
-    applyInjection();
-    return { changed: result.changed || joint?.changed, status: joint?.status };
+    const fresh = d.clearOutlineData();
+    lastError = '';
+    lastDebug = null;
+    clearInjection();
+    refreshUI();
+    return { cleared: true, hadData, state: fresh };
   }
 
-  function requestSettings() {
-    const own = settings();
-    const result = {};
-    for (const key of ['apiUrl', 'apiKey', 'model', 'connectionMode', 'temperature', 'maxTokens', 'apiTimeoutMs', 'stream', 'streamIdleTimeoutMs', 'jsonMode', 'topP', 'reasoningEffort']) result[key] = own[key];
-    if (!clean(result.apiUrl) || !clean(result.model)) throw new Error('请完整配置剧情大纲 API 地址和模型');
-    return result;
-  }
-  function beginRequest(label, state, refs) {
-    if (request) throw new Error('大纲已有任务正在运行');
-    if (generationInProgress) throw new Error('正文正在生成，请在回复完成后检查大纲');
-    const options = requestSettings();
-    const task = { controller: new AbortController(), token: sessionToken, chatId: chatId(),
-      revision: state.revision, basis: basisDigest(state), refs: clone(refs || []),
-      sourceDigest: timeline().digestRefs(refs || []), historyHead: history()?.getStatus?.().currentCommitId || '', options, label };
-    request = task; lastError = '';
-    setExternalStatus(`剧情大纲：正在${label || '处理'}…`);
-    refresh();
-    return task;
-  }
-  function isCurrent(task, checkSources) {
-    if (request !== task || task.controller.signal.aborted || task.token !== sessionToken || task.chatId !== chatId() || generationInProgress || !settings().engineEnabled) return false;
-    const state = data().loadState();
-    if (Number(state.revision) !== Number(task.revision) || basisDigest(state) !== task.basis) return false;
-    if ((history()?.getStatus?.().currentCommitId || '') !== task.historyHead) return false;
-    try { if (hash(requestSettings()) !== hash(task.options)) return false; }
-    catch (_) { return false; }
-    if (checkSources && (!timeline().auditRefs(task.refs).valid || timeline().digestRefs(timeline().auditRefs(task.refs).refs) !== task.sourceDigest ||
-        timeline().digestRefs(selectSources(state).refs) !== task.sourceDigest)) return false;
-    return true;
-  }
-  async function invoke(task, prompt) {
-    lastDebug = { kind: task.label, prompt, rawResult: '', sourceDigest: task.sourceDigest, chatId: task.chatId, revision: task.revision };
-    const retries = Math.max(0, Number(settings().apiAutoRetries) || 0);
-    const runAttempt = async ({ attempt, maxAttempts }) => {
-      window.WORLD_ENGINE_API?.setNextRequestMeta?.({
-        module: 'outline',
-        purpose: task.label || '剧情大纲检查',
-        attempt: attempt + 1,
-        maxAttempts,
-        onLogId: id => { task.lastLogId = id; }
-      });
-      const raw = await window.WORLD_ENGINE_API.callApi(prompt, task.options.maxTokens, task.options.temperature, task.controller.signal, { ...task.options });
-      if (request === task) lastDebug.rawResult = raw;
-      return raw;
-    };
-    if (typeof window.WORLD_ENGINE_API?.executeWithRetry === 'function') {
-      return window.WORLD_ENGINE_API.executeWithRetry(runAttempt, {
-        retries,
-        signal: task.controller.signal,
-        shouldContinue: () => isCurrent(task, task.refs.length > 0),
-        onRetry: ({ attempt, maxRetries }) => {
-          setExternalStatus(`剧情大纲：重试 ${attempt}/${maxRetries}…`);
-        }
-      });
-    }
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await runAttempt({ attempt, maxAttempts: retries + 1 });
-      } catch (error) {
-        if (task.controller.signal.aborted || attempt >= retries || !isCurrent(task, task.refs.length > 0)) throw error;
-      }
-    }
-  }
-  function finish(task) { if (request === task) { request = null; refresh(); } }
-  async function organizeText(text) {
-    if (typeof window.WORLD_ENGINE_CHATCACHE?.whenReady === 'function') await window.WORLD_ENGINE_CHATCACHE.whenReady();
-    ensureChat();
-    if (!settings().engineEnabled) throw new Error('请先启用剧情大纲');
-    if (!clean(text)) throw new Error('请输入需要整理的大纲文本');
-    const state = activate(data().loadState()), task = beginRequest('整理大纲', state, []);
-    try {
-      const raw = await invoke(task, prompts().buildOrganizePrompt({ text: clean(text), includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() }));
-      if (!isCurrent(task, false)) throw new Error('聊天或大纲已变化，整理结果已丢弃');
-      let parsed;
-      try {
-        parsed = prompts().parseOrganizeResponse(raw);
-      } catch (parseErr) {
-        window.WORLD_ENGINE_API?.updateRequestLog?.(task.lastLogId, {
-          status: 'error',
-          phase: '解析失败',
-          error: String(parseErr?.message || parseErr)
-        });
-        throw parseErr;
-      }
-      setExternalStatus('剧情大纲整理完成');
-      return parsed;
-    } catch (error) {
-      lastError = clean(error.message || error);
-      if (task?.controller.signal.aborted) setExternalStatus('剧情大纲整理已停止');
-      else setExternalStatus(`剧情整理失败：${lastError}`, true);
-      throw error;
-    }
-    finally { finish(task); }
-  }
-
-  function selectSources(state) {
-    const refs = assistantRefs(), count = Math.max(1, Number(settings().checkEveryX) || 3);
-    if (!refs.length) return { refs: [], messages: [] };
-    const maxWindow = Math.max(count, 12);
-    const hasChecked = state?.tracking?.checkedLayer != null && Number.isFinite(Number(state.tracking.checkedLayer));
-    const hasAnchor = state?.tracking?.anchorLayer != null && Number.isFinite(Number(state.tracking.anchorLayer));
-    const baseLayer = hasChecked ? Number(state.tracking.checkedLayer) : (hasAnchor ? Number(state.tracking.anchorLayer) : null);
-    // 优先追平自上次检查边界以来的全部未检 AI 回复（封顶 maxWindow 轮防超长老存档过载）；若无新增未检层（如手动复检），回退最近 count 轮。
-    const unseen = baseLayer != null ? refs.filter(ref => ref.layer > baseLayer) : [];
-    const selected = unseen.length ? unseen.slice(-maxWindow) : refs.slice(-count);
-    const first = selected[0].layer;
-    let start = first;
-    // 一轮包括 AI 回复及其前面的用户输入，但不把上一条 AI 回复混入。
-    while (start > 0 && chat()[start - 1]?.is_user) start--;
-    if (state.tracking?.pendingRecheck && Number.isFinite(Number(state.tracking.recheckStartLayer))) start = Math.min(start, Math.max(0, Number(state.tracking.recheckStartLayer)));
-    const captured = timeline().captureRange(start, refs[refs.length - 1].layer);
-    return { refs: captured, messages: captured.map(ref => ({ messageId: ref.messageId, hash: ref.hash, layer: ref.layer,
-      role: ref.role, name: clean(chat()[ref.layer]?.name), content: String(chat()[ref.layer]?.mes || '') })) };
-  }
-  function referenceContext() {
-    const useWorld = allowWorldLink();
-    const useMemory = allowMemoryLink();
-    try {
-      const bridged = window.STORY_ENGINE_BRIDGE?.buildOutlineReferenceContext?.(data().loadState(), { useWorld, useMemory });
-      if (bridged) return bridged;
-    } catch (_) { /* 桥接异常不阻塞独立运行。 */ }
-    const parts = [];
-    if (useWorld) {
-      try {
-        const world = window.WORLD_ENGINE_CORE?.loadState?.();
-        if (world?.worldDigest) parts.push('世界背景（不是节点完成证据）：' + clean(world.worldDigest).slice(0, 1400));
-      } catch (_) { /* 参考源可选。 */ }
-    }
-    if (useMemory) {
-      try {
-        const memory = window.MEMORY_ENGINE_DATA?.loadState?.();
-        const validSmalls = (memory?.event_memory?.small_summaries || []).filter(item => item.status !== 'stale' && item.status !== 'failed' && clean(item.content));
-        const recent = validSmalls.slice(-5);
-        const recentIds = new Set(recent.map(item => item.id));
-        const keyEarlier = validSmalls.filter(item => item.impactLevel === 'key' && !recentIds.has(item.id)).slice(-3);
-        const quests = Array.isArray(memory?.tables?.quests_events) ? memory.tables.quests_events.slice(-6) : [];
-        const facts = (memory?.ongoing_facts || []).filter(item => item.status === 'active').slice(-6);
-        const memLines = [];
-        if (quests.length) memLines.push('当前任务与事件：' + quests.map(q => `[${q.quest_type || '任务'}] ${q.quest_name}${q.current_progress ? `（${q.current_progress}）` : ''}`).join('；'));
-        else if (facts.length) memLines.push('当前持续事实：' + facts.map(f => `[${f.category || '状态'}·${f.subject || '全局'}] ${f.fact}`).join('；'));
-        const spanText = s => Number(s.startLayer) === Number(s.endLayer) ? `${s.endLayer}` : `${s.startLayer}-${s.endLayer}`;
-        if (keyEarlier.length) memLines.push('关键历史纪要：' + keyEarlier.map(s => `[楼层${spanText(s)}] ${s.content}`).join('；'));
-        if (recent.length) memLines.push('近期事件纪要：' + recent.map(s => `[楼层${spanText(s)}] ${s.content}`).join('；'));
-        if (memLines.length) parts.push('记忆背景（不得作为原文证据）：' + memLines.join('\n').slice(0, 1400));
-      } catch (_) { /* 不依赖记忆引擎运行。 */ }
-    }
-    return parts.join('\n');
-  }
-  function verifiedEvidence(evidence, selection) {
-    if (!Array.isArray(evidence) || !evidence.length) return null;
-    const messages = new Map(selection.messages.map(item => [item.messageId, item]));
-    const refs = new Map(selection.refs.map(item => [item.messageId, item]));
-    const resolveFn = prompts()?.resolveQuote || ((src, q) => (String(src || '').includes(q) ? q : null));
-    const result = [];
-    for (const proof of evidence) {
-      const id = clean(proof?.messageId), quote = clean(proof?.quote), message = messages.get(id), ref = refs.get(id);
-      const canonical = message && quote ? resolveFn(message.content, quote) : null;
-      if (!message || !ref || !canonical ||
-          (proof.hash && clean(proof.hash) !== clean(ref.hash)) || !timeline().auditRefs([ref]).valid) return null;
-      result.push({ messageId: id, hash: ref.hash, quote: canonical, layer: ref.layer });
-    }
-    return result;
-  }
-  function clueIdForNode(nodeId) { return `clue:${clean(nodeId)}`; }
-  function refreshClues(state, worldState) {
-    for (const clue of state.clues || []) {
-      if (clue.validity !== 'valid') continue;
-      const node = findNode(state, clue.nodeId), condition = node?.disclosure?.condition;
-      // 手动创建的独立线索不绑定节点揭露门槛时，保留作者手工设定的 available 开关。
-      if (!clue.nodeId && !condition && !clue.availabilityCondition) continue;
-      // 模型返回的 clue.condition 只能补充限制，不能替换/放宽作者的揭露门槛。
-      const authorGate = condition && scheduler()?.evaluateConditions(condition, { state, worldState });
-      const additional = clue.availabilityCondition ? scheduler()?.evaluateConditions(clue.availabilityCondition, { state, worldState }) : { eligible: true };
-      if (['contacted', 'known'].includes(clue.status)) continue;
-      clue.available = authorGate?.eligible === true && additional?.eligible === true;
-    }
-  }
-  function applyContactsAndReveals(state, assessment, selection, stamp) {
-    for (const candidate of assessment.contacts || []) {
-      const clue = state.clues.find(item => item.id === candidate.clueId && item.validity === 'valid' && item.available);
-      const evidence = verifiedEvidence(candidate.evidence, selection), actorId = clean(candidate.actorId);
-      if (!clue || !evidence || !actorId || state.contacts.some(item => item.validity === 'valid' && item.clueId === clue.id && item.actorId === actorId)) continue;
-      const proof = evidence[0], contact = { id: `contact_${stamp}_${state.contacts.length}`, clueId: clue.id, actorId,
-        messageId: proof.messageId, hash: proof.hash, quote: proof.quote, sourceRefs: clone(selection.refs), createdAt: stamp, validity: 'valid' };
-      state.contacts.push(contact); clue.contacts.push(contact.id); clue.status = 'contacted';
-    }
-    for (const candidate of assessment.reveals || []) {
-      const clue = state.clues.find(item => item.id === candidate.clueId && item.validity === 'valid' && item.available);
-      const fact = state.privateFacts.find(item => item.id === candidate.factId && item.validity === 'valid');
-      const contact = state.contacts.find(item => item.validity === 'valid' && item.clueId === candidate.clueId && item.actorId === candidate.actorId);
-      const evidence = verifiedEvidence(candidate.evidence, selection);
-      if (!clue || !fact || !contact || !evidence || !clue.factIds.includes(fact.id) || state.knowledge.some(item => item.validity === 'valid' && item.factId === fact.id && item.actorId === candidate.actorId)) continue;
-      state.knowledge.push({ id: `knowledge_${stamp}_${state.knowledge.length}`, factId: fact.id, actorId: candidate.actorId,
-        contactId: contact.id, commitId: fact.commitId, validity: 'valid' });
-      if (!fact.knownBy.includes(candidate.actorId)) fact.knownBy.push(candidate.actorId);
-      if (!clue.knownBy.includes(candidate.actorId)) clue.knownBy.push(candidate.actorId);
-      clue.status = 'known';
-    }
-  }
-  function ingestWorldCommit(commit, options = {}) {
-    let state = clone(options.state || data().loadState());
-    const before = clone(state), schedule = getSchedule('world', { state, worldState: commit.beforeWorld || commit.worldState, advanceTick: true });
-    const selectedIds = lastWorldSelection?.chatId === chatId() && lastWorldSelection.revision === state.revision
-      ? new Set(lastWorldSelection.nodeIds) : new Set(schedule.nodeIds);
-    state.scheduler = clone(schedule.scheduler);
-    state.privateFacts = state.privateFacts || []; state.clues = state.clues || []; state.contacts = state.contacts || []; state.knowledge = state.knowledge || [];
-    for (const fact of commit.facts || []) {
-      if (fact.visibility !== 'private' || !history()?.validateWorldEvidence?.({ commitId: commit.id, factId: fact.id, hash: fact.hash }, commit)) continue;
-      if (!state.privateFacts.some(item => item.id === fact.id && item.commitId === commit.id)) state.privateFacts.push({ id: fact.id, commitId: commit.id, factHash: fact.hash,
-        nodeId: clean(fact.nodeId), trackId: clean(fact.trackId), text: clean(fact.text), visibility: 'private', knownBy: clone(fact.knownBy || []),
-        entityRefs: clone(fact.entityRefs || []), validity: 'valid' });
-      const node = findNode(state, fact.nodeId);
-      if (node && fact.clue?.publicText) {
-        const clueId = clueIdForNode(node.id), existing = state.clues.find(item => item.id === clueId);
-        if (existing) { if (!existing.factIds.includes(fact.id)) existing.factIds.push(fact.id); }
-        else state.clues.push({ id: clueId, nodeId: node.id, trackId: node.trackId, factIds: [fact.id], publicHint: clean(fact.clue.publicText),
-          available: false, availabilityCondition: clone(fact.clue.condition || null), status: 'available', commitId: commit.id,
-          sourceRefs: clone(commit.sourceRefs || []), contacts: [], knownBy: [], validity: 'valid' });
-      }
-    }
-    const completedTracks = new Set(), touched = new Set();
-    for (const observation of commit.observations || []) {
-      const node = findNode(state, observation.nodeId);
-      if (!node || !selectedIds.has(node.id) || manualOverride(state, node.id) || touched.has(node.id) || node.actorKind === 'player' || node.completionSource === 'dialogue' ||
-          !['active', 'completed', 'blocked'].includes(observation.status) || ['completed', 'skipped'].includes(nodeStatus(state, node.id))) continue;
-      if (observation.status === 'completed' && (!clean(node.completionCriteria) || completedTracks.has(node.trackId))) continue;
-      const evidence = (observation.evidence || []).map(proof => history()?.validateWorldEvidence?.({ ...proof, commitId: commit.id }, commit));
-      if (!evidence.length || evidence.some(proof => !proof)) continue;
-      touched.add(node.id);
-      const parents = (node.dependencies || []).map(dependency => state.progressEvents.filter(event => event.nodeId === dependency.nodeId && event.validity === 'valid').pop()?.id).filter(Boolean);
-      state.progressEvents.push({ id: `world_progress_${commit.id}_${node.id}`, nodeId: node.id, trackId: node.trackId, status: observation.status,
-        planRevision: state.revision, nodeRevision: hash(node), worldCommitId: commit.id, parentEventIds: parents, sourceRefs: [], sourceDigest: '',
-        evidence, validity: 'valid', beforeChapterId: state.currentChapterId, layer: commit.layer, createdAt: commit.createdAt });
-      if (observation.status === 'completed') completedTracks.add(node.trackId);
-    }
-    state = data().advanceChapter(state); refreshClues(state, commit.worldState);
-    lastWorldSelection = null;
-    if (options.persist !== false) {
-      if (history()) history().recordOutlineCommit(before, state, commit.sourceRefs || []); else data().saveState(state);
-      applyInjection(); refresh();
-    }
-    return state;
-  }
-  function proposalTargetEligible(state, proposal) {
-    if (isFinished(state)) return false;
-    const chapters = state.plan.chapters;
-    const currentIndex = chapters.findIndex(item => item.id === state.currentChapterId);
-    const targetIndex = chapters.findIndex(item => item.id === proposal.chapterId);
-    if (currentIndex < 0 || targetIndex < currentIndex) return false;
-    const chapter = chapters[targetIndex];
-    if (proposal.kind === 'update_chapter' || proposal.kind === 'insert_node') return targetIndex > currentIndex;
-    if (proposal.kind !== 'replace_node') return false;
-    const node = findNode(state, proposal.nodeId);
-    if (!node || ['completed', 'skipped'].includes(nodeStatus(state, node.id))) return false;
-    if (targetIndex > currentIndex) return true;
-    const executing = getSchedule('narrative', { state }).selected?.[0];
-    return node.id !== executing?.id && nodeStatus(state, node.id) !== 'active';
-  }
-  function normalizeProposal(candidate, state, chapter, selection, stamp, index) {
-    if (!candidate || !['replace_node', 'insert_node', 'update_chapter'].includes(candidate.kind)) return null;
-    if (!proposalTargetEligible(state, candidate)) return null;
-    chapter = state.plan.chapters.find(item => item.id === candidate.chapterId);
-    if (!chapter) return null;
-    const evidence = verifiedEvidence(candidate.evidence, selection);
-    if (!evidence || !candidate.after || typeof candidate.after !== 'object' || Array.isArray(candidate.after)) return null;
-    let before, after;
-    if (candidate.kind === 'update_chapter') {
-      before = { title: chapter.title, goal: chapter.goal };
-      after = { title: clean(candidate.after.title || chapter.title), goal: clean(candidate.after.goal ?? chapter.goal) };
-    } else {
-      const original = findNode(state, candidate.nodeId);
-      if (candidate.kind === 'replace_node' && !original) return null;
-      before = original ? clone(original) : null;
-      const source = { ...(original || {}), ...candidate.after };
-      after = { ...clone(source), id: original?.id || '', title: clean(source.title), intent: clean(source.intent),
-        completionCriteria: clean(source.completionCriteria), notes: clean(source.notes), required: source.required !== false };
-      if (!after.title) return null;
-    }
-    if (JSON.stringify(before) === JSON.stringify(after)) return null;
-    return { id: `op_${stamp}_${index}`, kind: candidate.kind, chapterId: chapter.id, nodeId: clean(candidate.nodeId), before, after,
-      reason: clean(candidate.reason), evidence, status: 'pending', planRevision: state.revision,
-      sourceRefs: clone(selection.refs), sourceDigest: timeline().digestRefs(selection.refs), createdAt: stamp };
-  }
-  async function runCheck(manual) {
-    if (typeof window.WORLD_ENGINE_CHATCACHE?.whenReady === 'function') await window.WORLD_ENGINE_CHATCACHE.whenReady();
-    ensureChat();
-    if (!settings().engineEnabled) return { ok: false, reason: 'disabled' };
-    if (request) return { ok: false, reason: 'busy' };
-    if (generationInProgress) return { ok: false, reason: 'generating' };
-    if (history()?.getStatus?.().blocked) return { ok: false, reason: 'recovery-required' };
-    if (window.WORLD_ENGINE_EVOLUTION?.isRunning?.()) return { ok: false, reason: 'world-busy' };
-    let state = activate(auditHistory().state);
-    const chapter = chapterOf(state);
-    if (!chapter || !(state.plan.nodes?.length || chapter.nodes?.length)) return { ok: false, reason: 'no-current-chapter' };
-    if (isFinished(state)) return { ok: true, checked: false, reason: 'outline-complete' };
-    const selection = selectSources(state);
-    if (!selection.refs.length) return { ok: false, reason: 'no-sources' };
-    const digest = timeline().digestRefs(selection.refs);
-    if (!manual && state.tracking.lastDigest === `${state.revision}:${chapter.id}:${digest}` && !state.tracking.pendingRecheck) return { ok: true, checked: false, reason: 'already-checked' };
-    let task;
-    try {
-      task = beginRequest('检查剧情进度', state, selection.refs);
-      const schedule = getSchedule('narrative', { state, advanceTick: true });
-      // 检查全部已解锁合格的公开非纯世界节点，避免被 narrativeLimit（默认 3）截断导致已完成的支线节点漏检
-      const eligiblePool = Array.isArray(schedule.candidates)
-        ? schedule.candidates.filter(item => item.eligible).map(item => item.node)
-        : (schedule.selected || []);
-      const nodes = eligiblePool.filter(node => node && node.visibility !== 'private' && node.completionSource !== 'world').slice(0, 24);
-      const prompt = prompts().buildCheckPrompt({ state: clone(state), nodes, messages: selection.messages,
-        referenceContext: referenceContext(), allowProposals: settings().allowProposals !== false,
-        includeWorld: allowWorldLink(), includeMemory: allowMemoryLink() });
-      const raw = await invoke(task, prompt);
-      if (!isCurrent(task, true)) return { ok: false, reason: 'stale-result' };
-      let assessment;
-      try {
-        assessment = prompts().parseCheckResponse(raw, { state, nodes, messages: selection.messages, allowProposals: settings().allowProposals !== false });
-      } catch (parseErr) {
-        window.WORLD_ENGINE_API?.updateRequestLog?.(task.lastLogId, {
-          status: 'error',
-          phase: '解析失败',
-          error: String(parseErr?.message || parseErr)
-        });
-        throw parseErr;
-      }
-      if (!isCurrent(task, true)) return { ok: false, reason: 'stale-result' };
-      state = data().loadState();
-      const beforeAutomatic = clone(state);
-      state.scheduler = clone(schedule.scheduler);
-      const stamp = Date.now(), beforeChapterId = state.currentChapterId, completed = [], updatedIds = new Set();
-      if (assessment.timeAssessment && verifiedEvidence(assessment.timeAssessment.evidence, selection)) state.tracking.temporalNotice = clone(assessment.timeAssessment);
-      for (const candidate of assessment.nodeUpdates || []) {
-        if (['flashback', 'dream', 'contradiction', 'in_world_rewind'].includes(assessment.timeAssessment?.kind)) continue;
-        const node = nodes.find(item => item.id === candidate.nodeId);
-        if (!node || updatedIds.has(node.id) || manualOverride(state, node.id) ||
-            !['active', 'completed', 'blocked'].includes(candidate.status) || ['completed', 'skipped'].includes(nodeStatus(state, node.id))) continue;
-        if (candidate.status === 'completed' && !clean(node.completionCriteria)) continue;
-        const evidence = verifiedEvidence(candidate.evidence, selection);
-        if (!evidence || candidate.status === nodeStatus(state, node.id)) continue;
-        updatedIds.add(node.id);
-        state.progressEvents.push({ id: `oe_${stamp}_${state.progressEvents.length}`, nodeId: node.id, trackId: node.trackId, status: candidate.status,
-          planRevision: state.revision, nodeRevision: hash(node), sourceRefs: clone(selection.refs), sourceDigest: digest,
-          evidence, validity: 'valid', independent: node.actorKind === 'player' && !node.trigger && !(node.dependencies || []).length,
-          beforeChapterId, layer: currentLayer(), createdAt: stamp });
-        if (candidate.status === 'completed') completed.push(node.id);
-      }
-      if (!['flashback', 'dream', 'contradiction', 'in_world_rewind'].includes(assessment.timeAssessment?.kind)) applyContactsAndReveals(state, assessment, selection, stamp);
-      refreshClues(state, allowWorldLink() ? history()?.getWorldState?.() : null);
-      // 先应用真实进度和自动下章，再判断建议是否仍然指向未来，避免同轮完成后改写节点。
-      state = data().advanceChapter(state);
-      const proposals = [];
-      if (settings().allowProposals !== false) {
-        for (const [index, candidate] of (assessment.proposals || []).entries()) {
-          const proposal = normalizeProposal(candidate, state, chapter, selection, stamp, index);
-          if (!proposal) continue;
-          const duplicate = state.proposals.some(item => item.status === 'pending' && item.planRevision === state.revision &&
-            item.kind === proposal.kind && item.nodeId === proposal.nodeId && JSON.stringify(item.after) === JSON.stringify(proposal.after));
-          if (!duplicate) { state.proposals.push(proposal); proposals.push(proposal.id); }
-        }
-      }
-      state.tracking = { ...state.tracking, checkedLayer: currentLayer(), roundsSinceCheck: 0,
-        lastDigest: `${state.revision}:${beforeChapterId}:${digest}`, pendingRecheck: false, recheckStartLayer: null };
-      if (history()) history().recordOutlineCommit(beforeAutomatic, state, selection.refs); else data().saveState(state);
-      // 弱联动模式：大纲不再向记忆 7 表自动写入记录（仅提供只读焦距参考）
-      await window.WORLD_ENGINE_STORE?.flush?.();
-      applyInjection(); refresh();
-      setExternalStatus('剧情检查完成');
-      return { ok: true, checked: true, completed, proposals };
-    } catch (error) {
-      if (task?.controller.signal.aborted) {
-        setExternalStatus('剧情检查已停止');
-        return { ok: false, reason: 'aborted' };
-      }
-      lastError = clean(error.message || error); console.warn('[剧情大纲] 检查失败（已隔离）', error);
-      setExternalStatus(`剧情检查失败：${lastError}`, true);
-      return { ok: false, reason: lastError };
-    } finally { if (task) finish(task); }
-  }
-  function checkNow() { return runCheck(true); }
-
-  function applyProposal(id, expectedRevision) {
-    ensureChat();
-    const state = auditHistory().state, proposal = state.proposals.find(item => item.id === id);
-    if (!proposal || proposal.status !== 'pending') throw new Error('建议已处理或失效');
-    if (Number(expectedRevision) !== Number(state.revision) || Number(proposal.planRevision) !== Number(state.revision)) throw new Error('大纲已修改，请刷新后重新确认差异');
-    if (!proposalTargetEligible(state, proposal)) throw new Error('建议目标已经完成、跳过或进入当前执行阶段，请重新检查差异');
-    if (!validateSavedSources(proposal)) throw new Error('建议的原文来源已变化，请重新检查');
-    const plan = clone(state.plan), chapter = plan.chapters.find(item => item.id === proposal.chapterId);
-    if (!chapter) throw new Error('建议对应的章节已不存在');
-    if (proposal.kind === 'update_chapter') {
-      if (JSON.stringify({ title: chapter.title, goal: chapter.goal }) !== JSON.stringify(proposal.before)) throw new Error('章节内容已变化，请重新检查');
-      chapter.title = proposal.after.title; chapter.goal = proposal.after.goal;
-    } else if (proposal.kind === 'replace_node') {
-      const index = plan.nodes.findIndex(item => item.id === proposal.nodeId);
-      if (index < 0 || JSON.stringify(plan.nodes[index]) !== JSON.stringify(proposal.before)) throw new Error('节点内容已变化，请重新检查');
-      plan.nodes[index] = { ...clone(proposal.after), id: proposal.nodeId };
-    } else if (proposal.kind === 'insert_node') plan.nodes.push({ ...clone(proposal.after), chapterIds: [chapter.id], trackId: proposal.after.trackId || plan.tracks[0]?.id });
-    else throw new Error('不支持此类型的修改建议');
-    abort();
-    const next = data().commitPlan(plan, Number(expectedRevision));
-    const applied = next.proposals.find(item => item.id === id);
-    if (applied) applied.status = 'accepted';
-    data().saveState(next); applyInjection(); refresh();
-    return next;
-  }
-  function dismissProposal(id) {
-    const state = data().loadState(), proposal = state.proposals.find(item => item.id === id);
-    if (proposal?.status === 'pending') { proposal.status = 'dismissed'; data().saveState(state); }
-    refresh(); return state;
-  }
+  // ==================== 回复后自动计数与事件绑定 ====================
 
   async function afterGeneration() {
-    ensureChat(); generationInProgress = false;
-    if (!settings().engineEnabled) { clearInjection(); return; }
-    let state = data().loadState();
-    if (state.tracking?.anchorLayer == null) { activate(state); applyInjection(); return; }
-    state = auditHistory().state;
-    const refs = assistantRefs(), latest = refs[refs.length - 1];
-    if (!latest) return;
-    const key = `${latest.messageId}:${latest.swipeId}:${latest.hash}`;
-    const repeated = state.tracking.lastProcessedMessageKey === key;
-    const seen = new Set(state.tracking.seenAssistantIds || refs.filter(ref => ref.layer <= Number(state.tracking.anchorLayer)).map(ref => ref.messageId));
-    const reroll = ['swipe', 'regenerate'].includes(generationType);
-    let added = 0;
-    for (const ref of refs) {
-      if (!seen.has(ref.messageId) && !reroll) added++;
-      seen.add(ref.messageId);
+    const st = settings();
+    if (st.engineEnabled !== true) return;
+    const d = data();
+    const all = chat();
+    const layer = currentLayer();
+    const lastMsg = all[layer];
+    if (!isAiMessage(lastMsg) || layer < firstEligibleLayer(st)) return;
+
+    const msgKey = `${chatId()}:${layer}:${lastMsg.swipe_id ?? 0}:${hashText(lastMsg.mes)}`;
+    if (msgKey === lastProcessedKey) return;
+    lastProcessedKey = msgKey;
+
+    const state = d.loadState();
+    if (!state.plan.chapters.length || !state.plan.nodes.length) return;
+    if (d.isOutlineFinished(state)) return;
+
+    // 首次启用仅锚定当前楼层，不追溯历史旧楼
+    if (state.tracking.anchorLayer === null) {
+      state.tracking.anchorLayer = layer;
+      state.tracking.checkedLayer = layer;
+      state.tracking.roundsSinceCheck = 0;
+      d.saveState(state);
+      applyInjection();
+      return;
     }
-    state.tracking = { ...state.tracking, seenAssistantIds: [...seen], lastProcessedMessageKey: key,
-      roundsSinceCheck: isFinished(state) ? 0 : Number(state.tracking.roundsSinceCheck || 0) + (repeated ? 0 : added) };
-    data().saveState(state);
-    generationType = '';
-    applyInjection();
-    const attemptKey = `${chatId()}:${sessionToken}:${state.revision}:${key}`;
-    if (!isFinished(state) && settings().autoCheck !== false && lastAutoAttemptKey !== attemptKey &&
-        (state.tracking.pendingRecheck || (!repeated && state.tracking.roundsSinceCheck >= Math.max(1, Number(settings().checkEveryX) || 3)))) {
-      lastAutoAttemptKey = attemptKey;
-      await runCheck(false);
+
+    const isReroll = generationType === 'swipe' || generationType === 'regenerate';
+    if (!isReroll) {
+      state.tracking.roundsSinceCheck = (state.tracking.roundsSinceCheck || 0) + 1;
+      d.saveState(state);
     }
+
+    if (st.autoCheck === false) return;
+    const everyX = Math.max(1, parseInt(st.checkEveryX, 10) || 3);
+    if (state.tracking.roundsSinceCheck < everyX) return;
+    if (lastAutoAttemptKey === msgKey) return;
+    lastAutoAttemptKey = msgKey;
+
+    await runCheck(false);
   }
-  function guard(label, callback) {
-    return function(...args) {
-      try { const result = callback(...args); if (result?.catch) result.catch(error => console.warn(`[剧情大纲] ${label}失败（已隔离）`, error)); }
-      catch (error) { console.warn(`[剧情大纲] ${label}失败（已隔离）`, error); }
-    };
-  }
+
   function init() {
     if (initialized) return;
     const ctx = context();
-    if (!ctx?.eventSource?.on) { applyInjection(); return; }
-    initialized = true; ensureChat();
-    const types = ctx.event_types || {};
-    ctx.eventSource.on(types.GENERATION_STARTED || 'generation_started', guard('生成开始', (type, _options, dryRun) => {
+    const es = ctx?.eventSource;
+    const et = ctx?.event_types || {};
+    if (!es || typeof es.on !== 'function') {
+      applyInjection();
+      return;
+    }
+    initialized = true;
+
+    es.on(et.GENERATION_STARTED || 'generation_started', (type, _opts, dryRun) => {
       if (dryRun) return;
       window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-      abort(); ensureChat(); generationType = clean(type); generationInProgress = true;
-      if (settings().engineEnabled) { history()?.prepareForGeneration?.({ type }); auditHistory(); applyInjection(); }
-    }));
-    ctx.eventSource.on(types.GENERATION_ENDED || types.MESSAGE_RECEIVED || 'message_received', guard('生成完成', () => {
+      abort();
+      generationInProgress = true;
+      generationType = clean(type);
+      if (generationType === 'swipe' || generationType === 'regenerate') {
+        syncRollbackToLayer(Math.max(-1, currentLayer() - 1));
+      } else {
+        syncRollbackToLayer(currentLayer());
+      }
+      applyInjection();
+    });
+
+    const onEnded = () => {
       generationInProgress = false;
-      history()?.finishGeneration?.();
-      if (autoTimer) clearTimeout(autoTimer);
-      if (window.STORY_ENGINE_BRIDGE?.shouldCoordinateGeneration?.()) {
-        const layer = Math.max(0, (chat().length || 1) - 1);
-        window.STORY_ENGINE_BRIDGE.scheduleTurn?.({
+      const bridge = window.STORY_ENGINE_BRIDGE;
+      if (bridge?.shouldCoordinateGeneration?.()) {
+        bridge.scheduleTurn({
           scope: 'outline',
-          layer,
-          key: `${chatId()}:${layer}`,
-          delayMs: 80,
+          delayMs: 1200,
           run: () => afterGeneration()
         });
-        return;
+      } else {
+        clearTimeout(autoTimer);
+        autoTimer = setTimeout(() => { afterGeneration(); }, 120);
       }
-      autoTimer = setTimeout(guard('自动检查', () => { autoTimer = null; return afterGeneration(); }), 80);
-    }));
-    const onLoaded = guard('加载聊天', () => {
+    };
+    es.on(et.GENERATION_ENDED || et.MESSAGE_RECEIVED || 'generation_ended', onEnded);
+
+    es.on(et.GENERATION_STOPPED || 'generation_stopped', () => {
+      generationInProgress = false;
+      generationType = '';
       window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-      abort(); currentChatId = chatId(); generationInProgress = false; generationType = ''; lastAutoAttemptKey = '';
-      if (settings().engineEnabled) history()?.reconcile?.(); applyInjection(); refresh();
+      abort();
+      syncRollbackToLayer(currentLayer());
+      applyInjection();
     });
-    for (const event of new Set([types.CHAT_CHANGED || 'chat_id_changed', types.CHAT_LOADED || 'chat_loaded'])) ctx.eventSource.on(event, onLoaded);
-    for (const [name, fallback] of [['MESSAGE_SWIPED', 'message_swiped'], ['MESSAGE_DELETED', 'message_deleted'], ['MESSAGE_EDITED', 'message_edited']]) {
-      ctx.eventSource.on(types[name] || fallback, guard('原文变化', () => {
-        window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-        abort(); if (name === 'MESSAGE_SWIPED') generationType = 'swipe';
-        if (settings().engineEnabled) { if (name !== 'MESSAGE_SWIPED' || !generationInProgress) history()?.reconcile?.(); auditHistory(); applyInjection(); }
-      }));
-    }
-    ctx.eventSource.on(types.GENERATION_STOPPED || 'generation_stopped', guard('取消生成', () => {
+
+    const onChatSwitch = () => {
       window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
-      abort(); generationInProgress = false; generationType = ''; history()?.cancelGeneration?.(); applyInjection(); refresh();
-    }));
+      abort();
+      generationInProgress = false;
+      generationType = '';
+      lastProcessedKey = '';
+      lastAutoAttemptKey = '';
+      lastError = '';
+      applyInjection();
+      refreshUI();
+    };
+    es.on(et.CHAT_CHANGED || 'chat_id_changed', onChatSwitch);
+    es.on(et.CHAT_LOADED || 'chat_loaded', onChatSwitch);
+
+    es.on(et.MESSAGE_DELETED || 'message_deleted', () => {
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+      abort();
+      lastProcessedKey = '';
+      syncRollbackToLayer(currentLayer());
+      applyInjection();
+      refreshUI();
+    });
+
+    es.on(et.MESSAGE_SWIPED || 'message_swiped', () => {
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+      abort();
+      generationType = 'swipe';
+      lastProcessedKey = '';
+      syncRollbackToLayer(Math.max(-1, currentLayer() - 1));
+      applyInjection();
+      refreshUI();
+    });
+
+    es.on(et.MESSAGE_EDITED || 'message_edited', layerIdx => {
+      window.STORY_ENGINE_BRIDGE?.cancelTurn?.();
+      abort();
+      const idx = Number.isFinite(Number(layerIdx)) ? parseInt(layerIdx, 10) : currentLayer();
+      syncRollbackToLayer(Math.max(-1, idx - 1));
+      applyInjection();
+      refreshUI();
+    });
+
     applyInjection();
   }
-  return { init, applyInjection, buildNarrativeGuidance, buildWorldGuidance, getSchedule, ingestWorldCommit, clueIdForNode, checkNow, organizeText, applyProposal, dismissProposal,
-    prepareHistoryForGeneration, abort, isRunning: () => !!request, getRunningLabel: () => request?.label || '',
-    getLastDebug: () => ({ ...clone(lastDebug || {}), injection: clone(injectionDebug) }), getLastError: () => lastError };
+
+  return {
+    INJECTION_NAME,
+    init,
+    applyInjection,
+    buildNarrativeGuidance,
+    buildWorldGuidance,
+    getUnlockedOpenNodes,
+    getNarrativeNodes,
+    getWorldNodes,
+    checkNow,
+    organizeText,
+    clearAllOutlineData,
+    prepareHistoryForGeneration,
+    abort,
+    isRunning: () => Boolean(activeTask),
+    getRunningLabel: () => activeTask?.label || '',
+    getLastDebug: () => ({
+      request: lastDebug,
+      injection: injectionDebug
+    }),
+    getLastError: () => lastError
+  };
 })();

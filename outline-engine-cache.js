@@ -1,235 +1,346 @@
-// 剧情存档：只同步当前聊天状态，不含 API 设置或密钥。
+// outline-engine-cache.js — 剧情大纲 v3 聊天缓存与快照（纯状态同步，无 bundle/历史锁依赖）
 (function() {
   'use strict';
-  const NS = 'outline_engine_v2';
-  const TYPE = 'outline-engine-chat-snapshot';
-  const MAX_AUTO = 3, MAX_MANUAL = 20;
-  const copy = value => JSON.parse(JSON.stringify(value));
+
+  const META_KEY = 'outline_engine_v3';
+  const LEGACY_META_KEYS = ['outline_engine_v2', 'outline_engine'];
+  const SNAPSHOT_TYPE = 'outline-engine-chat-snapshot';
+  const MAX_AUTO = 3;
+  const MAX_MANUAL = 20;
+  const DEBOUNCE_MS = 1500;
+
+  let timer = null;
+  let suspended = false;
+  let restoring = Promise.resolve();
+
+  const ctx = () => { try { return SillyTavern?.getContext?.() || null; } catch (_) { return null; } };
   const store = () => window.WORLD_ENGINE_STORE;
-  const settings = () => window.OUTLINE_ENGINE_SETTINGS.getSettings();
   const data = () => window.OUTLINE_ENGINE_DATA;
-  const key = id => `outline_engine_v2_state_${id}`;
-  const bundleKey = id => `outline_engine_v2_bundle_${id}`;
-  const revKey = id => `outline_engine_v2_${id}_syncrev`;
-  let suspended = false, timer = null, restoring = Promise.resolve();
-  function ctx() { try { return SillyTavern.getContext(); } catch (_) { return null; } }
-  function usable(context) { return !!(context?.chatId && context.chatId !== 'default'); }
-  function read() { const value = ctx()?.chatMetadata?.[NS]; return value?.v === 2 ? copy(value) : null; }
-  function ensure() {
-    const value = read() || { v: 2, live: null, snapshots: [] };
-    if (!Array.isArray(value.snapshots)) value.snapshots = [];
-    value.snapshots = value.snapshots.filter(item => validPack(item?.data)).map(item => ({
-      ...item, data: sanitizePack(item.data, item.chatId)
-    }));
-    if (validPack(value.live?.data)) value.live.data = sanitizePack(value.live.data, value.live.chatId);
-    return value;
-  }
-  function sanitizePack(value, id) {
-    const result = { state: JSON.stringify(data().normalizeState(JSON.parse(value.state), id)) };
-    if (typeof value.bundle === 'string') {
-      const parsed = JSON.parse(value.bundle);
-      if (window.STORY_ENGINE_HISTORY?.validateBundle) window.STORY_ENGINE_HISTORY.validateBundle(parsed);
-      else throw new Error('联合历史模块尚未就绪，不能保存包含历史的存档');
-      result.bundle = JSON.stringify(parsed);
+  const settings = () => window.OUTLINE_ENGINE_SETTINGS?.getSettings?.(true) || {};
+  const clone = v => JSON.parse(JSON.stringify(v));
+  const usable = c => Boolean(c && c.chatId && c.chatId !== 'default');
+  const stateKey = id => (data()?.STATE_PREFIX || 'outline_engine_v3_state_') + id;
+  const revKey = id => `outline_engine_v3_${id}_syncrev`;
+
+  function getRev(id) { return Number(store()?.getItem?.(revKey(id))) || 0; }
+  function setRev(id, rev) { store()?.setItem?.(revKey(id), String(Math.max(0, Number(rev) || 0))); }
+
+  function sanitizePack(rawPack, chatId) {
+    try {
+      const rawState = typeof rawPack?.state === 'string' ? JSON.parse(rawPack.state) : rawPack?.state;
+      if (!rawState || typeof rawState !== 'object') return null;
+      const norm = data()?.normalizeState ? data().normalizeState(rawState, chatId) : rawState;
+      return { state: JSON.stringify(norm) };
+    } catch (_) {
+      return null;
     }
-    return result;
   }
-  function revision(id) { return Math.max(0, Number(store().getItem(revKey(id))) || 0); }
-  function setRevision(id, value) { store().setItem(revKey(id), String(value)); }
-  function pack(id) {
-    const raw = store().getItem(key(id));
-    if (raw == null) return {};
+
+  function validPack(rawPack) {
     try {
-      const result = { state: JSON.stringify(data().normalizeState(JSON.parse(raw), id)) };
-      const bundle = store().getItem(bundleKey(id));
-      if (bundle) result.bundle = bundle;
-      return result;
+      const rawState = typeof rawPack?.state === 'string' ? JSON.parse(rawPack.state) : rawPack?.state;
+      return Boolean(rawState && rawState.plan && Array.isArray(rawState.plan.chapters));
+    } catch (_) {
+      return false;
     }
-    catch (_) { return {}; }
   }
-  function same(a, b) { return a?.state === b?.state && a?.bundle === b?.bundle; }
-  function validPack(value) {
-    if (!value || typeof value.state !== 'string') return false;
+
+  function packLocal(id) {
+    const raw = store()?.getItem?.(stateKey(id));
+    if (!raw) return null;
     try {
-      const state = JSON.parse(value.state);
-      if (!(state?.schemaVersion === 2 && Array.isArray(state?.plan?.chapters) &&
-        Array.isArray(state?.plan?.tracks) && Array.isArray(state?.plan?.nodes))) return false;
-      if (value.bundle) {
-        if (!window.STORY_ENGINE_HISTORY?.validateBundle) return false;
-        window.STORY_ENGINE_HISTORY.validateBundle(JSON.parse(value.bundle));
-      }
-      return true;
-    } catch (_) { return false; }
+      const parsed = JSON.parse(raw);
+      return validPack({ state: parsed }) ? { state: JSON.stringify(parsed) } : null;
+    } catch (_) {
+      return null;
+    }
   }
-  function write(value, expectedChatId) {
-    const context = ctx();
-    if (!usable(context) || context.chatId !== expectedChatId) return false;
+
+  function readNamespace() {
+    const c = ctx();
+    const raw = c?.chatMetadata?.[META_KEY];
+    if (!raw || typeof raw !== 'object') return null;
+    return clone(raw);
+  }
+
+  function ensureNamespace() {
+    const c = ctx();
+    const id = c?.chatId || 'default';
+    const existing = readNamespace();
+    const ns = existing && existing.v === 3
+      ? existing
+      : { v: 3, live: null, snapshots: [] };
+    ns.snapshots = (Array.isArray(ns.snapshots) ? ns.snapshots : [])
+      .filter(s => s && s.id && validPack(s.data))
+      .map(s => ({ ...s, data: sanitizePack(s.data, id) || s.data }));
+    return ns;
+  }
+
+  function writeNamespace(ns, targetId) {
+    const c = ctx();
+    if (!usable(c) || c.chatId !== targetId) return false;
+    if (typeof c.updateChatMetadata === 'function') {
+      c.updateChatMetadata({ [META_KEY]: ns });
+    } else {
+      c.chatMetadata = c.chatMetadata || {};
+      c.chatMetadata[META_KEY] = ns;
+    }
     try {
-      if (typeof context.updateChatMetadata === 'function') context.updateChatMetadata({ [NS]: value });
-      else if (context.chatMetadata) context.chatMetadata[NS] = value;
-      else return false;
-      const save = context.saveMetadataDebounced || context.saveMetadata || context.saveChat;
-      if (typeof save === 'function') save.call(context);
-      return true;
-    } catch (error) { console.warn('[剧情大纲] 保存聊天存档失败', error); return false; }
-  }
-  async function install(value, id, exact) {
-    if (!validPack(value)) throw new Error('剧情存档格式无效');
-    window.OUTLINE_ENGINE?.abort?.();
-    suspended = true;
-    const own = !store().isTransactionActive?.();
-    if (own) store().beginTransaction?.();
-    try {
-      const state = JSON.parse(value.state);
-      // 实时同步采用远端修订原样恢复；用户导入/恢复才增加大纲修订号。
-      // 否则每次换设备都递增 revision，导致两端反复把同一份计划推回去。
-      if (exact && state.originChatId === id) data().saveState(state, id);
-      else data().importData({ type: 'outline-engine-data', schemaVersion: 2, state }, {
-          includeProgress: state.originChatId === id
-        });
-      if (state.originChatId === id && value.bundle) window.STORY_ENGINE_HISTORY?.importBundle?.(JSON.parse(value.bundle));
-      if (own) await store().commitTransaction?.();
-    } catch (error) { if (own) store().rollbackTransaction?.(); throw error; }
-    finally { suspended = false; }
-  }
-  function pushInto(namespace, id) {
-    const packed = pack(id);
-    if (!validPack(packed)) return null;
-    const rev = Math.max(revision(id), Number(namespace.live?.rev) || 0) + 1;
-    namespace.live = { rev, updatedAt: Date.now(), chatId: id, data: packed };
-    return rev;
-  }
-  function pushLiveNow() {
-    const context = ctx();
-    if (!usable(context)) return false;
-    const namespace = ensure(), packed = pack(context.chatId);
-    if (!validPack(packed)) return false;
-    if (same(namespace.live?.data, packed) && revision(context.chatId) === Number(namespace.live?.rev)) return true;
-    const rev = pushInto(namespace, context.chatId);
-    if (!write(namespace, context.chatId)) return false;
-    setRevision(context.chatId, rev);
+      if (typeof c.saveMetadataDebounced === 'function') c.saveMetadataDebounced();
+      else if (typeof c.saveMetadata === 'function') c.saveMetadata();
+      else if (typeof c.saveChat === 'function') c.saveChat();
+    } catch (_) {}
     return true;
   }
-  function addSnapshot(namespace, name, auto, id, packed) {
+
+  function trimSnapshots(ns) {
+    const autoList = ns.snapshots.filter(s => s.auto === true);
+    const manualList = ns.snapshots.filter(s => s.auto !== true);
+    const keepAuto = autoList.slice(-MAX_AUTO);
+    const keepManual = manualList.slice(-MAX_MANUAL);
+    const keepIds = new Set([...keepAuto, ...keepManual].map(s => s.id));
+    ns.snapshots = ns.snapshots.filter(s => keepIds.has(s.id));
+  }
+
+  function addSnapshot(ns, name, auto, chatId, packed) {
     const snapshot = {
-      id: `o${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-      name: String(name || '剧情存档').slice(0, 60), auto: !!auto,
-      createdAt: Date.now(), chatId: id, data: sanitizePack(packed, id), v: 2
+      id: `os_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: String(name || (auto ? '自动备份' : '手动存档')).trim().slice(0, 60) || '大纲存档',
+      auto: auto === true,
+      createdAt: Date.now(),
+      chatId,
+      v: 3,
+      data: sanitizePack(packed, chatId) || packed
     };
-    namespace.snapshots.unshift(snapshot);
-    let autos = 0, manuals = 0;
-    namespace.snapshots = namespace.snapshots.filter(item => item.auto ? ++autos <= MAX_AUTO : ++manuals <= MAX_MANUAL);
+    ns.snapshots.push(snapshot);
+    trimSnapshots(ns);
     return snapshot;
   }
-  function runTick(id) {
-    timer = null;
-    const context = ctx();
-    if (!usable(context) || context.chatId !== id) return;
-    const namespace = ensure(), packed = pack(id), st = settings();
-    if (!validPack(packed)) return;
-    let changed = false, rev = null;
-    if (st.syncToChat && !same(namespace.live?.data, packed)) {
-      rev = pushInto(namespace, id); changed = true;
-    }
-    if (st.autoBackup && !same(namespace.snapshots.find(item => item.auto)?.data, packed)) {
-      addSnapshot(namespace, '自动备份', true, id, packed); changed = true;
-    }
-    if (changed && write(namespace, id) && rev != null) setRevision(id, rev);
+
+  function pushInto(ns, chatId) {
+    const packed = packLocal(chatId);
+    if (!packed) return null;
+    const nextRev = Math.max(getRev(chatId), Number(ns.live?.rev) || 0) + 1;
+    ns.live = { rev: nextRev, updatedAt: Date.now(), chatId, data: packed };
+    return nextRev;
   }
+
+  function install(packed, targetId, exact) {
+    const cleanPack = sanitizePack(packed, targetId);
+    if (!cleanPack) return false;
+    window.OUTLINE_ENGINE?.abort?.();
+    suspended = true;
+    try {
+      const parsed = JSON.parse(cleanPack.state);
+      if (exact && parsed.originChatId === targetId) {
+        data()?.saveState?.(parsed, targetId);
+      } else {
+        data()?.importData?.({ state: parsed, chatId: parsed.originChatId || targetId }, { includeProgress: true }, targetId);
+      }
+      return true;
+    } finally {
+      suspended = false;
+    }
+  }
+
+  function runTick() {
+    timer = null;
+    const c = ctx();
+    const st = settings();
+    if (!usable(c) || (!st.syncToChat && !st.autoBackup)) return;
+    const id = c.chatId;
+    const packed = packLocal(id);
+    if (!packed) return;
+    const ns = ensureNamespace();
+    let changed = false;
+    let newRev = null;
+
+    if (st.syncToChat && ns.live?.data?.state !== packed.state) {
+      newRev = pushInto(ns, id);
+      changed = true;
+    }
+    if (st.autoBackup) {
+      const latestAuto = [...ns.snapshots].reverse().find(s => s.auto === true);
+      if (!latestAuto || latestAuto.data?.state !== packed.state) {
+        addSnapshot(ns, `自动备份 ${new Date().toLocaleTimeString()}`, true, id, packed);
+        changed = true;
+      }
+    }
+    if (changed && writeNamespace(ns, id) && newRev != null) {
+      setRev(id, newRev);
+    }
+  }
+
   function onStoreWrite(changedKey) {
-    const context = ctx();
-    if (suspended || !usable(context) || ![key(context.chatId), bundleKey(context.chatId)].includes(changedKey)) return;
+    if (suspended) return;
+    const c = ctx();
+    if (!usable(c) || changedKey !== stateKey(c.chatId)) return;
     const st = settings();
     if (!st.syncToChat && !st.autoBackup) return;
     clearTimeout(timer);
-    const id = context.chatId;
-    timer = setTimeout(() => runTick(id), 1500);
+    timer = setTimeout(runTick, DEBOUNCE_MS);
   }
-  function onChatLoaded() {
-    restoring = restoreChat();
-    return restoring;
+
+  function pushLiveNow() {
+    const c = ctx();
+    if (!usable(c) || !settings().syncToChat) return false;
+    const id = c.chatId;
+    const packed = packLocal(id);
+    if (!packed) return false;
+    const ns = ensureNamespace();
+    if (ns.live?.data?.state === packed.state) {
+      if (getRev(id) !== Number(ns.live?.rev || 0)) setRev(id, Number(ns.live?.rev || 0));
+      return true;
+    }
+    const rev = pushInto(ns, id);
+    if (rev == null) return false;
+    if (writeNamespace(ns, id)) {
+      setRev(id, rev);
+      return true;
+    }
+    return false;
   }
+
   async function restoreChat() {
-    clearTimeout(timer); timer = null;
-    const context = ctx();
-    if (!usable(context) || !settings().syncToChat) return;
-    const targetId = context.chatId;
-    // 仅在用户已开启同步、且尚无v2状态时迁入旧远端大纲；不双写或反复覆盖v2。
-    if (!store().getItem(key(context.chatId))) {
-      const legacy = context.chatMetadata?.outline_engine?.live?.data?.state;
-      if (legacy) {
-        try { data().importData({ state: JSON.parse(legacy) }, { includeProgress: true }); }
-        catch (error) { console.warn('[剧情大纲] 旧版远端迁移失败，保留原资料', error); }
+    clearTimeout(timer);
+    timer = null;
+    const c = ctx();
+    if (!usable(c) || !settings().syncToChat) return;
+    const id = c.chatId;
+
+    // 若本地无 v3 数据且远端存在旧版 v2/v1 live 数据，则尝试迁移一次
+    if (!store()?.getItem?.(stateKey(id))) {
+      for (const legacyKey of LEGACY_META_KEYS) {
+        const legacyState = c.chatMetadata?.[legacyKey]?.live?.data?.state;
+        if (legacyState) {
+          try {
+            const parsed = typeof legacyState === 'string' ? JSON.parse(legacyState) : legacyState;
+            data()?.importData?.({ state: parsed, chatId: id }, { includeProgress: true }, id);
+            break;
+          } catch (_) {}
+        }
       }
     }
-    const namespace = read(), local = revision(context.chatId), remote = Number(namespace?.live?.rev) || 0;
-    if (!validPack(namespace?.live?.data)) { pushLiveNow(); return; }
-    if (remote > local || !validPack(pack(context.chatId))) {
-      await install(namespace.live.data, targetId, true); setRevision(targetId, remote);
-    } else if (local > remote) pushLiveNow();
+
+    const ns = readNamespace();
+    const localRev = getRev(id);
+    const remoteRev = Number(ns?.live?.rev) || 0;
+    const localPack = packLocal(id);
+
+    if (!validPack(ns?.live?.data)) {
+      if (localPack) pushLiveNow();
+      return;
+    }
+    if (localPack && ns.live.data.state === localPack.state) {
+      if (localRev !== remoteRev) setRev(id, remoteRev);
+      return;
+    }
+    if (remoteRev > localRev || !localPack) {
+      if (install(ns.live.data, id, true)) setRev(id, remoteRev);
+    } else if (localRev > remoteRev) {
+      pushLiveNow();
+    }
   }
-  function listSnapshots() { return ensure().snapshots; }
+
+  function onChatLoaded() {
+    restoring = restoreChat().catch(err => console.warn('[剧情大纲] 聊天缓存恢复失败', err));
+    return restoring;
+  }
+
+  function listSnapshots() { return ensureNamespace().snapshots; }
+
   function createSnapshot(name) {
-    const context = ctx();
-    if (!usable(context)) return null;
-    const packed = pack(context.chatId);
-    if (!validPack(packed)) return null;
-    const namespace = ensure(), snapshot = addSnapshot(namespace, name, false, context.chatId, packed);
-    return write(namespace, context.chatId) ? snapshot : null;
+    const c = ctx();
+    if (!usable(c)) return null;
+    const packed = packLocal(c.chatId);
+    if (!packed) return null;
+    const ns = ensureNamespace();
+    const snap = addSnapshot(ns, name, false, c.chatId, packed);
+    return writeNamespace(ns, c.chatId) ? snap : null;
   }
+
   async function restoreSnapshot(id) {
-    const context = ctx();
-    if (!usable(context)) return false;
-    const targetId = context.chatId;
-    const namespace = ensure(), snapshot = namespace.snapshots.find(item => item.id === id);
-    if (!snapshot || !validPack(snapshot.data)) return false;
-    const previous = pack(context.chatId);
-    if (validPack(previous)) addSnapshot(namespace, '恢复前自动备份', true, context.chatId, previous);
-    await install(snapshot.data, targetId);
+    const c = ctx();
+    if (!usable(c)) return false;
+    const targetId = c.chatId;
+    const ns = ensureNamespace();
+    const snap = ns.snapshots.find(s => s.id === id);
+    if (!snap || !validPack(snap.data)) return false;
+
+    const prev = packLocal(targetId);
+    if (prev) addSnapshot(ns, '恢复前自动备份', true, targetId, prev);
+    if (!install(snap.data, targetId, false)) return false;
     if (ctx()?.chatId !== targetId) return false;
-    const rev = settings().syncToChat ? pushInto(namespace, targetId) : null;
-    if (!write(namespace, targetId)) return false;
-    if (rev != null) setRevision(targetId, rev);
-    await window.OUTLINE_ENGINE?.prepareHistoryForGeneration?.();
+    const rev = settings().syncToChat ? pushInto(ns, targetId) : null;
+    if (!writeNamespace(ns, targetId)) return false;
+    if (rev != null) setRev(targetId, rev);
     window.OUTLINE_ENGINE?.applyInjection?.();
     return true;
   }
+
   function renameSnapshot(id, name) {
-    const context = ctx(); if (!usable(context)) return false;
-    const namespace = ensure(), snapshot = namespace.snapshots.find(item => item.id === id);
-    if (!snapshot) return false;
-    snapshot.name = String(name || snapshot.name).slice(0, 60);
-    return write(namespace, context.chatId);
+    const c = ctx();
+    if (!usable(c)) return false;
+    const ns = ensureNamespace();
+    const snap = ns.snapshots.find(s => s.id === id);
+    if (!snap) return false;
+    snap.name = String(name || snap.name).trim().slice(0, 60) || snap.name;
+    return writeNamespace(ns, c.chatId);
   }
+
   function deleteSnapshot(id) {
-    const context = ctx(); if (!usable(context)) return false;
-    const namespace = ensure(), before = namespace.snapshots.length;
-    namespace.snapshots = namespace.snapshots.filter(item => item.id !== id);
-    return before !== namespace.snapshots.length && write(namespace, context.chatId);
+    const c = ctx();
+    if (!usable(c)) return false;
+    const ns = ensureNamespace();
+    const before = ns.snapshots.length;
+    ns.snapshots = ns.snapshots.filter(s => s.id !== id);
+    return ns.snapshots.length !== before && writeNamespace(ns, c.chatId);
   }
+
   function exportSnapshot(id) {
-    const snapshot = listSnapshots().find(item => item.id === id);
-    return snapshot ? { type: TYPE, v: 2, ...copy(snapshot) } : null;
+    const snap = listSnapshots().find(s => s.id === id);
+    return snap ? { type: SNAPSHOT_TYPE, v: 3, ...clone(snap) } : null;
   }
+
   function importSnapshot(value) {
-    const context = ctx();
-    if (!usable(context) || value?.type !== TYPE || value.v !== 2 || !validPack(value.data)) throw new Error('不是有效的v2剧情存档；旧存档请通过大纲JSON导入迁移');
-    const namespace = ensure();
-    const snapshot = addSnapshot(namespace, `${value.name || '剧情存档'}（导入）`, false, context.chatId, value.data);
-    return write(namespace, context.chatId) ? snapshot : null;
+    const c = ctx();
+    if (!usable(c) || value?.type !== SNAPSHOT_TYPE || ![2, 3].includes(Number(value?.v)) || !validPack(value?.data)) {
+      throw new Error('不是有效的剧情大纲存档快照');
+    }
+    const ns = ensureNamespace();
+    const snap = addSnapshot(ns, `${value.name || '大纲存档'}（导入）`, false, c.chatId, value.data);
+    return writeNamespace(ns, c.chatId) ? snap : null;
   }
+
   function getStatus() {
-    const context = ctx(), namespace = read(), st = settings();
+    const c = ctx();
+    const ns = readNamespace();
+    const st = settings();
     return {
-      usable: usable(context), apiAvailable: !!(context && (context.updateChatMetadata || context.chatMetadata)),
-      syncEnabled: st.syncToChat, autoBackupEnabled: st.autoBackup,
-      localRev: usable(context) ? revision(context.chatId) : 0,
-      liveRev: Number(namespace?.live?.rev) || 0, snapshotCount: namespace?.snapshots?.length || 0
+      usable: usable(c),
+      apiAvailable: Boolean(c && (c.updateChatMetadata || c.chatMetadata)),
+      syncEnabled: st.syncToChat,
+      autoBackupEnabled: st.autoBackup,
+      localRev: usable(c) ? getRev(c.chatId) : 0,
+      liveRev: Number(ns?.live?.rev) || 0,
+      snapshotCount: Array.isArray(ns?.snapshots) ? ns.snapshots.length : 0
     };
   }
-  window.WORLD_ENGINE_CHATCACHE.registerScope('outline', {
-    onStoreWrite, onChatLoaded, pushLiveNow, getStatus,
-    listSnapshots, createSnapshot, restoreSnapshot, renameSnapshot, deleteSnapshot,
-    exportSnapshot, importSnapshot, whenReady: () => restoring
-  });
+
+  if (window.WORLD_ENGINE_CHATCACHE?.registerScope) {
+    window.WORLD_ENGINE_CHATCACHE.registerScope('outline', {
+      onStoreWrite,
+      onChatLoaded,
+      pushLiveNow,
+      getStatus,
+      listSnapshots,
+      createSnapshot,
+      restoreSnapshot,
+      renameSnapshot,
+      deleteSnapshot,
+      exportSnapshot,
+      importSnapshot,
+      whenReady: () => restoring
+    });
+  }
 })();

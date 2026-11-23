@@ -8,16 +8,15 @@
   window.worldEngineMemoryGenerateInterceptor = async function(_chat, _contextSize, _abort, _type) {
     try {
       await window.WORLD_ENGINE_CHATCACHE?.whenReady?.();
-      await window.STORY_ENGINE_HISTORY?.prepareForGeneration?.({ type: _type });
       await window.MEMORY_ENGINE?.prepareHistoryForGeneration?.();
     } catch (error) {
       // 本地撤旧失败不阻断正常聊天；这里没有后台 API 请求。
       console.error('[记忆引擎] 生成前撤下失效摘要失败', error);
     }
     try {
-      await window.OUTLINE_ENGINE?.prepareHistoryForGeneration?.();
+      await window.OUTLINE_ENGINE?.prepareHistoryForGeneration?.({ type: _type });
     } catch (error) {
-      console.error('[剧情大纲] 生成前进度审计失败（已隔离）', error);
+      console.error('[剧情大纲] 生成前进度回退与注入失败（已隔离）', error);
     }
   };
 
@@ -92,16 +91,15 @@
     },
     {
       id: 'outline', label: '剧情大纲', modules: [
-        'outline-engine-settings.js', 'outline-engine-data.js', 'outline-engine-scheduler.js',
-        'outline-engine-prompt.js', 'story-engine-projection.js', 'story-engine-history.js',
-        'outline-engine-cache.js', 'outline-engine.js'
+        'outline-engine-settings.js',
+        'outline-engine-data.js',
+        'outline-engine-prompt.js',
+        'outline-engine-cache.js',
+        'outline-engine.js'
       ],
       contracts: {
         OUTLINE_ENGINE_SETTINGS: ['getSettings', 'patchSettings'],
-        MEMORY_ENGINE_TIMELINE: ['captureRange', 'auditRefs', 'digestRefs', 'hashText'],
         OUTLINE_ENGINE_DATA: ['loadState', 'saveState', 'commitPlan'],
-        OUTLINE_ENGINE_SCHEDULER: ['select', 'evaluateConditions'],
-        STORY_ENGINE_HISTORY: ['captureWorldStep', 'commitWorldStep', 'reconcile'],
         OUTLINE_ENGINE_PROMPT: ['buildCheckPrompt', 'buildOrganizePrompt'],
         OUTLINE_ENGINE: ['init', 'applyInjection', 'checkNow', 'abort', 'isRunning']
       }
