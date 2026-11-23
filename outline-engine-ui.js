@@ -32,8 +32,7 @@ window.OUTLINE_ENGINE_UI = (function() {
   }
 
   const NAV_ITEMS = [
-    { view: 'progress', label: '进度', sub: '当前章节 · 节点推进 · 快捷切态', poem: '脉络所至，一目了然' },
-    { view: 'tracks',   label: '剧情', sub: '主线 · 支线 · 暗线 · 章节看板', poem: '草蛇灰线，伏脉千里' },
+    { view: 'tracks',   label: '剧情', sub: '当前进度 · 主支暗线 · 章节看板', poem: '草蛇灰线，伏脉千里' },
     { view: 'schedule', label: '注入', sub: '前台指导 · 后台备忘 · 提示词',   poem: '运筹帷幄之中' }
   ];
 
@@ -90,6 +89,7 @@ window.OUTLINE_ENGINE_UI = (function() {
         collapsedSections: {},
         textOpen: false,
         sourceText: '',
+        organizeRequirements: null,
         textPreview: null,
         boardMode: 'track',
         selectedChapterId: null,
@@ -407,73 +407,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     </article>`;
   }
 
-  // ==================== 进度分页 ====================
-
-  function renderProgressView(state) {
-    const plan = state.plan || { chapters: [], tracks: [], nodes: [] };
-    const chapters = plan.chapters || [];
-    const tracks = plan.tracks || [];
-    const allNodes = plan.nodes || [];
-    const header = subTopbar('剧情进度', '脉络所至，一目了然');
-    const hasAnyContent = Boolean(clean(plan.title) || chapters.length || tracks.length || allNodes.length);
-
-    if (!hasAnyContent) {
-      return `${header}<section class="we-section we-outline-pos-section">
-        <div class="we-outline-section-head">
-          <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置</div>
-          <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
-        </div>
-        <div class="we-outline-empty-box">
-          <p class="we-outline-empty">尚未建立剧情大纲。可点「整理文本」由 AI 拆解，或进入「剧情」页新建章节与剧情线。</p>
-          <div class="we-outline-actions">
-            ${button('open-text', '整理文本导入', '', 'primary')}
-            ${button('view-tracks', '前往剧情看板')}
-          </div>
-        </div>
-      </section>`;
-    }
-
-    const doneAll = allNodes.filter(n => data().isNodeClosed(state, n.id)).length;
-    const curIdx = chapters.findIndex(c => c.id === state.currentChapterId);
-    const curCh = curIdx >= 0 ? chapters[curIdx] : (chapters[0] || null);
-    const prog = curCh ? data().getChapterProgress(state, curCh.id) : { doneCount: 0, totalCount: 0 };
-    const unlocked = engine()?.getUnlockedOpenNodes?.(state) || [];
-    const chNodes = curCh ? data().getChapterNodes(state, curCh.id) : allNodes;
-    const focusIds = new Set(unlocked.map(n => n.id));
-    const focusList = [...unlocked, ...chNodes.filter(n => !focusIds.has(n.id))];
-    const prevCh = curIdx > 0 ? chapters[curIdx - 1] : null;
-    const nextCh = curIdx >= 0 && curIdx < chapters.length - 1 ? chapters[curIdx + 1] : null;
-
-    const chapterLine = curCh
-      ? `<div class="we-outline-pos-chapter">
-          <div class="we-outline-track-title-row">
-            <strong>第 ${curIdx + 1}/${chapters.length} 章 · ${h(curCh.title || '未命名章节')}</strong>
-            <span class="we-outline-badge we-outline-badge-current">当前章</span>
-            ${prog.totalCount ? `<span class="we-outline-hint">推进门槛 ${prog.doneCount}/${prog.totalCount}</span>` : ''}
-          </div>
-          ${curCh.goal ? `<p class="we-outline-goal">${h(curCh.goal)}</p>` : ''}
-          ${(prevCh || nextCh) ? `<div class="we-outline-actions">
-            ${prevCh ? button('set-chapter', `← 上一章：${prevCh.title}`, ` data-id="${h(prevCh.id)}"`) : ''}
-            ${nextCh ? button('set-chapter', `下一章：${nextCh.title} →`, ` data-id="${h(nextCh.id)}"`) : ''}
-          </div>` : ''}
-        </div>`
-      : '<div class="we-outline-pos-chapter"><strong>跨章自由推进中</strong></div>';
-
-    return `${header}<section class="we-section we-outline-pos-section">
-      <div class="we-outline-section-head">
-        <div class="we-section-title we-outline-sec-title" style="margin-bottom:0;border:none;padding:0;">当前位置</div>
-        <div class="we-outline-actions">${button('view-tracks', '进入剧情看板 →')}</div>
-      </div>
-      ${plan.title ? `<div class="we-outline-pos-plan">《${h(plan.title)}》</div>` : ''}
-      ${chapterLine}
-      <div class="we-outline-pos-nodes">
-        ${focusList.map((node, idx) => renderNodeCard(state, node, idx, { editable: false })).join('') || '<p class="we-outline-empty">当前位置暂无待推进节点。</p>'}
-      </div>
-      <div class="we-outline-pos-foot">全书共 ${chapters.length} 章 · ${tracks.length} 条剧情线 · 已完成 ${doneAll}/${allNodes.length} 个节点</div>
-    </section>`;
-  }
-
-  // ==================== 剧情看板分页 ====================
+  // ==================== 剧情看板分页（含当前章进度与快捷切章） ====================
 
   function renderInlinePlanForm(f) {
     return `<div class="we-outline-inline-editor">
@@ -647,7 +581,28 @@ window.OUTLINE_ENGINE_UI = (function() {
         ${unchaptered.length ? `<div class="we-outline-unchaptered"><div class="we-outline-section-head"><strong>跨章常驻节点（未绑定特定章节）</strong></div>${unchaptered.map((n, idx) => renderNodeCard(state, n, idx, { editable: true })).join('')}</div>` : ''}`;
     }
 
-    return `${subTopbar('跨章剧情线', '草蛇灰线，伏脉千里')}
+    const curIdx = chapters.findIndex(c => c.id === state.currentChapterId);
+    const curCh = curIdx >= 0 ? chapters[curIdx] : (chapters[0] || null);
+    const curProg = curCh ? data().getChapterProgress(state, curCh.id) : { doneCount: 0, totalCount: 0 };
+    const doneAll = allNodes.filter(n => data().isNodeClosed(state, n.id)).length;
+    const prevCh = curIdx > 0 ? chapters[curIdx - 1] : null;
+    const nextCh = curIdx >= 0 && curIdx < chapters.length - 1 ? chapters[curIdx + 1] : null;
+    const posStrip = curCh ? `<div class="we-outline-pos-chapter">
+      <div class="we-outline-section-head" style="margin-bottom:${(mode === 'track' && curCh.goal) ? '6px' : '0'};">
+        <div class="we-outline-track-title-row">
+          <strong>第 ${curIdx + 1}/${chapters.length} 章 · ${h(curCh.title || '未命名章节')}</strong>
+          <span class="we-outline-badge we-outline-badge-current">当前章</span>
+          <span class="we-outline-hint">${curProg.totalCount ? `门槛 ${curProg.doneCount}/${curProg.totalCount} · ` : ''}已完成 ${doneAll}/${allNodes.length}</span>
+        </div>
+        ${(prevCh || nextCh) ? `<div class="we-outline-track-ops">
+          ${prevCh ? button('set-chapter', '← 上一章', ` data-id="${h(prevCh.id)}"`) : ''}
+          ${nextCh ? button('set-chapter', '下一章 →', ` data-id="${h(nextCh.id)}"`) : ''}
+        </div>` : ''}
+      </div>
+      ${mode === 'track' && curCh.goal ? `<p class="we-outline-goal" style="margin-bottom:0;">本章目标：${h(curCh.goal)}</p>` : ''}
+    </div>` : '';
+
+    return `${subTopbar('剧情看板', '草蛇灰线，伏脉千里')}
       <section class="we-section we-outline-home-chapter">
         <div class="we-section-title we-outline-sec-title">剧情看板</div>
         <div class="we-outline-plan-heading">
@@ -667,6 +622,7 @@ window.OUTLINE_ENGINE_UI = (function() {
             ${plan.authorNotes ? `<details class="we-outline-plan-detail"><summary>作者幕后总备忘（绝不进主聊天）</summary><p>${h(plan.authorNotes)}</p></details>` : ''}
           `}
         </div>
+        ${posStrip}
         <div class="we-outline-board-toolbar">
           <div class="we-outline-seg" role="group" aria-label="看板分组模式">
             <button type="button" class="we-outline-seg-btn${mode === 'chapter' ? ' is-active' : ''}" data-outline-action="mode-chapter">按章节</button>
@@ -739,17 +695,25 @@ window.OUTLINE_ENGINE_UI = (function() {
   function renderTextOverlay() {
     const d = getDraft();
     const running = engine()?.isRunning?.() === true;
+    const reqText = d.organizeRequirements !== null
+      ? d.organizeRequirements
+      : (loadSettings().organizeCustomRequirements || '');
     return `${subTopbar('整理文本', '删繁就简', 'close-text')}
       <section class="we-section we-outline-text-import">
         <div class="we-section-title">将大纲文本智能拆分为多线节点</div>
-        <p class="we-outline-hint">支持粘贴自然语言大纲或导入 .txt / .md。AI 只做结构化拆分，不私自扩写剧情，整理结果需你确认后才覆盖生效。</p>
+        <p class="we-outline-hint">支持粘贴自然语言大纲或导入 .txt / .md。可在下方附加你的分章/分线/节奏或补全要求，整理结果需你确认后才覆盖生效。</p>
         <label class="we-outline-field">
           <span>粘贴主线、支线、暗线及章节安排，或选择文件</span>
-          <textarea id="we-outline-source-text" rows="9" placeholder="例如：\n第一章 初入青石镇：主角避雨入住客栈，结识药师沈清秋，发现镇上水源异常。\n暗线：镇长暗中与北境密使勾结。">${h(d.sourceText || '')}</textarea>
+          <textarea id="we-outline-source-text" rows="8" placeholder="例如：\n第一章 初入青石镇：主角避雨入住客栈，结识药师沈清秋，发现镇上水源异常。\n暗线：镇长暗中与北境密使勾结。">${h(d.sourceText || '')}</textarea>
         </label>
         <input id="we-outline-text-file" type="file" accept=".txt,.md,text/plain,text/markdown">
+        <label class="we-outline-field" style="margin-top:10px;">
+          <span>额外整理要求（可选 · 自动记忆，AI 整理时优先遵循）</span>
+          <textarea id="we-outline-organize-requirements" rows="3" placeholder="例如：每章拆成 3~4 个核心节点；反派阴谋全部归入暗线并隐藏真相；节奏偏慢热；单独拆出一条感情支线；允许根据草稿细化达成条件…">${h(reqText)}</textarea>
+        </label>
         <div class="we-outline-actions">
           ${button('organize-text', running ? '正在整理…' : 'AI整理并预览', running ? ' disabled' : '', 'primary')}
+          ${clean(reqText) ? button('clear-organize-req', '清空要求') : ''}
           ${button('close-text', '收起（保留文本）')}
           ${running ? button('abort', '停止', '', 'danger') : ''}
         </div>
@@ -1014,7 +978,6 @@ window.OUTLINE_ENGINE_UI = (function() {
     let body = '';
     if (d.settingsOpen) body = renderSettings(st);
     else if (d.textOpen) body = renderTextOverlay();
-    else if (d.view === 'progress') body = renderProgressView(state);
     else if (d.view === 'tracks') body = renderTracksView(state);
     else if (d.view === 'schedule') body = renderScheduleView(state, st);
     else body = renderHome(state, st);
@@ -1117,6 +1080,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     }
     if (el.id === 'we-outline-snap-name') { d.snapshotName = el.value || ''; return; }
     if (el.id === 'we-outline-source-text') { d.sourceText = el.value || ''; return; }
+    if (el.id === 'we-outline-organize-requirements') { d.organizeRequirements = el.value || ''; return; }
     if (el.id === 'we-outline-model-list') {
       if (!el.value) return;
       if (!d.settingsDraft) d.settingsDraft = clone(loadSettings());
@@ -1134,8 +1098,7 @@ window.OUTLINE_ENGINE_UI = (function() {
     const id = el?.dataset?.id || '';
 
     if (action === 'view-home') { d.view = 'home'; d.settingsOpen = false; d.textOpen = false; d.inlineEdit = null; refresh(); return; }
-    if (action === 'view-progress') { d.view = 'progress'; d.settingsOpen = false; d.textOpen = false; d.inlineEdit = null; refresh(); return; }
-    if (action === 'view-tracks') { d.view = 'tracks'; d.settingsOpen = false; d.textOpen = false; d.inlineEdit = null; refresh(); return; }
+    if (action === 'view-progress' || action === 'view-tracks') { d.view = 'tracks'; d.settingsOpen = false; d.textOpen = false; d.inlineEdit = null; refresh(); return; }
     if (action === 'view-schedule') { d.view = 'schedule'; d.settingsOpen = false; d.textOpen = false; d.inlineEdit = null; refresh(); return; }
     if (action === 'toggle-settings') {
       d.settingsOpen = !d.settingsOpen;
@@ -1145,8 +1108,21 @@ window.OUTLINE_ENGINE_UI = (function() {
       return;
     }
     if (action === 'close-settings') { d.settingsOpen = false; d.settingsDraft = null; refresh(); return; }
-    if (action === 'open-text') { d.textOpen = true; d.settingsOpen = false; refresh(); return; }
+    if (action === 'open-text') {
+      d.textOpen = true;
+      d.settingsOpen = false;
+      if (d.organizeRequirements === null) d.organizeRequirements = loadSettings().organizeCustomRequirements || '';
+      refresh();
+      return;
+    }
     if (action === 'close-text') { d.textOpen = false; refresh(); return; }
+    if (action === 'clear-organize-req') {
+      d.organizeRequirements = '';
+      settingsApi()?.patchSettings?.({ organizeCustomRequirements: '' });
+      showToast('已清空额外整理要求');
+      refresh();
+      return;
+    }
     if (action === 'mode-track') { d.boardMode = 'track'; d.inlineEdit = null; refresh(); return; }
     if (action === 'mode-chapter') { d.boardMode = 'chapter'; d.inlineEdit = null; refresh(); return; }
     if (action === 'select-chapter') { d.selectedChapterId = id; d.inlineEdit = null; refresh(); return; }
@@ -1387,8 +1363,12 @@ window.OUTLINE_ENGINE_UI = (function() {
     if (action === 'organize-text') {
       const ta = typeof document !== 'undefined' ? document.getElementById('we-outline-source-text') : null;
       if (ta) d.sourceText = ta.value;
+      const reqEl = typeof document !== 'undefined' ? document.getElementById('we-outline-organize-requirements') : null;
+      if (reqEl) d.organizeRequirements = reqEl.value;
+      const customReq = clean(d.organizeRequirements !== null ? d.organizeRequirements : (loadSettings().organizeCustomRequirements || ''));
+      settingsApi()?.patchSettings?.({ organizeCustomRequirements: customReq });
       try {
-        const res = await engine().organizeText(d.sourceText);
+        const res = await engine().organizeText(d.sourceText, { customRequirements: customReq });
         if (res?.ok && res.plan) {
           d.textPreview = res.plan;
           showToast('整理完成，请核对预览后采用');

@@ -11,6 +11,7 @@ async function main() {
   let currentChat = 'ui-chat-1';
   let aborted = 0;
   let injected = 0;
+  const organizeCalls = [];
   const faces = [];
 
   const sandbox = {
@@ -36,6 +37,10 @@ async function main() {
     OUTLINE_ENGINE: {
       abort: () => { aborted++; },
       applyInjection: () => { injected++; },
+      organizeText: async (text, opts) => {
+        organizeCalls.push({ text, opts });
+        return { ok: true, plan: { title: '整理预览', chapters: [{ id: 'c1', title: '第一章', goal: '' }], tracks: [{ id: 't1', kind: 'main', title: '主线' }], nodes: [] } };
+      },
       buildNarrativeGuidance: () => '【剧情指导】测试指导',
       buildWorldGuidance: () => '【剧情指导：作者后台专用】后台测试',
       getUnlockedOpenNodes: () => [],
@@ -60,13 +65,13 @@ async function main() {
   assert.strictEqual(ui.init(), false, '重复 init 不得重复注册');
   assert.strictEqual(faces.length, 1);
 
-  // 2. 首页精简结构（3 项两字纵轴导航，无死路由）
+  // 2. 首页精简结构（仅保留「剧情」「注入」两项两字纵轴导航，已合并「进度」并移除死路由）
   const homeHtml = ui.render();
   assert.ok(homeHtml.includes('剧情脉络'));
-  assert.ok(homeHtml.includes('data-outline-nav="progress"') && homeHtml.includes('data-outline-nav="tracks"') && homeHtml.includes('data-outline-nav="schedule"'));
-  assert.ok(!homeHtml.includes('data-outline-nav="facts"') && !homeHtml.includes('view-recovery'), 'v3 已移除臃肿的五表线索页与死路由');
+  assert.ok(homeHtml.includes('data-outline-nav="tracks"') && homeHtml.includes('data-outline-nav="schedule"'));
+  assert.ok(!homeHtml.includes('data-outline-nav="progress"') && !homeHtml.includes('data-outline-nav="facts"') && !homeHtml.includes('view-recovery'), '首页仅保留剧情与注入两项导航');
 
-  // 3. XSS 转义
+  // 3. XSS 转义与剧情页内嵌当前章进度条
   data.commitPlan({
     title: '<script>alert(1)</script>',
     chapters: [{ id: 'c1', title: '<img src=x onerror=alert(2)>', goal: '目标' }],
@@ -75,9 +80,24 @@ async function main() {
   }, 0);
   await ui._test.handleAction('view-tracks');
   const tracksHtml = ui.render();
+  assert.ok(tracksHtml.includes('we-outline-pos-chapter') && tracksHtml.includes('当前章'), '剧情看板应内嵌当前章进度条');
   assert.ok(!tracksHtml.includes('<script>alert(1)'), '标题必须转义防止 XSS');
   assert.ok(!tracksHtml.includes('<img src=x'), '章节标题必须转义防止 XSS');
   assert.ok(!tracksHtml.includes('<svg onload='), '提示必须转义防止 XSS');
+
+  // 3.5 AI 整理文本支持自定义额外要求并自动记忆
+  await ui._test.handleAction('open-text');
+  const textHtml = ui.render();
+  assert.ok(textHtml.includes('id="we-outline-organize-requirements"'), '整理文本浮层应提供额外整理要求输入框');
+  ui._test.captureInput({ id: 'we-outline-source-text', value: '第一章 进城查案', dataset: {} });
+  ui._test.captureInput({ id: 'we-outline-organize-requirements', value: '每章最多3个节点，反派线索全部放暗线', dataset: {} });
+  await ui._test.handleAction('organize-text');
+  assert.strictEqual(organizeCalls.length, 1);
+  assert.strictEqual(organizeCalls[0].opts.customRequirements, '每章最多3个节点，反派线索全部放暗线');
+  assert.strictEqual(settings.getSettings(true).organizeCustomRequirements, '每章最多3个节点，反派线索全部放暗线', '额外整理要求应自动记忆到设置');
+  await ui._test.handleAction('clear-organize-req');
+  assert.strictEqual(settings.getSettings(true).organizeCustomRequirements, '', '清空要求应同步清空记忆值');
+  await ui._test.handleAction('close-text');
 
   // 4. 草稿按聊天隔离
   currentChat = 'ui-chat-2';

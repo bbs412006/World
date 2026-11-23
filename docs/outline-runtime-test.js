@@ -215,21 +215,26 @@ function createEnv(initialChat) {
     assert.strictEqual(env.injections.get('outline-engine-outline').content, '', '清空大纲后应立即撤下注入');
   }
 
-  // 5. organizeText 文本整理预览不直接覆写存档
+  // 5. organizeText 文本整理预览不直接覆写存档，且将自定义额外要求注入整理提示词
   {
     const env = createEnv([{ is_user: false, name: '旁白', mes: '开场' }]);
     const { OUTLINE_ENGINE_SETTINGS: cfg, OUTLINE_ENGINE_DATA: data, OUTLINE_ENGINE: eng } = env.sandbox;
     cfg.patchSettings({ apiUrl: 'https://outline.test/v1', model: 'm1' });
-    env.setApiHandler(async () => JSON.stringify({
-      title: '整理卷',
-      chapters: [{ id: 'ch1', title: '序章', goal: '起程' }],
-      tracks: [{ id: 't1', kind: 'main', title: '主线' }],
-      nodes: [{ id: 'n1', trackId: 't1', chapterIds: ['ch1'], title: '出发', completionCriteria: '离村' }]
-    }));
-    const out = await eng.organizeText('主角离开山村踏上旅途');
+    let capturedPrompt = '';
+    env.setApiHandler(async prompt => {
+      capturedPrompt = prompt;
+      return JSON.stringify({
+        title: '整理卷',
+        chapters: [{ id: 'ch1', title: '序章', goal: '起程' }],
+        tracks: [{ id: 't1', kind: 'main', title: '主线' }],
+        nodes: [{ id: 'n1', trackId: 't1', chapterIds: ['ch1'], title: '出发', completionCriteria: '离村' }]
+      });
+    });
+    const out = await eng.organizeText('主角离开山村踏上旅途', { customRequirements: '节奏慢热，感情线拆为独立支线' });
     assert.strictEqual(out.ok, true);
     assert.strictEqual(out.plan.chapters.length, 1);
     assert.strictEqual(data.loadState().plan.chapters.length, 0, 'organizeText 仅生成预览，不得未经确认直接落盘');
+    assert.ok(capturedPrompt.includes('用户额外整理要求') && capturedPrompt.includes('节奏慢热，感情线拆为独立支线'), '自定义整理要求必须写入发送给 AI 的提示词');
   }
 
   console.log('outline v3 runtime tests passed');

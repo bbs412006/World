@@ -429,10 +429,16 @@ window.OUTLINE_ENGINE = (function() {
 
   // ==================== 文本整理建纲 & 剧情进度核对 ====================
 
-  async function organizeText(rawText) {
+  async function organizeText(rawText, options = {}) {
     const text = clean(rawText);
     if (!text) throw new Error('请输入或导入待整理的大纲文本');
     if (activeTask) throw new Error('当前已有大纲任务运行中，请稍候或先停止');
+
+    const customRequirements = typeof options === 'string'
+      ? clean(options)
+      : (options && options.customRequirements !== undefined
+        ? clean(options.customRequirements)
+        : clean(settings().organizeCustomRequirements));
 
     const originChat = chatId();
     const token = ++sessionToken;
@@ -447,7 +453,7 @@ window.OUTLINE_ENGINE = (function() {
         try { return window.STORY_ENGINE_BRIDGE?.formatIdentityRosterForPrompt?.() || ''; }
         catch (_) { return ''; }
       })();
-      const basePrompt = promptApi().buildOrganizePrompt({ text, roster });
+      const basePrompt = promptApi().buildOrganizePrompt({ text, roster, customRequirements });
       const res = await invokeWithFormatRetry({
         label: '整理大纲',
         basePrompt,

@@ -71,10 +71,11 @@ window.OUTLINE_ENGINE_PROMPT = (function() {
   function buildOrganizePrompt(options = {}) {
     const text = clean(options.text);
     const roster = clean(options.roster);
+    const customRequirements = cut(options.customRequirements, 4000);
     return `你是【剧情大纲整理员】，负责将用户提供的大纲草稿、故事梗概或章节设想整理为清晰、防剧透的轻量结构化 JSON。
 
 ## 核心规则
-1. **严格忠于原文**：只做分章、分线与节点提炼，禁止擅自杜撰原文未提及的新人物、新阵营或新结局。
+1. **严格忠于原文**：默认只做分章、分线与节点提炼，不擅自杜撰原文未提及的新人物、新阵营或新结局；${customRequirements ? '若下方【用户额外整理要求】对分章粒度、剧情线划分、节奏侧重、暗线拆分或适度补全有明确要求，优先遵循用户要求，但仍须严格遵守防剧透分层与 JSON 格式规范。' : '除非用户另有要求，不额外扩写未提及的设定。'}
 2. **三类剧情线（tracks.kind）**：
    - \`main\`：主线推进节点（绑定所属章节，章节内所有必做主线节点完成后自动进入下一章）；
    - \`side\`：支线剧情（可绑定起始章节并跨章持续，默认 \`required: false\`）；
@@ -115,7 +116,7 @@ window.OUTLINE_ENGINE_PROMPT = (function() {
     }
   ]
 }
-${roster ? `\n【已知人物与公开势力规范名参考（便于统一 actors 称呼）】\n${cut(roster, 1200)}\n` : ''}
+${roster ? `\n【已知人物与公开势力规范名参考（便于统一 actors 称呼）】\n${cut(roster, 1200)}\n` : ''}${customRequirements ? `\n## 用户额外整理要求（优先遵循）\n${customRequirements}\n` : ''}
 【用户待整理原文】
 ${text || '（空）'}`;
   }

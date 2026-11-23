@@ -37,6 +37,8 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     useWorldReference: true,
     injectIntoMemoryEngine: true,
     useMemoryReference: true,
+    // 文本整理默认额外要求（自动记忆，供整理大纲时优先遵循）
+    organizeCustomRequirements: '',
     // 聊天元数据同步与自动快照
     syncToChat: false,
     autoBackup: false
@@ -91,6 +93,7 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
       useWorldReference: merged.useWorldReference !== false,
       injectIntoMemoryEngine: merged.injectIntoMemoryEngine !== false,
       useMemoryReference: merged.useMemoryReference !== false,
+      organizeCustomRequirements: String(merged.organizeCustomRequirements || '').trim().slice(0, 4000),
       syncToChat: merged.syncToChat === true,
       autoBackup: merged.autoBackup === true
     };
