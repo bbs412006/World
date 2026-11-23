@@ -806,10 +806,12 @@ window.OUTLINE_ENGINE_UI = (function() {
       </details>` : ''}
       ${window.WORLD_ENGINE_UI?.renderLastPromptViewer?.({ focus: 'outline' }) || ''}`;
 
-    const aboutHtml = `<div class="we-section-title">剧情大纲引擎 v${h(settingsApi()?.VERSION || '3.0.0')}</div>
+    const aboutHtml = `<div class="we-about-current"><span class="we-changelog-cur">剧情大纲 v${h(settingsApi()?.VERSION || '3.0.0')}</span></div>
+      <div class="we-section-title" style="margin-top:10px;">v3.0.0 · 轻量化架构重构与 0ms 楼层回退（2026-11-23）</div>
       <ul class="we-changelog-items">
-        <li><b>v3.0.0 轻量重构</b>：砍除 11 类嵌套条件树、五层线索知情表与会锁人的联合历史强绑定；采用直观的三层结构（章节 → 主/支/暗线 → 节点），按楼层号 0ms 本地回退，彻底消灭 blocked 红牌锁死。</li>
-        <li>补齐 JSON 解析带错回灌纠错重试、防剧透双轨注入字数硬裁剪、空门槛章节自动推进与三模块弱联动故障隔离。</li>
+        <li>砍除 11 类嵌套布尔条件树、五层线索知情表与强耦合联合历史锁；收敛为直观三层结构（章节 → 主/支/暗线 → 节点），自动无损迁移旧版 v1/v2 存档。</li>
+        <li>改用按楼层号 0ms 本地回退，删楼/滑动/重 Roll 秒级撤回失效自动进度并保留手动覆盖，彻底消灭 blocked 红牌锁死，不再影响世界与记忆引擎运行。</li>
+        <li>修复冷却漏检主线节点与空门槛卡章问题；补齐 JSON 带错回灌纠错重试、防剧透双轨注入（前台公开指导 + 世界后台幕后备忘硬预算控制）与三页两字单屏 UI（进度 / 剧情 / 注入）。</li>
       </ul>`;
 
     const panels = {

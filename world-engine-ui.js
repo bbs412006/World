@@ -2476,14 +2476,23 @@ window.WORLD_ENGINE_UI = (function() {
         <div style="font-size:11px;color:var(--we-text3);margin-top:4px;">一键清空核心 7 表全部行数据、水位线与本地向量索引，并恢复已隐藏的聊天正文；清空前自动留存一份快照备份，不删除聊天记录。</div>
       </div>`;
 
-    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '2.0.0';
+    const memoryVersion = window.MEMORY_ENGINE_SETTINGS?.VERSION || '2.1.0';
     const memoryAboutBody = `
       <div class="we-about-current"><span class="we-changelog-cur">记忆引擎 v${h(memoryVersion)}</span></div>
       <div class="we-section" style="margin-top:10px;">
         <div class="we-section-title">记忆引擎 ${h(memoryVersion)}</div>
         <div style="font-size:12px;color:var(--we-text2);line-height:1.7;">
-          面向长篇对话的核心 7 表结构化记忆数据库（对齐 shujuku 表格架构与填表体验）。支持单表独立水位线、零消耗 Wave 波次智能合流追平、带错回灌纠错重试、同步删楼 0ms 回退、可编辑底层填表 System Prompt 与单表规则、双层省 Token 注入、Embedding/Rerank 混合语义检索，并可选通过协同桥与世界引擎、剧情大纲深度联动。
+          面向长篇对话的核心 7 表结构化记忆数据库（对齐 shujuku 表格架构与填表体验）。支持冷热双层注入、角色卡与用户人设空表初始化、单表独立水位线、零消耗 Wave 波次智能合流追平、带错回灌纠错重试、同步删楼 0ms 回退、可编辑底层填表 System Prompt 与单表规则、Embedding/Rerank 混合语义检索，并可选通过协同桥与世界引擎、剧情大纲弱联动。
         </div>
+      </div>
+      <div class="we-section" style="margin-top:10px;">
+        <div class="we-section-title">v2.1.0 · 冷热双层注入、角色卡初始化、单屏无滚动界面与一键清空（2026-11-23）</div>
+        <ul class="we-changelog-items">
+          <li>升级为「冷热双层注入」：热层（默认聊天内深度 1）仅放实时时空、主角近况、当前任务与在场/提及角色详情；冷层（默认顶部深度 999，支持切换 IN_PROMPT）放置全员角色索引、技能、物品、近期纪要、记忆回溯与 AM 概览索引，不打断最新对话流并显著提升 Prompt Cache 命中率。</li>
+          <li>对齐 shujuku 空表初始化体验：填表默认读取角色卡设定（$C）、用户人设（$U）与开场白，默认启用记忆世界书蓝绿灯自动读取，并为技能/物品/任务等空表注入 Init Trigger，解决开局不生成技能、物品和主线任务的问题。</li>
+          <li>一键追平合并多轮请求时，纪要表严格按轮次独立生成 AM0001 / AM0002…，严禁将多楼揉成单条；移除未使用的角色表「交互选项」字段，并在表格页底部与存档区新增「清空所有表数据」（清空前自动快照备份）。</li>
+          <li>全面重构记忆面板 UI：两字纵轴导航（表格 / 纪要 / 填表）、零横向滚动单屏自适应分页与行内展开详情，统一三模块设置页样式。</li>
+        </ul>
       </div>
       <div class="we-section" style="margin-top:10px;">
         <div class="we-section-title">v2.0.0 · 核心 7 表架构、Wave 智能追平、带错纠错与可编辑 shujuku 提示词</div>
@@ -3286,6 +3295,12 @@ window.WORLD_ENGINE_UI = (function() {
   //   date    —— 可选，日期不确定的留月份/年份；
   //   items   —— 该版本改动条目（每条一行，渲染时走 h() 转义）。
   const CHANGELOG = [
+    { version: '3.4.0', date: '2026-11-23', items: [
+      '剧情大纲模块全面轻量化重构至 v3.0.0（代码体积减重 55%）：砍除嵌套布尔条件树、五层线索知情表与会锁死三模块的联合历史强绑定；采用直观三层结构（章节 → 主/支/暗线 → 节点），按楼层号 0ms 本地回退并自动无损迁移 v1/v2 存档，彻底消除 blocked 红牌锁死与空门槛卡章问题。',
+      '剧情大纲新增 JSON 带错回灌纠错重试、无冷却漏检全量解锁核对、防剧透双轨注入（前台公开提示 / 后台幕后备注硬预算裁剪）及极简三页两字导航（进度 / 剧情 / 注入）。',
+      '记忆引擎升级至 v2.1.0：落地核心 7 表数据库 + Wave 智能追平（多轮同批严格逐轮独立生成 AMXXXX 纪要）、冷热双层注入（提升缓存命中与对话连贯度）、角色卡/人设/蓝绿灯世界书自动空表初始化、可编辑 shujuku 底层提示词与单表规则，以及带自动备份的一键清空所有表数据。',
+      '三模块全面收敛为“弱联动 + 故障隔离”：世界与大纲不再向记忆写表，独立原生 0ms 删楼回退；修复协同桥防抖窗口被覆盖的问题；统一三模块首页两字导航、零横向滚动单屏表格与设置页样式。'
+    ] },
     { version: '3.3.1', date: '2026-11-18', items: [
       '三模块「联动」设置对称升级：世界、记忆、大纲三处的联动选项卡统一拆分为「三模块协同调度」「与模块 A 联动」「与模块 B 联动」，任一页面均可直接切换共用的同轮并发调度策略。',
       '共用「同轮多模块 API 并发调度策略」独立存储于协同桥配置（story_engine_bridge_settings），即使仅同时开启世界与大纲、关闭或未启用记忆也能独立调度。',
