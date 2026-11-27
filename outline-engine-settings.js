@@ -3,6 +3,7 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
   'use strict';
 
   const STORAGE_KEY = 'outline_engine_settings';
+  const INJECT_POS_MIGRATION_KEY = 'outline_engine_inject_pos_front_v1';
   const VERSION = '3.0.0';
   const DEFAULTS = Object.freeze({
     // 独立 API 配置
@@ -25,9 +26,9 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
     firstLayerIsAiOpening: true,
     autoCheck: true,
     checkEveryX: 3,
-    // 前台与后台注入控制
+    // 前台与后台注入控制（默认 0 = 主提示词内 IN_PROMPT，位置靠前作为整体出文指导）
     injectIntoPrompt: true,
-    injectPosition: 1,
+    injectPosition: 0,
     injectDepth: 1,
     injectMaxChars: 2000,
     narrativeLimit: 4,
@@ -84,7 +85,7 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
       autoCheck: merged.autoCheck !== false,
       checkEveryX: clampInt(merged.checkEveryX, DEFAULTS.checkEveryX, 1, 1000),
       injectIntoPrompt: merged.injectIntoPrompt !== false,
-      injectPosition: [0, 1, 2].includes(Number(merged.injectPosition)) ? Number(merged.injectPosition) : 1,
+      injectPosition: [0, 1, 2].includes(Number(merged.injectPosition)) ? Number(merged.injectPosition) : DEFAULTS.injectPosition,
       injectDepth: clampInt(merged.injectDepth, DEFAULTS.injectDepth, 0, 20),
       injectMaxChars: clampInt(merged.injectMaxChars, DEFAULTS.injectMaxChars, 200, 20000),
       narrativeLimit: clampInt(merged.narrativeLimit, DEFAULTS.narrativeLimit, 1, 20),
@@ -101,9 +102,20 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
 
   function readStored() {
     try {
-      const raw = window.WORLD_ENGINE_STORE?.getItem?.(STORAGE_KEY);
+      const store = window.WORLD_ENGINE_STORE;
+      const raw = store?.getItem?.(STORAGE_KEY);
       const parsed = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      const obj = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      // 一次性平滑迁移：将旧版默认（聊天内深度 1）前移至主提示词内（IN_PROMPT=0）作为出文指导；
+      // 迁移标记落盘后，用户此后手动切回任意位置均不再改写。
+      if (store && !store.getItem?.(INJECT_POS_MIGRATION_KEY)) {
+        if (raw && Number(obj.injectPosition) === 1 && (obj.injectDepth === undefined || Number(obj.injectDepth) === 1)) {
+          obj.injectPosition = 0;
+          store.setItem?.(STORAGE_KEY, JSON.stringify(obj));
+        }
+        store.setItem?.(INJECT_POS_MIGRATION_KEY, '1');
+      }
+      return obj;
     } catch (error) {
       console.warn('[剧情大纲] 读取设置失败，使用默认值', error);
       return {};
@@ -118,6 +130,7 @@ window.OUTLINE_ENGINE_SETTINGS = (function() {
 
   function saveSettings(next) {
     cached = normalizeSettings(next);
+    window.WORLD_ENGINE_STORE?.setItem?.(INJECT_POS_MIGRATION_KEY, '1');
     window.WORLD_ENGINE_STORE?.setItem?.(STORAGE_KEY, JSON.stringify(cached));
     return { ...cached };
   }

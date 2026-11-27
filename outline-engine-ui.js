@@ -33,7 +33,7 @@ window.OUTLINE_ENGINE_UI = (function() {
 
   const NAV_ITEMS = [
     { view: 'tracks',   label: '剧情', sub: '当前进度 · 主支暗线 · 章节看板', poem: '草蛇灰线，伏脉千里' },
-    { view: 'schedule', label: '注入', sub: '前台指导 · 后台备忘 · 提示词',   poem: '运筹帷幄之中' }
+    { view: 'schedule', label: '注入', sub: '前置出文指导 · 后台备忘 · 提示词', poem: '运筹帷幄之中' }
   ];
 
   const SETTINGS_TABS = [
@@ -588,18 +588,18 @@ window.OUTLINE_ENGINE_UI = (function() {
     const prevCh = curIdx > 0 ? chapters[curIdx - 1] : null;
     const nextCh = curIdx >= 0 && curIdx < chapters.length - 1 ? chapters[curIdx + 1] : null;
     const posStrip = curCh ? `<div class="we-outline-pos-chapter">
-      <div class="we-outline-section-head" style="margin-bottom:${(mode === 'track' && curCh.goal) ? '6px' : '0'};">
+      <div class="we-outline-pos-head">
         <div class="we-outline-track-title-row">
           <strong>第 ${curIdx + 1}/${chapters.length} 章 · ${h(curCh.title || '未命名章节')}</strong>
           <span class="we-outline-badge we-outline-badge-current">当前章</span>
-          <span class="we-outline-hint">${curProg.totalCount ? `门槛 ${curProg.doneCount}/${curProg.totalCount} · ` : ''}已完成 ${doneAll}/${allNodes.length}</span>
         </div>
-        ${(prevCh || nextCh) ? `<div class="we-outline-track-ops">
-          ${prevCh ? button('set-chapter', '← 上一章', ` data-id="${h(prevCh.id)}"`) : ''}
-          ${nextCh ? button('set-chapter', '下一章 →', ` data-id="${h(nextCh.id)}"`) : ''}
-        </div>` : ''}
+        <div class="we-outline-pos-meta">${curProg.totalCount ? `门槛 ${curProg.doneCount}/${curProg.totalCount} · ` : ''}总进度 ${doneAll}/${allNodes.length}</div>
       </div>
-      ${mode === 'track' && curCh.goal ? `<p class="we-outline-goal" style="margin-bottom:0;">本章目标：${h(curCh.goal)}</p>` : ''}
+      ${mode === 'track' && curCh.goal ? `<p class="we-outline-goal we-outline-pos-goal">本章目标：${h(curCh.goal)}</p>` : ''}
+      ${(prevCh || nextCh) ? `<div class="we-outline-pos-nav">
+        ${prevCh ? button('set-chapter', '← 上一章', ` data-id="${h(prevCh.id)}"`) : ''}
+        ${nextCh ? button('set-chapter', '下一章 →', ` data-id="${h(nextCh.id)}"`) : ''}
+      </div>` : ''}
     </div>` : '';
 
     return `${subTopbar('剧情看板', '草蛇灰线，伏脉千里')}
@@ -644,28 +644,55 @@ window.OUTLINE_ENGINE_UI = (function() {
     const header = subTopbar('注入与调度', '运筹帷幄之中');
     const narrative = engine()?.buildNarrativeGuidance?.(state) || '';
     const world = engine()?.buildWorldGuidance?.() || '';
-    const posLabel = { 0: '主提示词内', 1: `聊天内深度 ${st.injectDepth ?? 1}`, 2: '主提示词之前' }[st.injectPosition ?? 1] || '聊天内深度 1';
+    const curPos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 0;
+    const curDepth = Number.isFinite(Number(st.injectDepth)) ? Math.max(0, Math.min(20, parseInt(st.injectDepth, 10))) : 1;
+    const posBadge = curPos === 0
+      ? '前置出文指导 · 主提示词内'
+      : curPos === 2
+        ? '最靠前 · 主提示词之前'
+        : `聊天内深度 ${curDepth}`;
     const lastFull = window.WORLD_ENGINE_INJECT_INSPECTOR?.getLastFullPrompt?.();
     const orderLine = lastFull
-      ? `上次正文三模块实际顺序：${(lastFull.order || []).map(item => item.label).join(' → ') || '均未注入'}（共 ${lastFull.promptLength || 0} 字）`
+      ? `上次三模块顺序：${(lastFull.order || []).map(item => item.label).join(' → ') || '均未注入'}（共 ${lastFull.promptLength || 0} 字）`
       : '尚未捕获上次正文生成；生成一次正文后可在下方核对三模块全文与顺序。';
 
     const frontSec = `<section class="we-section we-outline-inject-preview">
-      <div class="we-section-title">正文注入实时预览（${h(posLabel)} · ${narrative.length}/${st.injectMaxChars || 2000} 字）</div>
-      <p class="we-outline-hint">大纲以【剧情指导】柔性注入主聊天，严格脱敏，仅含公开目标、公开提示与已显露暗线线索，绝不含幕后备注与作者总备忘。</p>
+      <div class="we-outline-inject-head">
+        <div class="we-section-title">正文出文指导注入</div>
+        <span class="we-outline-inject-stat">${narrative.length}/${st.injectMaxChars || 2000} 字</span>
+      </div>
+      <div class="we-outline-inject-pos-bar">
+        <span class="we-outline-inject-pos-label">
+          <span class="we-outline-badge we-outline-badge-current">${h(posBadge)}</span>
+        </span>
+        <div class="we-outline-inject-pos-controls">
+          <select id="we-outline-quick-inject-pos" data-outline-quick-pos="true" aria-label="快捷切换出文指导注入位置">
+            <option value="0"${curPos === 0 ? ' selected' : ''}>主提示词内（IN_PROMPT · 推荐出文指导）</option>
+            <option value="2"${curPos === 2 ? ' selected' : ''}>主提示词之前（BEFORE_PROMPT · 最靠前）</option>
+            <option value="1"${curPos === 1 ? ' selected' : ''}>聊天内按深度（IN_CHAT）</option>
+          </select>
+          ${curPos === 1 ? `<input id="we-outline-quick-inject-depth" data-outline-quick-depth="true" type="number" min="0" max="20" step="1" value="${h(curDepth)}" title="聊天内注入深度" aria-label="聊天内注入深度">` : ''}
+        </div>
+      </div>
+      <p class="we-outline-hint">默认前置注入于主提示词内（IN_PROMPT），作为整体行文基调与剧情铺陈指导；严格脱敏，绝不含幕后备注与未显露暗线。</p>
       <p class="we-outline-hint">${h(orderLine)}</p>
       <pre>${h(narrative || '（当前未启用、无大纲或大纲已完结，本轮不向主聊天注入）')}</pre>
     </section>`;
 
     const backSec = `<section class="we-section we-outline-inject-preview">
-      <div class="we-section-title">世界引擎后台指导（${world.length}/${st.worldInjectMaxChars || 2000} 字）</div>
-      <p class="we-outline-hint">仅在世界引擎后台推演时作为只读背景提供（含暗线幕后备注），绝不进入主聊天。</p>
-      <pre>${h(world || '（未开启向世界提供后台指导，或当前无大纲）')}</pre>
+      <details class="we-outline-inject-fold"${world ? ' open' : ''}>
+        <summary class="we-outline-inject-head">
+          <div class="we-section-title">世界引擎后台指导</div>
+          <span class="we-outline-inject-stat">${world.length}/${st.worldInjectMaxChars || 2000} 字</span>
+        </summary>
+        <p class="we-outline-hint">仅在世界引擎后台推演时作为只读背景提供（含暗线幕后备注），绝不进入主聊天。</p>
+        <pre>${h(world || '（未开启向世界提供后台指导，或当前无大纲）')}</pre>
+      </details>
     </section>`;
 
     const sharedViewer = window.WORLD_ENGINE_UI?.renderLastPromptViewer?.({ focus: 'outline' }) || '';
     const promptSec = sharedViewer ? `<section class="we-section we-outline-last-prompt">
-      <div class="we-section-title">上次正文生成完整提示词（含三模块顺序）</div>
+      <div class="we-section-title">上次正文生成完整提示词</div>
       ${sharedViewer}
     </section>` : '';
 
@@ -819,11 +846,12 @@ window.OUTLINE_ENGINE_UI = (function() {
       </div>
       <div class="we-hint" id="we-outline-task-status" style="margin-top:8px;">${runningLabel ? `正在进行${h(runningLabel)}` : '当前没有运行中的剧情任务'}</div>`;
 
+    const curInjPos = [0, 1, 2].includes(Number(s.injectPosition)) ? Number(s.injectPosition) : 0;
     const injectBody = `
-      ${settingCheck('注入正文指导', 'injectIntoPrompt', s.injectIntoPrompt !== false, '按当前章节与已解锁节点注入防剧透公开版【剧情指导】，绝不泄露幕后备注与暗线真相。')}
-      ${settingSelect('注入位置', 'injectPosition', s.injectPosition ?? 1, [['1', '聊天内按深度（推荐）'], ['0', '主提示词内（IN_PROMPT）'], ['2', '主提示词之前']])}
+      ${settingCheck('注入正文出文指导', 'injectIntoPrompt', s.injectIntoPrompt !== false, '按当前章节与已解锁节点注入防剧透公开版【剧情指导】，绝不泄露幕后备注与暗线真相。')}
+      ${settingSelect('注入位置', 'injectPosition', curInjPos, [['0', '主提示词内（IN_PROMPT · 推荐作为出文指导）'], ['2', '主提示词之前（BEFORE_PROMPT · 最靠前）'], ['1', '聊天内按深度（IN_CHAT）']], '推荐「主提示词内」，将剧情指导放在对话流之前的较前位置，作为整体出文方向并兼顾提示词缓存命中。')}
       <div class="we-input-group" style="display:flex;gap:6px;">
-        ${settingCompactField('注入深度', 'injectDepth', s.injectDepth ?? 1, { type: 'number', min: 0, max: 20, step: 1, disabled: Number(s.injectPosition ?? 1) !== 1 })}
+        ${settingCompactField('注入深度', 'injectDepth', s.injectDepth ?? 1, { type: 'number', min: 0, max: 20, step: 1, disabled: curInjPos !== 1 })}
         ${settingCompactField('每轮最多安排节点', 'narrativeLimit', s.narrativeLimit ?? 4, { type: 'number', min: 1, max: 20, step: 1 })}
       </div>
       ${settingInput('前台注入字数上限', 'injectMaxChars', s.injectMaxChars ?? 2000, { type: 'number', min: 200, max: 20000, step: 100, hint: '限制注入正文的剧情指导篇幅，优先保留主线节点与当前章焦点。' })}`;
@@ -832,8 +860,9 @@ window.OUTLINE_ENGINE_UI = (function() {
     const effectiveCoordMode = (d.coordinationMode === 'independent' || d.coordinationMode === 'stagger-serial')
       ? d.coordinationMode
       : (window.STORY_ENGINE_BRIDGE?.getCoordinationMode?.() || 'stagger-serial');
+    const orderHintText = curInjPos === 1 ? '世界 → 记忆 → 大纲' : '大纲（前置出文指导）→ 世界 / 记忆';
     const bridgeHint = bridgeSummary
-      ? `当前已开启模块：${[bridgeSummary.worldEnabled && '世界', bridgeSummary.memoryEnabled && '记忆', bridgeSummary.outlineEnabled && '大纲'].filter(Boolean).join(' · ') || '无'} · 正文注入顺序：世界 → 记忆 → 大纲`
+      ? `当前已开启模块：${[bridgeSummary.worldEnabled && '世界', bridgeSummary.memoryEnabled && '记忆', bridgeSummary.outlineEnabled && '大纲'].filter(Boolean).join(' · ') || '无'} · 正文注入顺序：${orderHintText}`
       : '未加载协同桥（当前处于严格独立模式；停用任一模块不影响其余模块工作）';
 
     const bridgeBody = `
@@ -1530,6 +1559,23 @@ window.OUTLINE_ENGINE_UI = (function() {
       if (!el) return;
       try {
         captureInput(el);
+        if (el.dataset?.outlineQuickPos) {
+          const nextPos = [0, 1, 2].includes(Number(el.value)) ? Number(el.value) : 0;
+          settingsApi()?.patchSettings?.({ injectPosition: nextPos });
+          engine()?.applyInjection?.();
+          showToast(nextPos === 0 ? '已切换至主提示词内（前置出文指导）' : nextPos === 2 ? '已切换至主提示词之前' : '已切换至聊天内按深度注入');
+          refresh();
+          return;
+        }
+        if (el.dataset?.outlineQuickDepth) {
+          const n = parseInt(el.value, 10);
+          const nextDepth = Number.isFinite(n) ? Math.max(0, Math.min(20, n)) : 1;
+          settingsApi()?.patchSettings?.({ injectDepth: nextDepth });
+          engine()?.applyInjection?.();
+          showToast(`已更新聊天内注入深度为 ${nextDepth}`);
+          refresh();
+          return;
+        }
         if (el.dataset?.outlineStatus && el.value) {
           engine()?.abort?.();
           data().setNodeStatus(el.dataset.outlineStatus, el.value);

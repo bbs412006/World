@@ -72,7 +72,7 @@ window.OUTLINE_ENGINE = (function() {
   function clearInjection() {
     const ctx = context();
     const st = settings();
-    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 1;
+    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 0;
     const depth = Number.isFinite(Number(st.injectDepth)) ? Math.max(0, Math.min(20, parseInt(st.injectDepth, 10))) : 1;
     if (typeof ctx?.setExtensionPrompt === 'function') {
       ctx.setExtensionPrompt(INJECTION_NAME, '', pos, depth);
@@ -156,7 +156,7 @@ window.OUTLINE_ENGINE = (function() {
     const nodes = getNarrativeNodes(state, st.narrativeLimit || 4);
     const budget = Math.max(200, parseInt(st.injectMaxChars, 10) || 2000);
 
-    const header = '【剧情指导】\n以下为当前阶段的柔性叙事方向，仅供自然铺陈参考；请尊重角色当下选择，不得强行推进或提前剧透未揭示内容。';
+    const header = '【剧情指导】\n以下为当前阶段的出文与叙事方向指导，请将其作为整体行文基调与情节铺陈的柔性参考；尊重角色当下选择与自然互动，切勿生硬赶进度或剧透未揭示内容。';
     const parts = [header];
     let used = header.length;
 
@@ -219,7 +219,7 @@ window.OUTLINE_ENGINE = (function() {
       clearInjection();
       return '';
     }
-    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 1;
+    const pos = [0, 1, 2].includes(Number(st.injectPosition)) ? Number(st.injectPosition) : 0;
     const depth = Number.isFinite(Number(st.injectDepth)) ? Math.max(0, Math.min(20, parseInt(st.injectDepth, 10))) : 1;
     if (typeof ctx?.setExtensionPrompt === 'function') {
       ctx.setExtensionPrompt(INJECTION_NAME, content, pos, depth);

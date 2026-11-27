@@ -121,7 +121,15 @@ function createEnv(initialChat) {
     assert.strictEqual(eng.applyInjection(), '', '未启用时不得注入主聊天');
     assert.strictEqual((await eng.checkNow()).reason, 'disabled');
 
-    cfg.patchSettings({ engineEnabled: true, apiUrl: 'https://outline.test/v1', apiKey: '', model: 'outline-m1', injectPosition: 1, injectDepth: 2 });
+    // 默认启用后应前置注入于主提示词内（position=0）作为出文指导
+    cfg.patchSettings({ engineEnabled: true, apiUrl: 'https://outline.test/v1', apiKey: '', model: 'outline-m1' });
+    const defaultFront = eng.applyInjection();
+    const defaultSlot = env.injections.get('outline-engine-outline');
+    assert.strictEqual(defaultSlot.position, 0, '默认应注入主提示词内（IN_PROMPT=0）作为前置出文指导');
+    assert.ok(defaultFront.startsWith('【剧情指导】') && defaultFront.includes('出文与叙事方向指导'));
+
+    // 支持手动切换至聊天内按深度注入
+    cfg.patchSettings({ injectPosition: 1, injectDepth: 2 });
     const front = eng.applyInjection();
     const slot = env.injections.get('outline-engine-outline');
     assert.strictEqual(slot.position, 1);

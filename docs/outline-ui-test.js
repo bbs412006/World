@@ -80,10 +80,18 @@ async function main() {
   }, 0);
   await ui._test.handleAction('view-tracks');
   const tracksHtml = ui.render();
-  assert.ok(tracksHtml.includes('we-outline-pos-chapter') && tracksHtml.includes('当前章'), '剧情看板应内嵌当前章进度条');
+  assert.ok(tracksHtml.includes('we-outline-pos-chapter') && tracksHtml.includes('we-outline-pos-head') && tracksHtml.includes('当前章'), '剧情看板应内嵌移动端友好当前章进度条');
   assert.ok(!tracksHtml.includes('<script>alert(1)'), '标题必须转义防止 XSS');
   assert.ok(!tracksHtml.includes('<img src=x'), '章节标题必须转义防止 XSS');
   assert.ok(!tracksHtml.includes('<svg onload='), '提示必须转义防止 XSS');
+
+  // 3.2 注入页默认显示前置出文指导位置条与快捷切换控件，且移动端样式契约完整
+  await ui._test.handleAction('view-schedule');
+  const schedHtml = ui.render();
+  assert.ok(schedHtml.includes('we-outline-inject-pos-bar') && schedHtml.includes('前置出文指导 · 主提示词内') && schedHtml.includes('id="we-outline-quick-inject-pos"'), '注入页应展示前置出文指导位置徽章与快捷切换');
+  const outlineCss = fs.readFileSync(path.join(root, 'outline-engine.css'), 'utf8');
+  assert.ok(outlineCss.includes('.we-outline-chapters') && outlineCss.includes('overflow-x: auto') && outlineCss.includes('.we-outline-last-prompt .we-prompt-seg-card'), 'outline-engine.css 应包含剧情与注入页移动端响应式规则');
+  await ui._test.handleAction('view-tracks');
 
   // 3.5 AI 整理文本支持自定义额外要求并自动记忆
   await ui._test.handleAction('open-text');

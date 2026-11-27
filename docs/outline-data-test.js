@@ -28,12 +28,21 @@ for (const file of ['outline-engine-settings.js', 'outline-engine-data.js', 'out
 const data = sandbox.OUTLINE_ENGINE_DATA;
 const settings = sandbox.OUTLINE_ENGINE_SETTINGS;
 
-// 1. 设置归一化：空温度回退 0.2，空 topP 回退 null，默认 8192
+// 1. 设置归一化：空温度回退 0.2，空 topP 回退 null，默认 8192，默认前置出文注入（injectPosition=0）与旧版一次性迁移
 {
+  // 模拟旧版默认配置（聊天内深度 1）在升级后平滑迁移至主提示词内（IN_PROMPT=0）
+  storeMap.set('outline_engine_settings', JSON.stringify({ engineEnabled: true, injectPosition: 1, injectDepth: 1 }));
+  const migrated = settings.getSettings(true);
+  assert.strictEqual(migrated.injectPosition, 0, '旧版默认 injectPosition=1/depth=1 应一次性迁移至主提示词内（0）作为前置出文指导');
+  // 迁移完成后用户手动改回 position=1 不应再被覆盖
+  settings.patchSettings({ injectPosition: 1, injectDepth: 1 });
+  assert.strictEqual(settings.getSettings(true).injectPosition, 1, '迁移标记落盘后应尊重用户手动切回的位置');
+
   const s = settings.saveSettings({ temperature: '', maxTokens: '', topP: '', checkEveryX: 0, injectDepth: 99 });
   assert.strictEqual(s.temperature, 0.2, '空温度应回退默认 0.2 而非 0');
   assert.strictEqual(s.maxTokens, 8192, '空 maxTokens 应回退默认 8192');
   assert.strictEqual(s.topP, null, '空 topP 应保持 null');
+  assert.strictEqual(s.injectPosition, 0, '默认注入位置应为主提示词内（0）');
   assert.strictEqual(s.checkEveryX, 1, 'checkEveryX 下限 1');
   assert.strictEqual(s.injectDepth, 20, 'injectDepth 上限 20');
   assert.strictEqual(s.engineEnabled, false, '默认关闭大纲模块');

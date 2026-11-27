@@ -383,13 +383,34 @@
   margin: 4px 0;
 }
 .we-outline-pos-chapter {
-  padding: 7px 10px;
+  padding: 8px 10px;
   margin: 6px 0 8px;
   border-radius: 7px;
   border: 1px solid var(--we-hairline);
   background: var(--we-bg2);
 }
 .we-outline-pos-chapter strong { color: var(--we-text); font-size: 13px; }
+.we-outline-pos-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.we-outline-pos-meta {
+  font-size: 11px;
+  color: var(--we-text3);
+  font-variant-numeric: tabular-nums;
+}
+.we-outline-pos-goal { margin: 6px 0 0; }
+.we-outline-pos-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+.we-outline-pos-nav .we-btn { margin: 0; padding: 3px 9px; font-size: 11px; }
 .we-outline-pos-nodes { display: flex; flex-direction: column; gap: 2px; }
 .we-outline-pos-foot {
   margin-top: 8px;
@@ -399,6 +420,84 @@
   color: var(--we-text3);
   text-align: right;
 }
+.we-outline-inject-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.we-outline-inject-head .we-section-title {
+  margin-bottom: 0;
+  min-width: 0;
+}
+.we-outline-inject-stat {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--we-hairline);
+  background: var(--we-bg2);
+  color: var(--we-text3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.we-outline-inject-pos-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 9px;
+  margin: 6px 0 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--we-gold) 28%, var(--we-border));
+  background: color-mix(in srgb, var(--we-gold) 6%, var(--we-bg2));
+}
+.we-outline-inject-pos-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.we-outline-inject-pos-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 170px;
+  min-width: 0;
+}
+.we-outline-inject-pos-controls select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 7px;
+  font-size: 11.5px;
+}
+.we-outline-inject-pos-controls input[type="number"] {
+  width: 60px;
+  flex: 0 0 60px;
+  padding: 4px 6px;
+  font-size: 11.5px;
+  text-align: center;
+}
+.we-outline-inject-fold > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.we-outline-inject-fold > summary::-webkit-details-marker { display: none; }
+.we-outline-inject-fold > summary .we-section-title::before {
+  content: "▸";
+  display: inline-block;
+  width: 11px;
+  font-size: 10px;
+  color: var(--we-text3);
+  margin-right: 4px;
+}
+.we-outline-inject-fold[open] > summary .we-section-title::before {
+  content: "▾";
+}
 .we-outline-inject-preview pre {
   margin-top: 6px;
   padding: 8px 10px;
@@ -407,6 +506,10 @@
   background: var(--we-bg);
   max-height: 260px;
   overflow: auto;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+  -webkit-overflow-scrolling: touch;
 }
 .we-outline-board-toolbar {
   display: flex;
@@ -571,5 +674,244 @@
   .we-face-pill.is-running .we-face-pill-dot { animation: none; }
 }
 @media (max-width: 520px) {
+  .we-outline-root { gap: 8px; }
   .we-outline-form-grid { grid-template-columns: 1fr; }
+
+  /* 移动端减少多层卡片嵌套内边距，释放内容横向空间 */
+  .we-outline-home-chapter,
+  .we-outline-inject-preview,
+  .we-outline-last-prompt {
+    padding: 10px 10px;
+  }
+  .we-outline-track {
+    padding: 9px 9px;
+    margin-bottom: 8px;
+  }
+  .we-outline-sec-title {
+    font-size: 15.5px;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+  }
+
+  /* 剧情页：当前章进度条与上下章快捷栏 */
+  .we-outline-pos-chapter { padding: 8px 9px; }
+  .we-outline-pos-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+  }
+  .we-outline-pos-nav {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    width: 100%;
+    gap: 6px;
+  }
+  .we-outline-pos-nav .we-btn {
+    width: 100%;
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 12px;
+    text-align: center;
+  }
+
+  /* 剧情页：看板工具条双行满宽对齐 */
+  .we-outline-board-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 7px;
+    padding: 4px 0 9px;
+  }
+  .we-outline-seg {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .we-outline-seg-btn {
+    padding: 7px 8px;
+    font-size: 12px;
+    min-height: 32px;
+    text-align: center;
+  }
+  .we-outline-board-toolbar .we-outline-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .we-outline-board-toolbar .we-outline-actions .we-btn {
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 4px;
+    font-size: 12px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* 剧情页：按章节模式改为单行横向轻滑轨道，避免章节过多占满首屏 */
+  .we-outline-chapters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
+    padding-bottom: 5px;
+    margin-bottom: 10px;
+    scrollbar-width: thin;
+  }
+  .we-outline-chapter {
+    flex: 0 0 auto;
+    min-width: 112px;
+    max-width: 78%;
+    padding: 7px 10px;
+    scroll-snap-align: start;
+  }
+
+  /* 剧情页：剧情线与章节详情操作区上下分层 + 增大触控面积防误触 */
+  .we-outline-track > .we-outline-section-head,
+  .we-outline-chapter-detail > .we-outline-section-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .we-outline-track-ops {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 5px;
+  }
+  .we-outline-track-ops .we-btn {
+    min-height: 28px;
+    padding: 4px 9px;
+    font-size: 11.5px;
+  }
+  .we-outline-track-ops .we-icon-btn,
+  .we-outline-node-ops .we-icon-btn {
+    width: 30px;
+    height: 28px;
+    font-size: 12px;
+  }
+
+  /* 剧情页：节点卡片标题独占全宽，操作图标下沉至轻量底条，彻底解决窄屏挤压与误删 */
+  .we-outline-node {
+    padding: 9px 9px;
+    margin: 7px 0;
+  }
+  .we-outline-node.is-collapsed { padding: 8px 9px; }
+  .we-outline-node-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .we-outline-node-toggle {
+    width: 28px;
+    height: 28px;
+    margin-top: -2px;
+  }
+  .we-outline-node-title-wrap {
+    flex: 1 1 calc(100% - 36px);
+  }
+  .we-outline-node-head > .we-outline-node-ops {
+    flex: 0 0 100%;
+    justify-content: flex-end;
+    gap: 6px;
+    padding-top: 5px;
+    margin-top: 2px;
+    border-top: 1px dashed var(--we-hairline);
+  }
+  .we-outline-node-snippet {
+    margin: 5px 0 0 0;
+    font-size: 11.5px;
+  }
+  .we-outline-status-select {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .we-outline-status-select select {
+    min-height: 32px;
+    min-width: 124px;
+    font-size: 12px;
+  }
+  .we-outline-inline-editor { padding: 9px; }
+  .we-outline-inline-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+  .we-outline-inline-actions .we-btn {
+    width: 100%;
+    min-height: 32px;
+    text-align: center;
+  }
+  .we-outline-plan-tools .we-btn { min-height: 30px; }
+
+  /* 注入页：前置出文指导位置快捷栏、预览框与上次提示词逐条列表防溢出优化 */
+  .we-outline-inject-pos-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px 9px;
+  }
+  .we-outline-inject-pos-controls {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  .we-outline-inject-pos-controls select,
+  .we-outline-inject-pos-controls input[type="number"] {
+    min-height: 32px;
+    font-size: 12px;
+  }
+  .we-outline-inject-preview pre {
+    max-height: 210px;
+    padding: 8px;
+    font-size: 11.5px;
+    line-height: 1.6;
+  }
+  .we-outline-last-prompt .we-last-prompt-order {
+    padding: 8px;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+  .we-outline-last-prompt .we-last-prompt-chips { gap: 4px; }
+  .we-outline-last-prompt .we-mod-chip {
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.4;
+    padding: 2px 7px;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card-raw .we-prompt-seg-head {
+    gap: 5px;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card-raw .we-prompt-seg-label {
+    flex: 1 1 150px;
+    min-width: 0;
+    font-size: 11.5px;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card-raw .we-prompt-inline-btn {
+    flex: 1 1 calc(50% - 6px);
+    min-height: 28px;
+    padding: 4px 8px;
+    text-align: center;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card:not(.we-prompt-seg-card-raw) .we-prompt-seg-head {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    column-gap: 5px;
+    padding: 7px 7px;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card:not(.we-prompt-seg-card-raw) .we-prompt-seg-label {
+    flex: 1 0 100%;
+    order: 10;
+    padding-left: 15px;
+    font-size: 11px;
+  }
+  .we-outline-last-prompt .we-prompt-seg-card:not(.we-prompt-seg-card-raw) .we-prompt-seg-meta {
+    margin-left: auto;
+  }
+  .we-outline-last-prompt .we-prompt-seg-pre {
+    max-height: 240px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 380px) {
+  .we-outline-chapter { max-width: 84%; }
+  .we-outline-board-toolbar .we-outline-actions .we-btn { font-size: 11.5px; }
 }
